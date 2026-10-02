@@ -250,8 +250,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   the node limits below). Past circuits stay closed to such a substitution.
 - Nodes publish their descriptors themselves and there is no directory: a node can show
   different keys to different roster nodes, and so to the clients of different entries.
-- The clocks of nodes and clients must agree within 2 minutes (the Skew allowance). kind nodes run
-  on the host clock.
+- The clocks of nodes and clients must agree within 2 minutes (the Skew allowance). With a
+  -descriptor-ttl under 16 minutes a client's clock may run ahead of its entry's by an eighth
+  of that lifetime at most, the margin the mirror keeps before a bundle expires (ARCHITECTURE,
+  section "Roster, peer descriptors and the mirror"). kind nodes run on the host clock.
 - On the GOST suite every signature leaves heap copies of the signing scalar and the one-time
   number k as math/big: the request, the certificate, every timer re-signing of the descriptor,
   each half of -descriptor-ttl, and the signing at every rotation of the onion key (CRYPTO, known

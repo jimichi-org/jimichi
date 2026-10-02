@@ -67,13 +67,15 @@ var (
 type peerEntry struct {
 	bundle  []byte
 	linkPub []byte
-	// unix seconds: when the bundle is fetched again and when it is dropped
-	due     int64
-	expires int64
+	// unix seconds: when the descriptor was signed, when the bundle is fetched
+	// again and when it is dropped
+	published int64
+	due       int64
+	expires   int64
 }
 
-// what the info port serves as /descriptors, with the moment its first bundle
-// runs out
+// what the info port serves as /descriptors, with the moment the next bundle
+// leaves or joins it
 type mirror struct {
 	body  []byte
 	until int64
@@ -85,11 +87,13 @@ type peerCache struct {
 	self  string
 	addrs []string
 	// the bundle this node serves itself and when it runs out
-	own    func() ([]byte, int64, bool)
-	fetch  func(addr string) ([]byte, error)
-	read   func(addr string, bundle []byte, now time.Time) (*peerEntry, error)
-	now    func() time.Time
-	retry  time.Duration
+	own   func() ([]byte, int64, bool)
+	fetch func(addr string) ([]byte, error)
+	read  func(addr string, bundle []byte, now time.Time) (*peerEntry, error)
+	now   func() time.Time
+	retry time.Duration
+	// seconds before its expiry at which a peer's bundle leaves the mirror
+	margin int64
 	logger *log.Logger
 
 	mu      sync.Mutex
@@ -114,10 +118,26 @@ func newPeerCache(n *node, addrs []string, read func(string, []byte, time.Time) 
 		read:    read,
 		now:     n.now,
 		retry:   retry,
+		margin:  int64(mirrorMargin(n.ttl) / time.Second),
 		logger:  n.logger,
 		entries: make(map[string]*peerEntry, len(addrs)),
 		failed:  make(map[string]string),
 	}
+}
+
+// a client checks a bundle on its own clock, so the mirror holds a peer's
+// bundle only while a clock up to Skew ahead of this node's finds it valid. An
+// eighth of this node's own descriptor lifetime bounds the margin: a peer signs
+// again between a half and three quarters of a short lifetime, and its next
+// descriptor has to arrive before the held one leaves the mirror
+func mirrorMargin(ttl time.Duration) time.Duration {
+	return max(min(pki.Skew, ttl/8), 0)
+}
+
+// the verifier's allowance covers a clock behind the signer's on the published
+// edge, so there the node's own clock decides and no margin is needed
+func (c *peerCache) mirrored(e *peerEntry, now int64) bool {
+	return now >= e.published && now < e.expires-c.margin
 }
 
 // Verify bounds the descriptor by its certificate, so expires alone ends the entry
@@ -132,7 +152,7 @@ func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []by
 		if err != nil {
 			return nil, err
 		}
-		return &peerEntry{bundle: bundle, linkPub: v.LinkPub, due: s.published + (s.expires-s.published)/2, expires: s.expires}, nil
+		return &peerEntry{bundle: bundle, linkPub: v.LinkPub, published: s.published, due: s.published + (s.expires-s.published)/2, expires: s.expires}, nil
 	}
 }
 
@@ -175,7 +195,11 @@ func (c *peerCache) refresh() bool {
 			}
 		} else {
 			delete(c.failed, addr)
-			c.entries[addr] = fresh
+			// a bundle the mirror cannot hold yet does not displace one it holds; the
+			// held entry stays due, so the peer is asked again after the retry pause
+			if e == nil || c.mirrored(fresh, now.Unix()) || !c.mirrored(e, now.Unix()) {
+				c.entries[addr] = fresh
+			}
 		}
 		c.mu.Unlock()
 	}
@@ -201,11 +225,14 @@ func (c *peerCache) publish() {
 	// would empty the mirror of every node it withholds from
 	for _, addr := range c.addrs {
 		e := c.entries[addr]
-		if e == nil || now >= e.expires {
-			continue
+		switch {
+		case e == nil:
+		case now < e.published:
+			until = min(until, e.published)
+		case c.mirrored(e, now):
+			entries = append(entries, pki.MirrorEntry{Addr: addr, Bundle: e.bundle})
+			until = min(until, e.expires-c.margin)
 		}
-		entries = append(entries, pki.MirrorEntry{Addr: addr, Bundle: e.bundle})
-		until = min(until, e.expires)
 	}
 	body, err := pki.MarshalMirror(entries)
 	if err != nil {
@@ -263,8 +290,8 @@ func (c *peerCache) held() int {
 func (c *peerCache) descriptors() ([]byte, bool) {
 	m := c.mirror.Load()
 	if m != nil && c.now().Unix() >= m.until {
-		// an entry ran out since the last refresh: it is dropped here once, and the
-		// rebuilt mirror lasts until the next entry runs out
+		// a bundle left or joined since the last refresh: the mirror is rebuilt here
+		// once and lasts until the next such moment
 		c.publish()
 		m = c.mirror.Load()
 	}

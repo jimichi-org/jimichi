@@ -382,11 +382,13 @@ func TestMirroredBundleOfTheReplacedKeyStaysUsable(t *testing.T) {
 			c.route(n2.n.addr, "")
 
 			step(30 * time.Minute)
-			step(30*time.Minute - time.Second)
+			// the bundle leaves the mirror 120 s before it expires: one second
+			// earlier a clock 119 s ahead reads 2 s before the expiry
+			step(30*time.Minute - pki.Skew - time.Second)
 			held := mirrored()
-			v, err := pki.Verify(c.p, pki.Policy{Anchor: c.ca.Anchor(), Skew: pki.Skew}, n2.n.addr, held, c.clock.Now())
+			v, err := pki.Verify(c.p, pki.Policy{Anchor: c.ca.Anchor(), Skew: pki.Skew}, n2.n.addr, held, c.clock.Now().Add(pki.Skew-time.Second))
 			if err != nil {
-				t.Fatalf("the mirrored bundle a second before it expires: %v", err)
+				t.Fatalf("the mirrored bundle a second before it leaves the mirror, on a clock 119 s ahead: %v", err)
 			}
 			if v.Epoch != 0 || !bytes.Equal(v.OnionPub, k0) || !v.DescUntil.Equal(rotated.Add(time.Hour)) {
 				t.Fatalf("relay-1 mirrors epoch %d until %v, want the bundle signed for the replaced key at the rotation", v.Epoch, v.DescUntil)
@@ -398,8 +400,9 @@ func TestMirroredBundleOfTheReplacedKeyStaysUsable(t *testing.T) {
 
 			step(time.Second)
 			if listed := n1.mirrored(t); len(listed) == 0 || slices.Contains(listed, n2.n.addr) {
-				t.Fatalf("GET /descriptors once the held bundle expired lists %v, want the mirror without relay-2", listed)
+				t.Fatalf("GET /descriptors 120 s before the held bundle expires lists %v, want the mirror without relay-2", listed)
 			}
+			c.clock.advance(pki.Skew)
 			if err := n2.verifyAt(held, c.clock.Now()); !errors.Is(err, pki.ErrDescTime) {
 				t.Fatalf("the held bundle at its expiry = %v, want %v", err, pki.ErrDescTime)
 			}
