@@ -332,21 +332,29 @@ func testTranscriptSeparates(t *testing.T, p jcrypto.CryptoProvider) {
 }
 
 // Golden vectors of the key schedule. Common inputs: K = 40 41 .. 5f, P = the
-// public key size of the suite (32 or 64), version 02, link id 200.
+// public key size of the suite (32 or 64), I = the identity key size of the
+// suite (32, an Ed25519 key, or 64), version 02, link id 200.
 //
 //	G1  setup: 02, 00, 00000000000000c8, onion 80..(80+P-1), ephemeral 00..(P-1)
 //	G2  link:  02, 01, ephI 00.., ephR 40.., static 80.. (P bytes each)
 //	G3  link:  02, 00, ephI 00.., ephR 40..
+//	G4  setup: the parts of G1, then identity c0..(c0+I-1)
+//	G5  link:  the parts of G2, then identity c0..(c0+I-1)
 //
-//	T  = "jimichi/v1/<suite>/transcript/<exchange>" || 00 || u8(n) || n times (u16be(len) || part)
+// G1 to G3 are the transcripts of nodes that run without authentication, G4
+// and G5 those of an authenticated node, which binds its identity key.
+//
+//	T  = "jimichi/v2/<suite>/transcript/<exchange>" || 00 || u8(n) || n times (u16be(len) || part)
 //	th = Hash(T)
 //
-// T(G1) on c25519, 120 bytes:
+// T(G1) on c25519, 120 bytes, and T(G4), 154 bytes:
 //
-//	6a696d696368692f76312f6332353531392f7472616e7363726970742f7365747570 00 05
+//	6a696d696368692f76322f6332353531392f7472616e7363726970742f7365747570 00 05
 //	0001 02  0001 00  0008 00000000000000c8  0020 80..9f  0020 00..1f
+//	6a696d696368692f76322f6332353531392f7472616e7363726970742f7365747570 00 06
+//	0001 02  0001 00  0008 00000000000000c8  0020 80..9f  0020 00..1f  0020 c0..df
 //
-// How to recompute without this code, with label = "jimichi/v1/<suite>/<purpose>":
+// How to recompute without this code, with label = "jimichi/v2/<suite>/<purpose>":
 //
 //	c25519  th: sha256sum over T
 //	        DeriveKey(K, purpose, th, n) = HMAC-SHA256(K, label || 00 || th || 01)[:n]
@@ -370,11 +378,12 @@ func testTranscriptSeparates(t *testing.T, p jcrypto.CryptoProvider) {
 // Everything here but the KEK of the Agree vector is a hash or an HMAC, which
 // openssl dgst with gost-engine (md_gost12_256) reproduces as well.
 type goldenSuite struct {
-	pubSize int
-	th      [3]string
-	derive  []goldenDerive
-	mix     string
-	agree   goldenAgree
+	pubSize, idSize int
+	th              [5]string
+	derive          []goldenDerive
+	// MixKey(K, 60..7f) under G2 and under G5
+	mix   [2]string
+	agree goldenAgree
 }
 
 type goldenDerive struct {
@@ -396,60 +405,86 @@ type goldenAgree struct {
 var golden = map[jcrypto.Suite]goldenSuite{
 	jcrypto.SuiteC25519: {
 		pubSize: 32,
-		th: [3]string{
-			"bf5988647af2c8b161b8992b8015c2bea0aed5837cc53e37b60450f5fc43aeb7",
-			"70b1a866bbce04b1e398435c381fe1cb1e9160a8d7e54a86efe2763c51353fd1",
-			"412a81d7b53b40da47fab9eade99cd91d6b4c56b40d2a2d7e0c5d85a88fb9381",
+		idSize:  32,
+		th: [5]string{
+			"b14c23db2eb7be7e6fb80d79859e002ef40b6c2262082d633aa6d44a2e00928c",
+			"7b9ee2ddeffae097fbe33d8a86e4f800bad67ed18db7886ee15105fa47945c28",
+			"9316cc227c129bc7bc39fe454668267767c8b86735e7d11e6b78de56fbdac044",
+			"3f1268d9cdfeaff916445d4aa1648775fb3a3f290da1142fb0e9128c04422ecb",
+			"bd1fd058596e45ce436a42fe19f45c2f64bef277aef7bcfd0f3353f6737ef7b3",
 		},
 		derive: []goldenDerive{
-			{0, "setup", 32, "bbdb94e3db59eb24395f61014dd755ca9c42c4fad7744b70f74818fbb063cf72"},
-			{0, "cell", 32, "53c25931ed7343bc6b7863ee8b0dcb2092bdf345c173f9af84e1ed9673c28c2d"},
-			{0, "setup/replay", 16, "39131933108b87d63360f0a508b0c163"},
-			{0, "counter/fwd", 8, "bdeca6ae015c8e00"},
-			{0, "counter/bwd", 8, "29b99d95ce52c6cc"},
-			{1, "link/i2r", 32, "cb4c6f2fd373b45125177550d5a0346ee485d6ff0b40e0c416085bfadb4e2f56"},
-			{1, "link/r2i", 32, "13a0e7369e8b5a94789d6c026d4141ee94df3a5d0876554018a12c5fcff171bd"},
-			{2, "link/i2r", 32, "ead3c39eaf9538eff5d8eaf7cba03de331ab76aa8eaa1c5f49c5acf15c93878f"},
-			{2, "link/r2i", 32, "d7bd715509b70ea6aebed17bc9c4aa6dfa71912d4016be09c344eed12649b4f2"},
+			{0, "setup", 32, "3be4d1bde0b01736abc783e3d09a8a40c2b36050fc0189d8b05e44be168d17c8"},
+			{0, "cell", 32, "b8e38a217f8605cb0bdc75cf48da41c2237c9ec479d3e571b828629a0683c885"},
+			{0, "setup/replay", 16, "a91ad345b318c5fade8f9b753b484c2e"},
+			{0, "counter/fwd", 8, "5bdc9f320a581f9d"},
+			{0, "counter/bwd", 8, "c0745a8762bbd942"},
+			{1, "link/i2r", 32, "456d332a3c5d790b2f204d9470ffa5e478680913a59a246d5ca10abe37d15da4"},
+			{1, "link/r2i", 32, "5afbc3ca7108d67951bab867139b78d9db283d00a7b8e61fdf80897067ac70ed"},
+			{2, "link/i2r", 32, "7c3d311a20dfe55f3b1ac596a18cdec59daf83cf5d90dd7831c6204887cddc8f"},
+			{2, "link/r2i", 32, "f339ccb189810853e16130ff3c0cdf7caf0209dcff9c78a82d6d716ed163a0bb"},
+			{3, "setup", 32, "046a0567cda9fbc0126de5b10f515d7b0b9c62876c3eaa02532f34ab2599a888"},
+			{3, "cell", 32, "2204363eb5c2b04ae91f46cfa71343babfa9fa1c4c0683eca43dbf4e102e0046"},
+			{3, "setup/replay", 16, "8d794dcc9e796c57cdd5d68b7ca4dc2c"},
+			{3, "counter/fwd", 8, "fa24c2e6990665f2"},
+			{3, "counter/bwd", 8, "f6ca6ef42dae9b09"},
+			{4, "link/i2r", 32, "921feb1700aaf54a43d61778e02ef58838f20ce387e635f7df69478f8da7766c"},
+			{4, "link/r2i", 32, "9ca621f67bb3f1e9f5decebbc1e7b8c6fabcf16a5a85baa9e873cdfc4ce287c4"},
 		},
-		mix: "5c607126ffc60f41031bb890ad1690aac86a11950e034fff1c13a461eefc7986",
+		mix: [2]string{
+			"afb0cba8f71ea59fc429db92ef6b09db684d2b4287136e84c1cd8b68316362aa",
+			"8eb7f7bd81d2df19d759a0630d43ce3f61737815b574312b77bad9f2553c42f7",
+		},
 		// the keys of RFC 7748, 6.1, whose shared secret
 		// Z = 4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742
 		// is published there, so no curve arithmetic is needed to recompute:
 		// PRK = HMAC-SHA256(th, Z) =
-		// ed81c394df51741baeedcf9854644eb6194cc74841f878c6ef1bfc3a7e061019
+		// 3e072338d211eb117a12d300b092c1d8b111e8cdb5ee100e02971c8feb5637e1
 		agree: goldenAgree{
 			privA:    "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
 			pubA:     "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
 			privB:    "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
 			pubB:     "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
-			th:       "2b69213d29f83bb7d5462cf15a8d6fe210293961f064da936e3e659477d96eb3",
-			secret:   "870bde20fe244bf87732677687c31b9c89a245b9fe102471babcfc7123dddd15",
-			setupKey: "0a0d88469644b07cd9797e2eef6c2efcde74cc78964d74940ff7e77656772e02",
+			th:       "9a36822448c9656a7090ab79e3cc8b4d8b1acdf009a936970f883b852456625d",
+			secret:   "0aad4e69e20b355b496adc24bc7c26ec1804a55b6df48c5af7771bb12b89f7d2",
+			setupKey: "cf9dfbd0cfec9ab8a8ef01637d50d7eb8b3d927ccb2707baa589d55589f1412c",
 		},
 	},
 	jcrypto.SuiteGOST: {
 		pubSize: 64,
-		th: [3]string{
-			"89a0d93bcff53a1914892c6fdf5b8cad7a726f6678cb09c01d91aa532a2b5f1c",
-			"27f9517518d0f810964dc8caa1f85fd088216ec3a1b4140482a27ea8f1339ce0",
-			"9d44cf104c23a21dc4d25daf8383d800307304309eea1ee7b651d2c00da3afe2",
+		idSize:  64,
+		th: [5]string{
+			"c4aff7e929db19a4171ed91d841bfe6ce2658d957a5fa5dc80ef69a76cae1080",
+			"95d4af2336fd54e2bbcfbc13378c70c73107c3065996119a68aba055bcda8d76",
+			"bafb88554bdd02d048d3d96a04233f38bedf2fdac0d69b1550dbf9ff5ead0d1a",
+			"d7117c1346e610f6d636fed3a24a065a1ff72ada68631ad72a1bc2970cfdd646",
+			"9e660f347729b9614cb118a0fbc0135beed6faecab74a0e0974c185049c8c5af",
 		},
 		derive: []goldenDerive{
-			{0, "setup", 32, "e79642ec159e3952d9f73857e904c805e34c77aeafbc861966c174c7243e3925"},
-			{0, "cell", 32, "8610ecb34c90a4a7107f4572268da52bea9e39504426c7ca963f3449ae11cd66"},
-			{0, "setup/replay", 16, "f55b60a5c251ada92ee3c75356bedc4e"},
-			{0, "counter/fwd", 8, "2f610511654c3e3a"},
-			{0, "counter/bwd", 8, "bf3555cb42b9c5ed"},
-			{1, "link/i2r", 32, "bd1e75680c071be9a5f8e676bf26bfb86c2015252544d040c9c2624e32cee6b9"},
-			{1, "link/r2i", 32, "ff23986d951a4ea71f3478c82497295e84ef82386a230b2e0fbdda3dba1caf9b"},
-			{2, "link/i2r", 32, "580774a14697a2bf809b813ec8913c722f61689f6744041f88732c1c8fa68eba"},
-			{2, "link/r2i", 32, "156bb92d584bca80759e34b4cc815e94e97f6414c484d35509be9960e5e7efd7"},
+			{0, "setup", 32, "8cb409e5dbc6ba5f515608fe4d84c235192992c3651f60e06ffd9c17b56de770"},
+			{0, "cell", 32, "b0a575c9e02e28d89c4e55d04154bba2d1e2d194e8ace4a67a502ee0642b9890"},
+			{0, "setup/replay", 16, "fe55f2aeb817f4121303e4a73e28387a"},
+			{0, "counter/fwd", 8, "95a2d1cbcee19679"},
+			{0, "counter/bwd", 8, "1235e4fa8c36603b"},
+			{1, "link/i2r", 32, "9931e37dc573ede34bd3ad27c3106b7080f569ec55acaa223a24b6eb815a994f"},
+			{1, "link/r2i", 32, "3df6c1576cda7f124b8695f706aeec28aed12509211b6418ebbceaaf58b396f0"},
+			{2, "link/i2r", 32, "0d0b7044a27f118c322897659557627b3f04324c156422ced3283e8a0c3f5c10"},
+			{2, "link/r2i", 32, "c90610d21c71acf2f1b7745e8dac22938128744c81069609423ad42e052d3e45"},
+			{3, "setup", 32, "461de0c5c0903f5b8a80aa8750e825bbf2d1314e8f87859e608175cc4507a092"},
+			{3, "cell", 32, "96c4f0df39cc40d21c65bd26133261e7be8318fbe2e9fbcb8a6ad422ed58ade2"},
+			{3, "setup/replay", 16, "3962cc9064affa479f1d8152a1888239"},
+			{3, "counter/fwd", 8, "21e06998e88f5a34"},
+			{3, "counter/bwd", 8, "eeee7d74a91ab022"},
+			{4, "link/i2r", 32, "67e7e5e5ff3071cf929f5301222d687f204c05936ae1eefc59c2bd021341e4bd"},
+			{4, "link/r2i", 32, "6b1941655ac88a53101e939b3d971f8b092d79b98b3a0ccf007fdeaab381ccf8"},
 		},
-		mix: "76407e65b18e593b841a48d07c4dbe53f7d4efe3a1826bbf0720ac1d41c3a829",
+		mix: [2]string{
+			"c0135e5bc83af1586c67367eda0e249e6c0a45e30e2259da474ed7d6939f87ba",
+			"cf2f4b9dc41a6ffc371f61629ca322f056cc63efe79eb56af57cc7bb25d9e1e6",
+		},
 		// private keys 01..20 and 11..30 as little-endian scalars, both below q;
-		// UKM = 28381a1c9c8e2531 (th[0:8]),
-		// KEK = e50506395189f57d28577d26b265f204e048cb78976dd3bee1fbe7098d75ca94;
+		// UKM = d45eab779d45b756 (th[0:8]),
+		// KEK = db1d15909ad1f826e3b9d90415c62109049c866ca16527b1f948d6717da94a5d;
 		// after the KEK everything is one HMAC
 		agree: goldenAgree{
 			privA: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
@@ -458,9 +493,9 @@ var golden = map[jcrypto.Suite]goldenSuite{
 			privB: "1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30",
 			pubB: "b6749ce1d202dd4550a1ad7a8797e16e47cfdb0a0b446465e447f56abb4dae1b" +
 				"43cad001b96e51d4f10df16549327c9eea30e0a74adf0ce5a01c5934ec52edc6",
-			th:       "28381a1c9c8e25317741bfb03e9d4748c573c6d2750e97df93da1a936c513ce7",
-			secret:   "5c5fec204c5e66ce9b4286dca04128aded5d48a3e42be031edda68e3e8ee8ae0",
-			setupKey: "7e9d78151bab2b2fd46d348e3a08aeba7a9aacfc406b301fb05b1220d833babb",
+			th:       "d45eab779d45b756ba089fbd37b460605cce1d0134ffd35a427c890a0534cfab",
+			secret:   "b74c9d0d1d398c730511412f208be70a2af2b00a6b805f2b80161dc965e41735",
+			setupKey: "e862ff81e89e89d1d98c392bcfe08cdab52de9de8506d8ef01fbe2110408dfff",
 		},
 	},
 }
@@ -474,13 +509,16 @@ func goldenFor(t *testing.T, p jcrypto.CryptoProvider) goldenSuite {
 	return g
 }
 
-func goldenContexts(t *testing.T, p jcrypto.CryptoProvider) [3]jcrypto.Context {
+func goldenContexts(t *testing.T, p jcrypto.CryptoProvider) [5]jcrypto.Context {
 	t.Helper()
-	n := goldenFor(t, p).pubSize
-	return [3]jcrypto.Context{
+	g := goldenFor(t, p)
+	n, id := g.pubSize, seq(0xc0, g.idSize)
+	return [5]jcrypto.Context{
 		mustContext(t, p, "setup", []byte{0x02}, []byte{0x00}, []byte{0, 0, 0, 0, 0, 0, 0, 200}, seq(0x80, n), seq(0x00, n)),
 		mustContext(t, p, "link", []byte{0x02}, []byte{0x01}, seq(0x00, n), seq(0x40, n), seq(0x80, n)),
 		mustContext(t, p, "link", []byte{0x02}, []byte{0x00}, seq(0x00, n), seq(0x40, n)),
+		mustContext(t, p, "setup", []byte{0x02}, []byte{0x00}, []byte{0, 0, 0, 0, 0, 0, 0, 200}, seq(0x80, n), seq(0x00, n), id),
+		mustContext(t, p, "link", []byte{0x02}, []byte{0x01}, seq(0x00, n), seq(0x40, n), seq(0x80, n), id),
 	}
 }
 
@@ -490,6 +528,14 @@ func testGoldenTranscript(t *testing.T, p jcrypto.CryptoProvider) {
 	priv.Release()
 	if len(pub) != g.pubSize {
 		t.Fatalf("public key of %d bytes, the vectors assume %d", len(pub), g.pubSize)
+	}
+	signing, identity, err := p.GenerateSigning()
+	if err != nil {
+		t.Fatalf("GenerateSigning: %v", err)
+	}
+	signing.Release()
+	if len(identity) != g.idSize {
+		t.Fatalf("identity key of %d bytes, the vectors assume %d", len(identity), g.idSize)
 	}
 	for i, ctx := range goldenContexts(t, p) {
 		if got := hex.EncodeToString(ctx.Sum()); got != g.th[i] {
@@ -517,9 +563,12 @@ func testGoldenMixKey(t *testing.T, p jcrypto.CryptoProvider) {
 	defer chain.Release()
 	secret := fixedSecret(t, 0x60, 32)
 	defer secret.Release()
-	got := hex.EncodeToString(mustMix(t, p, chain, secret, goldenContexts(t, p)[1]))
-	if got != g.mix {
-		t.Fatalf("MixKey(K, 60..7f, G2) = %s, want %s", got, g.mix)
+	ctxs := goldenContexts(t, p)
+	for i, ctx := range []int{1, 4} {
+		got := hex.EncodeToString(mustMix(t, p, chain, secret, ctxs[ctx]))
+		if got != g.mix[i] {
+			t.Fatalf("MixKey(K, 60..7f, G%d) = %s, want %s", ctx+1, got, g.mix[i])
+		}
 	}
 }
 

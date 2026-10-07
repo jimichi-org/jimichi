@@ -11,7 +11,7 @@ const (
 	// changes with any change to the transcript layout, to the derivation
 	// formulas or to the name or size of an existing purpose; a new purpose
 	// leaves it as it is
-	labelPrefix = "jimichi/v1/"
+	labelPrefix = "jimichi/v2/"
 
 	maxNameSize  = 32
 	maxParts     = 255
@@ -28,7 +28,7 @@ var (
 // reproduce the output of Agree, MixKey or the transcript prefix
 var reservedPurposes = []string{"agree", "mix"}
 
-// "jimichi/v1/<suite>/<purpose>": no zero byte, so a provider can put one
+// "jimichi/v2/<suite>/<purpose>": no zero byte, so a provider can put one
 // after it as a separator
 func Label(s Suite, purpose string) ([]byte, error) {
 	if !knownSuite(s) || !validName(purpose) {
@@ -113,7 +113,7 @@ func (c Context) Valid() bool { return c.set && knownSuite(c.suite) }
 
 // the byte string NewContext hashes:
 //
-//	"jimichi/v1/<suite>/transcript/<exchange>" || 00 || u8(n) || n times (u16be(len) || part)
+//	"jimichi/v2/<suite>/transcript/<exchange>" || 00 || u8(n) || n times (u16be(len) || part)
 //
 // the head has no zero byte, so with the separator, the count and the lengths
 // the encoding is injective

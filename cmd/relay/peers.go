@@ -14,6 +14,7 @@ import (
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/internal/fetch"
 	"github.com/jimichi-org/jimichi/pki"
+	"github.com/jimichi-org/jimichi/relay"
 )
 
 // a peer that is missing or due is asked again this soon and no sooner, so one
@@ -65,8 +66,8 @@ var (
 )
 
 type peerEntry struct {
-	bundle  []byte
-	linkPub []byte
+	bundle []byte
+	peer   relay.Peer
 	// unix seconds: when a client may take the bundle, the later of the
 	// descriptor's published time and the certificate's not_before, when the
 	// bundle is fetched again and when it is dropped
@@ -147,7 +148,13 @@ func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []by
 		if err != nil {
 			return nil, err
 		}
-		return &peerEntry{bundle: bundle, linkPub: v.LinkPub, from: max(s.published, s.notBefore), due: s.published + (s.expires-s.published)/2, expires: s.expires}, nil
+		return &peerEntry{
+			bundle:  bundle,
+			peer:    relay.Peer{LinkPub: v.LinkPub, Identity: v.Identity},
+			from:    max(s.published, s.notBefore),
+			due:     s.published + (s.expires-s.published)/2,
+			expires: s.expires,
+		}, nil
 	}
 }
 
@@ -155,11 +162,11 @@ func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []by
 // times, so it is fetched again every minute and never runs out
 func unverifiedPeer(p jcrypto.CryptoProvider) func(string, []byte, time.Time) (*peerEntry, error) {
 	return func(addr string, bundle []byte, now time.Time) (*peerEntry, error) {
-		nodes, err := pki.Unverified(p, []string{addr}, [][]byte{bundle})
+		v, err := pki.Unverified(p, addr, bundle)
 		if err != nil {
 			return nil, err
 		}
-		return &peerEntry{bundle: bundle, linkPub: nodes[0].LinkPub, due: now.Add(maxCheckEvery).Unix(), expires: math.MaxInt64}, nil
+		return &peerEntry{bundle: bundle, peer: relay.Peer{LinkPub: v.LinkPub}, due: now.Add(maxCheckEvery).Unix(), expires: math.MaxInt64}, nil
 	}
 }
 
@@ -263,14 +270,14 @@ func (c *peerCache) wait() time.Duration {
 	return max(wait, c.retry)
 }
 
-func (c *peerCache) linkKey(addr string) ([]byte, bool) {
+func (c *peerCache) peer(addr string) (relay.Peer, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e := c.entries[addr]
 	if e == nil || c.now().Unix() >= e.expires {
-		return nil, false
+		return relay.Peer{}, false
 	}
-	return e.linkPub, true
+	return e.peer, true
 }
 
 func (c *peerCache) held() int {
@@ -301,12 +308,12 @@ func (c *peerCache) descriptors() ([]byte, bool) {
 }
 
 // what relay.Config.Peers asks: before a roster there is no peer at all
-func (n *node) peerKey(addr string) ([]byte, bool) {
+func (n *node) peerKey(addr string) (relay.Peer, bool) {
 	c := n.peers.Load()
 	if c == nil {
-		return nil, false
+		return relay.Peer{}, false
 	}
-	return c.linkKey(addr)
+	return c.peer(addr)
 }
 
 // the roster size and how many of the other nodes are held

@@ -574,9 +574,9 @@ func TestUnsignedNodeServesTheBaselineAndNoEnrollment(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("GET /descriptor = %d", code)
 	}
-	nodes, err := pki.Unverified(p, []string{testAddr}, [][]byte{bundle})
-	if err != nil || !bytes.Equal(nodes[0].OnionPub, pub) {
-		t.Fatalf("Unverified = %v, %v", nodes, err)
+	v, err := pki.Unverified(p, testAddr, bundle)
+	if err != nil || !bytes.Equal(v.OnionPub, pub) {
+		t.Fatalf("Unverified = %v, %v", v, err)
 	}
 	ca := newCA(t, p)
 	if _, err := pki.Verify(p, pki.Policy{Anchor: ca.Anchor()}, testAddr, bundle, time.Now()); !errors.Is(err, pki.ErrFormat) {

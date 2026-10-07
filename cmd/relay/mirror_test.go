@@ -427,7 +427,7 @@ func TestStaleBundleLeavesTheMirrorAndAFreshOneReturns(t *testing.T) {
 	if n2.n.descriptorRequests.Load() != asked {
 		t.Fatal("a request for the descriptors fetched from a peer")
 	}
-	if key, ok := n1.n.peerKey(n2.n.addr); !ok || !bytes.Equal(key, n2.pub) {
+	if key, ok := n1.n.peerKey(n2.n.addr); !ok || !bytes.Equal(key.LinkPub, n2.pub) {
 		t.Fatal("relay-2 is no peer 126 s before its descriptor expires")
 	}
 	if got := n1.stats(t); !strings.Contains(got, `"peers":2`) {

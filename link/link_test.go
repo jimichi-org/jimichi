@@ -89,7 +89,7 @@ func pairOn(t *testing.T, p jcrypto.CryptoProvider, authenticate bool) (*link.Co
 	}
 	done := make(chan res, 1)
 	go func() {
-		c, err := link.Accept(b, p, priv, pub)
+		c, err := link.Accept(b, p, priv, pub, nil)
 		done <- res{c, err}
 	}()
 
@@ -97,7 +97,7 @@ func pairOn(t *testing.T, p jcrypto.CryptoProvider, authenticate bool) (*link.Co
 	if authenticate {
 		static = pub
 	}
-	client, err := link.Dial(rec, p, static)
+	client, err := link.Dial(rec, p, static, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestResponderConfirmsTheKeys(t *testing.T) {
 		m := &meter{Conn: a}
 		accepted := make(chan *link.Conn, 1)
 		go func() {
-			srv, err := link.Accept(b, p, priv, pub)
+			srv, err := link.Accept(b, p, priv, pub, nil)
 			if err != nil {
 				t.Errorf("Accept: %v", err)
 			}
@@ -429,7 +429,7 @@ func TestResponderConfirmsTheKeys(t *testing.T) {
 		if auth {
 			static = pub
 		}
-		client, err := link.Dial(m, p, static)
+		client, err := link.Dial(m, p, static, nil)
 		if err != nil {
 			t.Fatalf("Dial: %v", err)
 		}
@@ -466,18 +466,25 @@ func TestResponderConfirmsTheKeys(t *testing.T) {
 // has then written its hello and nothing else
 func refused(t *testing.T, p jcrypto.CryptoProvider, m *meter, b net.Conn, dialStatic []byte, acceptPriv *secmem.Buffer, acceptPub []byte) {
 	t.Helper()
+	refusedAs(t, p, m, b, dialStatic, nil, acceptPriv, acceptPub, nil)
+}
+
+// the same with the identity the initiator expects and the one the responder
+// binds
+func refusedAs(t *testing.T, p jcrypto.CryptoProvider, m *meter, b net.Conn, dialStatic, dialIdentity []byte, acceptPriv *secmem.Buffer, acceptPub, acceptIdentity []byte) {
+	t.Helper()
 	hello, _ := link.InitiatorHandshakeSize(p)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if srv, err := link.Accept(b, p, acceptPriv, acceptPub); err == nil {
+		if srv, err := link.Accept(b, p, acceptPriv, acceptPub, acceptIdentity); err == nil {
 			defer srv.Close()
 			var c wire.Cell
 			_ = srv.ReadCell(&c)
 		}
 	}()
 
-	client, err := link.Dial(m, p, dialStatic)
+	client, err := link.Dial(m, p, dialStatic, dialIdentity)
 	if !errors.Is(err, link.ErrHandshake) || client != nil {
 		t.Fatalf("Dial = %v, want %v", err, link.ErrHandshake)
 	}
@@ -517,6 +524,73 @@ func TestResponderNamingAnotherKeyIsNotConfirmed(t *testing.T) {
 		a, b := net.Pipe()
 		refused(t, p, &meter{Conn: a}, b, pub, priv, other)
 	})
+}
+
+func identityKey(t *testing.T, p jcrypto.CryptoProvider) []byte {
+	t.Helper()
+	priv, pub, err := p.GenerateSigning()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv.Release()
+	return pub
+}
+
+// node a holds its link key and binds its identity; the descriptor of node c
+// names the link key of a under the identity of c. A handshake meant for c
+// that reaches a is not confirmed, and neither is one where only one side
+// binds an identity. The handshake meant for a is
+func TestHandshakeIsBoundToTheIdentity(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		priv, pub := keyPair(t, p)
+		idA, idC := identityKey(t, p), identityKey(t, p)
+		for _, tc := range []struct {
+			name         string
+			dial, accept []byte
+		}{
+			{"meant for c, reaching a", idC, idA},
+			{"no identity expected, a binds its own", nil, idA},
+			{"the identity of a expected, a binds none", idA, nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				a, b := net.Pipe()
+				refusedAs(t, p, &meter{Conn: a}, b, pub, tc.dial, priv, pub, tc.accept)
+			})
+		}
+
+		a, b := net.Pipe()
+		accepted := make(chan *link.Conn, 1)
+		go func() {
+			srv, err := link.Accept(b, p, priv, pub, idA)
+			if err != nil {
+				t.Errorf("Accept: %v", err)
+			}
+			accepted <- srv
+		}()
+		client, err := link.Dial(a, p, pub, idA)
+		if err != nil {
+			t.Fatalf("Dial meant for a: %v", err)
+		}
+		if server := <-accepted; server != nil {
+			_ = server.Close()
+		}
+		_ = client.Close()
+	})
+}
+
+// an identity binds only together with the link key it goes with, so an
+// anonymous dial that names one is refused before the hello
+func TestDialRefusesAnIdentityWithoutALinkKey(t *testing.T) {
+	p := c25519.New()
+	a, b := net.Pipe()
+	defer b.Close()
+	m := &meter{Conn: a}
+	if conn, err := link.Dial(m, p, nil, identityKey(t, p)); err == nil || conn != nil {
+		t.Fatalf("Dial = %v, want a refusal", err)
+	}
+	if read, written := m.totals(); read != 0 || written != 0 {
+		t.Fatalf("the refused dial read %d and wrote %d bytes", read, written)
+	}
 }
 
 // a hello moved to the other mode on the way is answered under keys the
@@ -581,7 +655,7 @@ func TestAuthenticatedHelloNeedsALinkKey(t *testing.T) {
 			m := &meter{Conn: b}
 			go func() { _, _ = a.Write(append([]byte{1}, pub...)) }()
 			_ = b.SetDeadline(time.Now().Add(2 * time.Second))
-			conn, err := link.Accept(m, p, tc.priv, tc.pub)
+			conn, err := link.Accept(m, p, tc.priv, tc.pub, nil)
 			if !errors.Is(err, link.ErrHandshake) || conn != nil {
 				t.Fatalf("%s: Accept = %v, want %v", tc.name, err, link.ErrHandshake)
 			}
@@ -608,7 +682,7 @@ func TestHelloOfAnUnknownModeIsRefused(t *testing.T) {
 				_, _ = io.Copy(io.Discard, a)
 			}()
 			_ = b.SetDeadline(time.Now().Add(2 * time.Second))
-			conn, err := link.Accept(m, p, priv, pub)
+			conn, err := link.Accept(m, p, priv, pub, nil)
 			if !errors.Is(err, link.ErrHandshake) || conn != nil {
 				t.Fatalf("mode %#02x: Accept = %v, want %v", mode, err, link.ErrHandshake)
 			}
@@ -628,7 +702,7 @@ func TestDialRefusesALinkKeyOfAnotherLength(t *testing.T) {
 			a, b := net.Pipe()
 			m := &meter{Conn: a}
 			_ = a.SetDeadline(time.Now().Add(2 * time.Second))
-			conn, err := link.Dial(m, p, static)
+			conn, err := link.Dial(m, p, static, nil)
 			if !errors.Is(err, link.ErrHandshake) || conn != nil {
 				t.Fatalf("link key of %d bytes: Dial = %v, want %v", len(static), err, link.ErrHandshake)
 			}
@@ -655,13 +729,14 @@ const (
 // The transcript is assembled byte by byte, a second record of the layout
 // next to the one in link:
 //
-//	"jimichi/v1/<suite>/transcript/link" || 00 || u8(parts)
+//	"jimichi/v2/<suite>/transcript/link" || 00 || u8(parts)
 //	  || 0001 version || 0001 mode || u16be(len) initiator key
 //	  || u16be(len) responder key [ || u16be(len) responder link key, mode 01 ]
+//	  [ || u16be(len) responder identity key, mode 01 of an authenticated node ]
 //
 // send seals what the responder writes ("link/r2i"), recv opens what the
 // initiator writes ("link/i2r")
-func handResponder(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPriv *secmem.Buffer, staticPub []byte, how keying) (pub []byte, send, recv jcrypto.AEAD, ok bool) {
+func handResponder(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPriv *secmem.Buffer, staticPub, identity []byte, how keying) (pub []byte, send, recv jcrypto.AEAD, ok bool) {
 	t.Helper()
 	n, _ := link.InitiatorHandshakeSize(p)
 	hello := make([]byte, n)
@@ -680,8 +755,11 @@ func handResponder(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, static
 	keys := [][]byte{peerEph, pub}
 	if mode == 1 {
 		keys = append(keys, staticPub)
+		if identity != nil {
+			keys = append(keys, identity)
+		}
 	}
-	transcript := []byte("jimichi/v1/" + p.Suite().String() + "/transcript/link")
+	transcript := []byte("jimichi/v2/" + p.Suite().String() + "/transcript/link")
 	transcript = append(transcript, 0x00, byte(2+len(keys)))
 	transcript = append(transcript, 0x00, 0x01, wire.Version)
 	transcript = append(transcript, 0x00, 0x01, mode)
@@ -749,7 +827,7 @@ func handResponder(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, static
 // what a responder writes: its public key and frame 0 carrying the given cell
 func answerWith(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPriv *secmem.Buffer, staticPub []byte, how keying, first *wire.Cell) {
 	t.Helper()
-	pub, send, recv, ok := handResponder(t, p, conn, staticPriv, staticPub, how)
+	pub, send, recv, ok := handResponder(t, p, conn, staticPriv, staticPub, nil, how)
 	if !ok {
 		return
 	}
@@ -761,73 +839,81 @@ func answerWith(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPri
 
 // each direction has its own key: what the initiator writes opens under the
 // key derived by hand for "link/i2r" and not under the one for "link/r2i", so
-// the two streams never meet under one key with the same frame numbers
+// the two streams never meet under one key with the same frame numbers. The
+// authenticated mode runs once more with a responder that binds an identity
 func TestDirectionsHaveSeparateKeys(t *testing.T) {
 	eachMode(t, func(t *testing.T, p jcrypto.CryptoProvider, auth bool) {
-		frameSize, _ := link.FrameSize(p)
-		priv, pub := keyPair(t, p)
-		var static []byte
+		directionsHaveSeparateKeys(t, p, auth, nil)
 		if auth {
-			static = pub
+			t.Run("with an identity", func(t *testing.T) { directionsHaveSeparateKeys(t, p, auth, identityKey(t, p)) })
 		}
-		a, b := net.Pipe()
-		defer a.Close()
-		defer b.Close()
-		_ = a.SetDeadline(time.Now().Add(5 * time.Second))
-		_ = b.SetDeadline(time.Now().Add(5 * time.Second))
-
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			eph, send, recv, ok := handResponder(t, p, b, priv, pub, keyedInFull)
-			if !ok {
-				return
-			}
-			defer send.Destroy()
-			defer recv.Destroy()
-			zero := make([]byte, send.NonceSize())
-			confirm := send.Seal(nil, zero, wire.NewPadding()[:], nil)
-			if _, err := b.Write(append(eph, confirm...)); err != nil {
-				t.Errorf("answer: %v", err)
-				return
-			}
-			frame := make([]byte, frameSize)
-			if _, err := io.ReadFull(b, frame); err != nil {
-				t.Errorf("the initiator's first frame: %v", err)
-				return
-			}
-			if _, err := send.Open(nil, zero, frame, nil); err == nil {
-				t.Error("the initiator's frame opens under the responder's sending key")
-			}
-			plain, err := recv.Open(nil, zero, frame, nil)
-			if err != nil {
-				t.Errorf("the initiator's frame under the key derived for link/i2r: %v", err)
-				return
-			}
-			if !bytes.Equal(plain, sample(7)[:]) {
-				t.Error("the initiator's frame carries another cell")
-			}
-			if bytes.Equal(frame, send.Seal(nil, zero, sample(7)[:], nil)) {
-				t.Error("frame 0 of both directions is sealed under one key")
-			}
-		}()
-		// the responder reports through t, so a failing test waits for it
-		defer func() {
-			_ = a.Close()
-			_ = b.Close()
-			<-done
-		}()
-
-		client, err := link.Dial(a, p, static)
-		if err != nil {
-			t.Fatalf("Dial: %v", err)
-		}
-		defer client.Close()
-		if err := client.WriteCell(sample(7)); err != nil {
-			t.Fatalf("WriteCell: %v", err)
-		}
-		<-done
 	})
+}
+
+func directionsHaveSeparateKeys(t *testing.T, p jcrypto.CryptoProvider, auth bool, identity []byte) {
+	frameSize, _ := link.FrameSize(p)
+	priv, pub := keyPair(t, p)
+	var static []byte
+	if auth {
+		static = pub
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	_ = a.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = b.SetDeadline(time.Now().Add(5 * time.Second))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		eph, send, recv, ok := handResponder(t, p, b, priv, pub, identity, keyedInFull)
+		if !ok {
+			return
+		}
+		defer send.Destroy()
+		defer recv.Destroy()
+		zero := make([]byte, send.NonceSize())
+		confirm := send.Seal(nil, zero, wire.NewPadding()[:], nil)
+		if _, err := b.Write(append(eph, confirm...)); err != nil {
+			t.Errorf("answer: %v", err)
+			return
+		}
+		frame := make([]byte, frameSize)
+		if _, err := io.ReadFull(b, frame); err != nil {
+			t.Errorf("the initiator's first frame: %v", err)
+			return
+		}
+		if _, err := send.Open(nil, zero, frame, nil); err == nil {
+			t.Error("the initiator's frame opens under the responder's sending key")
+		}
+		plain, err := recv.Open(nil, zero, frame, nil)
+		if err != nil {
+			t.Errorf("the initiator's frame under the key derived for link/i2r: %v", err)
+			return
+		}
+		if !bytes.Equal(plain, sample(7)[:]) {
+			t.Error("the initiator's frame carries another cell")
+		}
+		if bytes.Equal(frame, send.Seal(nil, zero, sample(7)[:], nil)) {
+			t.Error("frame 0 of both directions is sealed under one key")
+		}
+	}()
+	// the responder reports through t, so a failing test waits for it
+	defer func() {
+		_ = a.Close()
+		_ = b.Close()
+		<-done
+	}()
+
+	client, err := link.Dial(a, p, static, identity)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer client.Close()
+	if err := client.WriteCell(sample(7)); err != nil {
+		t.Fatalf("WriteCell: %v", err)
+	}
+	<-done
 }
 
 func TestHandshakeNeedsTheConfirmation(t *testing.T) {
@@ -883,7 +969,7 @@ func TestHandshakeNeedsTheConfirmation(t *testing.T) {
 				tc.respond(b)
 			}()
 			_ = a.SetDeadline(time.Now().Add(time.Second))
-			client, err := link.Dial(m, p, static)
+			client, err := link.Dial(m, p, static, nil)
 			switch {
 			case tc.ok && err != nil:
 				t.Errorf("%s: Dial = %v, want a link", tc.name, err)

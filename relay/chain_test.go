@@ -22,9 +22,10 @@ import (
 )
 
 type node struct {
-	addr string
-	pub  []byte
-	r    *relay.Relay
+	addr     string
+	pub      []byte
+	identity []byte
+	r        *relay.Relay
 }
 
 func startNode(t *testing.T, p jcrypto.CryptoProvider, deliver relay.Deliver) *node {
@@ -56,13 +57,13 @@ func startRelay(t *testing.T, p jcrypto.CryptoProvider, cfg relay.Config) *node 
 		_ = ln.Close()
 	})
 
-	return &node{addr: ln.Addr().String(), pub: pub, r: r}
+	return &node{addr: ln.Addr().String(), pub: pub, identity: cfg.Identity, r: r}
 }
 
 func chainOf(nodes ...*node) []client.Node {
 	out := make([]client.Node, len(nodes))
 	for i, n := range nodes {
-		out[i] = client.Node{Addr: n.addr, StaticPub: n.pub}
+		out[i] = client.Node{Addr: n.addr, StaticPub: n.pub, Identity: n.identity}
 	}
 	return out
 }
@@ -318,7 +319,7 @@ func TestDuplicateSetupIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	conn, err := link.Dial(raw, p, entry.pub)
+	conn, err := link.Dial(raw, p, entry.pub, nil)
 	if err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -453,7 +454,7 @@ func TestPacedNodeIsSilentWhileExtending(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer raw.Close()
-	conn, err := link.Dial(raw, p, entry.pub)
+	conn, err := link.Dial(raw, p, entry.pub, nil)
 	if err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -512,7 +513,7 @@ func TestSecondCircuitOnOneLinkIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	conn, err := link.Dial(raw, p, entry.pub)
+	conn, err := link.Dial(raw, p, entry.pub, nil)
 	if err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -700,7 +701,7 @@ func TestForgedFarCounterDoesNotBlockTheCircuit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	conn, err := link.Dial(raw, p, exit.pub)
+	conn, err := link.Dial(raw, p, exit.pub, nil)
 	if err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -766,7 +767,7 @@ func TestForgedFarCounterAtAForwardingRelay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	conn, err := link.Dial(raw, p, entry.pub)
+	conn, err := link.Dial(raw, p, entry.pub, nil)
 	if err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -963,7 +964,7 @@ func TestSetupReplayAfterTeardownIsRefused(t *testing.T) {
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
-		conn, err := link.Dial(raw, p, entry.pub)
+		conn, err := link.Dial(raw, p, entry.pub, nil)
 		if err != nil {
 			t.Fatalf("link: %v", err)
 		}
@@ -1109,7 +1110,7 @@ func TestForwardedSetupReplayIsRefusedByTheMiddle(t *testing.T) {
 			k.Release()
 		}
 	}()
-	layer, err := wire.OpenSetup(p, entryPriv, entryPub, setup.Cell)
+	layer, err := wire.OpenSetup(p, entryPriv, entryPub, nil, setup.Cell)
 	if err != nil {
 		t.Fatalf("OpenSetup: %v", err)
 	}
@@ -1125,7 +1126,7 @@ func TestForwardedSetupReplayIsRefusedByTheMiddle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
-		conn, err := link.Dial(raw, p, nil)
+		conn, err := link.Dial(raw, p, nil, nil)
 		if err != nil {
 			t.Fatalf("link: %v", err)
 		}
@@ -1178,7 +1179,7 @@ func TestSetupsOnATakenLinkDoNotFillTheCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	conn, err := link.Dial(raw, p, entry.pub)
+	conn, err := link.Dial(raw, p, entry.pub, nil)
 	if err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -1257,7 +1258,7 @@ func TestFailedSetupCannotComeBack(t *testing.T) {
 			k.Release()
 		}
 	}()
-	layer, err := wire.OpenSetup(p, entryPriv, entryPub, setup.Cell)
+	layer, err := wire.OpenSetup(p, entryPriv, entryPub, nil, setup.Cell)
 	if err != nil {
 		t.Fatalf("OpenSetup: %v", err)
 	}
@@ -1272,7 +1273,7 @@ func TestFailedSetupCannotComeBack(t *testing.T) {
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
-		conn, err := link.Dial(raw, p, nil)
+		conn, err := link.Dial(raw, p, nil, nil)
 		if err != nil {
 			t.Fatalf("link: %v", err)
 		}
@@ -1324,13 +1325,13 @@ func (lt *linkTap) dial(ctx context.Context, network, addr string) (net.Conn, er
 }
 
 func (lt *linkTap) run(far, up net.Conn) {
-	in, err := link.Accept(far, lt.p, nil, nil)
+	in, err := link.Accept(far, lt.p, nil, nil, nil)
 	if err != nil {
 		_ = far.Close()
 		_ = up.Close()
 		return
 	}
-	out, err := link.Dial(up, lt.p, nil)
+	out, err := link.Dial(up, lt.p, nil, nil)
 	if err != nil {
 		_ = in.Close()
 		_ = up.Close()
@@ -1590,7 +1591,7 @@ func dialRaw(t *testing.T, p jcrypto.CryptoProvider, entry *node, next string, n
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	conn, err := link.Dial(raw, p, entry.pub)
+	conn, err := link.Dial(raw, p, entry.pub, nil)
 	if err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -1733,7 +1734,7 @@ func startScriptedExit(t *testing.T, p jcrypto.CryptoProvider) *scriptedExit {
 		if err != nil {
 			return
 		}
-		conn, err := link.Accept(raw, p, nil, nil)
+		conn, err := link.Accept(raw, p, nil, nil, nil)
 		if err != nil {
 			_ = raw.Close()
 			return
@@ -1748,7 +1749,7 @@ func startScriptedExit(t *testing.T, p jcrypto.CryptoProvider) *scriptedExit {
 			_ = conn.Close()
 			return
 		}
-		layer, err := wire.OpenSetup(p, priv, pub, &cell)
+		layer, err := wire.OpenSetup(p, priv, pub, nil, &cell)
 		if err != nil {
 			_ = conn.Close()
 			return

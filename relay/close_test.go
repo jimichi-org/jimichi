@@ -45,14 +45,14 @@ func linkPair(t *testing.T, p jcrypto.CryptoProvider) (dialled, accepted *link.C
 	a, b := net.Pipe()
 	done := make(chan *link.Conn, 1)
 	go func() {
-		c, err := link.Accept(b, p, nil, nil)
+		c, err := link.Accept(b, p, nil, nil, nil)
 		if err != nil {
 			done <- nil
 			return
 		}
 		done <- c
 	}()
-	dialled, err := link.Dial(a, p, nil)
+	dialled, err := link.Dial(a, p, nil, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -168,7 +168,7 @@ func tcpLinkPair(t *testing.T, p jcrypto.CryptoProvider) (dialled, accepted *lin
 			done <- nil
 			return
 		}
-		c, err := link.Accept(raw, p, nil, nil)
+		c, err := link.Accept(raw, p, nil, nil, nil)
 		if err != nil {
 			_ = raw.Close()
 			done <- nil
@@ -180,7 +180,7 @@ func tcpLinkPair(t *testing.T, p jcrypto.CryptoProvider) (dialled, accepted *lin
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialled, err = link.Dial(raw, p, nil)
+	dialled, err = link.Dial(raw, p, nil, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

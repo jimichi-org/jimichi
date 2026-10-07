@@ -60,23 +60,27 @@ as the reply. A recipient client (client-b) and an end-to-end layer are planned
   is malformed or listed twice, fewer nodes than hops, or more hops than the setup cell carries
   stop the client.
 - The entry is drawn uniformly among the N nodes. The other hops are drawn once the bundles the
-  entry served have passed the check: uniformly and without replacement among the other nodes
-  whose bundles the client holds, in the order of the chain (the first steps of a Fisher-Yates
-  shuffle). When the entry serves all N nodes, every ordered chain of distinct nodes is equally
-  likely, and three hops among five nodes give 60 of them. When it leaves nodes out (-missing),
-  the chain is drawn among the rest (LIMITATIONS).
+  entry served have been checked: uniformly and without replacement among the other nodes whose
+  bundles passed the check, in the order of the chain (the first steps of a Fisher-Yates
+  shuffle). When the entry serves all N nodes and all pass, every ordered chain of distinct nodes
+  is equally likely, and three hops among five nodes give 60 of them. When it leaves nodes out or
+  not all pass (-missing), the chain is drawn among the rest (LIMITATIONS).
 - The randomness comes from the system generator (crypto/rand). A draw among m nodes reads 64
   bits, throws the value away and reads again while it is below 2^64 mod m, and only then
   reduces it modulo m: without that the low remainders would come up more often.
 - The request to the entry does not depend on the rest of the chain: the client asks for the one
-  mirror and checks the bundle of every listed node in it, not only of the nodes it will use. A
-  bundle that fails the check refuses the circuit whichever chain would have been drawn, and so
-  do a mirror without the entry itself and more missing nodes than -missing allows (1 by
-  default, never more than N minus the chain length).
-- Any failure ends the process: an entry that does not answer, a mirror that lacks the entry
-  itself or more listed nodes than -missing allows, a bundle that fails the check, a setup that
-  fails. The orchestrator restarts the client, and the new process draws a new entry. Within one
-  run the client does not move on to another entry.
+  mirror and checks the bundle of every listed node in it, each on its own, not only of the
+  nodes it will use. A bundle that fails the check counts as a node the entry left out: the chain
+  is drawn among the others, and -missing (1 by default, never more than N minus the chain
+  length) bounds the missing and the failing nodes together. A mirror that lacks the entry's own
+  bundle, or whose entry bundle fails the check, refuses the circuit: the client connects to the
+  entry and needs a verified bundle of it. Bundles of different nodes are not compared with each
+  other: the setup layer and the link of every node are bound to its identity (CRYPTO, section
+  "Transcript").
+- Any failure ends the process: an entry that does not answer, a mirror that lacks a verified
+  bundle of the entry itself or more listed nodes than -missing allows, a setup that fails. The
+  orchestrator restarts the client, and the new process draws a new entry. Within one run the
+  client does not move on to another entry.
 - With a drawn chain the client does not log which nodes form it. Its log holds the name, the
   fingerprint and the certificate validity of every verified node, in the listed order (with
   -fixed-chain the descriptor validity as well), one line with the number of verified and of
@@ -86,8 +90,8 @@ as the reply. A recipient client (client-b) and an end-to-end layer are planned
   of the entry.
 - -fixed-chain takes the first -hops nodes of the list in the listed order, the first of them as
   the entry, and draws nothing. The bundle of every listed node the entry serves is still
-  checked, but only the nodes of the chain have to be among them, and errors name the entry in
-  full. The flag is for measurements that need a known path; no measurement uses it: the lab
+  checked, but only the nodes of the chain have to be among them and pass, and errors name the
+  node in full. The flag is for measurements that need a known path; no measurement uses it: the lab
   harness builds its chain itself, in a fixed order.
 - With N equal to the length of the chain the chain is a random permutation of the list.
 
@@ -164,7 +168,8 @@ identifier and the counter of every cell.
   bytes on c25519, 64 + 528 on GOST.
 - The frame keys are bound to the transcript of the handshake: the format version, the mode
   byte, the ephemeral keys of both sides as they crossed the wire and, in the authenticated mode,
-  the responder's link key. The hash of the transcript goes into every agreement and into the
+  the responder's link key and, when nodes are authenticated, the responder's identity key that
+  its certificate certifies. The hash of the transcript goes into every agreement and into the
   derivation of every key (CRYPTO, section "Key derivation"). A byte of the hello or of the
   answer changed on the way is either refused outright (an unknown mode, a key the agreement
   does not accept) or gives the two sides different keys, so the confirmation frame does not
@@ -173,10 +178,11 @@ identifier and the counter of every cell.
   the responder's link key taken from a verified descriptor: the client does it for the entry
   node, a node for the next node of the circuit. The two secrets are chained (MixKey), and the
   frame keys depend on both. Every link of a circuit is therefore authenticated to the node it
-  leads to: only the holder of that link key derives the frame keys, so a responder without it
-  cannot produce the confirmation and is sent no cell. The responder puts its published link key
-  into the transcript, and a hello in the authenticated mode to a responder without a link key
-  is refused before any agreement. The responder does not authenticate the initiator.
+  leads to: only the holder of that link key that binds the same identity derives the frame keys,
+  so a responder without them cannot produce the confirmation and is sent no cell. The responder
+  puts its published link key and its identity key into the transcript, and a hello in the
+  authenticated mode to a responder without a link key is refused before any agreement. The
+  responder does not authenticate the initiator.
 - A node extends a circuit only to a node of its roster whose verified descriptor it holds
   (section "Node authentication"). A setup that names any other address is refused without a
   connection and counted (refused_extend). A next node that does not finish the handshake is
@@ -284,9 +290,11 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
 - The client knows the addresses of the nodes and their onion keys from verified descriptors.
 - For each node it generates an ephemeral pair and agrees a shared secret with that node's onion
   key. The secret is bound to the setup transcript of that hop: the format version, the hop
-  index, the identifier of the link into that node, the node's onion key and the client's
-  ephemeral key (CRYPTO, section "Key derivation"). The node assembles the same transcript from
-  the cell header, its onion key and the start of the layer.
+  index, the identifier of the link into that node, the node's onion key, the client's ephemeral
+  key and, when nodes are authenticated, the node's identity key from its certificate (CRYPTO,
+  section "Key derivation"). The node assembles the same transcript from the cell header, its
+  onion key, the start of the layer and its own identity key, so a layer opens only at the node
+  it was built for.
 - Two keys are derived from the secret under the same transcript, one for the control cell and
   one for data cells, and two counter offsets, and at the node a replay tag as well.
 - The binding takes no byte in the cell: a control cell carries four nodes on c25519 and three on
@@ -482,6 +490,10 @@ layer agreement.
   the client to the entry, from a node to the next node. With -onion-rotate the onion key is a
   pair of its own that changes by epochs while the link key stays (section "Circuit setup",
   onion key epochs). With -onion-rotate 0 a node publishes one agreement key in both fields.
+- The node signing key the certificate certifies is the identity of the node: it goes into the
+  setup transcript of the node and into the transcript of every authenticated link to it, on
+  both sides (CRYPTO, section "Transcript"). A node with -auth binds it from its start; before
+  its certificate it serves no descriptor and extends no circuit.
 - The request is used only for issuance and is never shown to clients. It proves possession of the
   signing key, and the nonce chosen by the CA proves freshness. Request.Check accepts a request
   only if the nonce matches and the name and address match the operator roster.
@@ -567,14 +579,15 @@ The first failure stops the check; every check after parsing has its own error:
 8. descriptor validity, expires <= not_after, lifetime at most 24 h (ErrDescTime);
 9. the link and onion keys have the length of the suite's agreement key (ErrKeySize).
 
-- pki.VerifyChain runs this check for every node it is given, for a client every listed node
-  whose bundle the entry serves and for enroll every node of the roster, and requires addresses,
-  signing keys and onion keys to be pairwise distinct (ErrDuplicate).
-- pki.Unverified reads the same bundles checking only format, suite, key length and repeats, with
-  no signatures, validity or addresses. It is the configuration without node authentication,
-  kept so that what the measure is worth can be measured; no experiment block makes that
-  measurement. It also rejects repeated addresses and onion keys (ErrDuplicate), so a testbed
-  that substitutes several nodes has to give every substituted node a key of its own.
+- The client, and a node for the descriptor of a peer, call pki.Verify for every bundle on its
+  own.
+- pki.VerifyChain runs this check for every node of the roster at enroll and requires addresses,
+  signing keys and onion keys to be pairwise distinct (ErrDuplicate): the operator sees both
+  names and can correct the roster.
+- pki.Unverified reads one bundle checking only format, suite and key length, with no
+  signatures, validity or addresses, and gives no identity. It is the configuration without node
+  authentication, kept so that what the measure is worth can be measured; no experiment block
+  makes that measurement.
 - Request.Check at issuance checks the suite (ErrSuite), the nonce (ErrNonce), the name and
   address against the roster (ErrRoster) and the request signature (ErrRequestSignature).
 
@@ -587,17 +600,16 @@ The first failure stops the check; every check after parsing has its own error:
   up to 30 attempts 1 s apart, repeated only on a connection error or a 503 answer; decoding is
   strict. A request that fails stops the client with
   `refusing to build the circuit: the entry: <class>`, with -fixed-chain with
-  `refusing to build the circuit: node <address>: <error>`. A mirror without the entry's own
-  bundle stops it with
-  `refusing to build the circuit: the entry: the entry holds no bundle for it`, a mirror that
-  leaves out more listed nodes than -missing allows with `refusing to build the circuit:` and then
-  `the entry leaves out too many nodes: <k> of <N> listed nodes, at most <m> may be left out`,
-  and with -fixed-chain a node of the chain without a bundle with
-  `refusing to build the circuit: node <address>: the entry holds no bundle for it`.
-- pki.VerifyChain checks every listed node the entry served, in the listed order, whether the
-  chain will hold it or not. On the first error the client exits with
-  `refusing to build the circuit: node <address>: <reason>`, or, when a node repeats, with
-  `refusing to build the circuit: nodes <address> and <address>: pki: node repeated in the chain`.
+  `refusing to build the circuit: node <address>: <error>`.
+- pki.Verify checks the bundle of every listed node the entry served on its own, in the listed
+  order, whether the chain will hold the node or not. A bundle that fails the check counts as
+  missing. A mirror without the entry's own bundle stops the client with
+  `refusing to build the circuit: the entry: the entry holds no bundle for it`, an entry bundle
+  that fails the check with `refusing to build the circuit: the entry: <class>`, more missing and
+  failing listed nodes than -missing allows with `refusing to build the circuit:` and then
+  `too many listed nodes left out by the entry or not passing the check: <k> of <N> listed nodes, at most <m> may be`,
+  and with -fixed-chain a node of the chain whose bundle is missing or fails with
+  `refusing to build the circuit: node <address>: <reason>`.
   There is no fallback to unverified keys, and with a drawn chain a list is partial only within
   -missing (section "Roster, peer descriptors and the mirror"). On success it logs one line per
   verified node: the name, the signing key fingerprint and the certificate validity, with
@@ -605,13 +617,16 @@ The first failure stops the check; every check after parsing has its own error:
   descriptor is the freshest in its mirror and would point at the entry), and one line with the
   number of verified and of listed nodes.
 - The onion key from the descriptor goes into circuit setup, the entry node's link key into
-  link.Dial. client.Dial refuses a node with an empty key or a key of the wrong size: an empty
+  link.Dial, and the identity key from the certificate of every node into both transcripts of
+  that node. client.Dial refuses a node with an empty key or a key of the wrong size: an empty
   link key would make the link to the entry anonymous.
 - With -auth=false the client takes the bundles from its entry in the same way, reads them
   through pki.Unverified and logs one WARNING line. The unverified keys of every hop then come
   from the entry alone: whoever answers for the entry chooses them. A node run with -auth=false
-  serves an unsigned bundle (pki.Unsigned). This is the configuration without the measure; no
-  experiment block compares it with the authenticated one.
+  serves an unsigned bundle (pki.Unsigned). Neither side has an identity, and the transcripts go
+  without one; a client with -auth=false and a node with -auth agree on no key (CRYPTO, section
+  "Transcript"). This is the configuration without the measure; no experiment block compares it
+  with the authenticated one.
 
 ### Certificate issuance
 
@@ -750,16 +765,16 @@ finds by the label of their deployments (app=relay).
   not_after; the node itself serves its descriptor and its own mirror, and takes circuits,
   until not_after.
 - The client (-missing, 1 by default, at most the listed nodes beyond -hops) accepts a mirror that
-  lists the entry itself and all but that many listed nodes, verifies every bundle the mirror
-  does list, and draws the other hops among those nodes. A bundle that is listed and fails the
-  check refuses the circuit; it is never treated as a node left out. A fixed chain needs the
-  bundles of its own nodes.
+  holds a verified bundle of the entry itself and verified bundles of all but that many listed
+  nodes, verifies every bundle on its own, and draws the other hops among the nodes whose bundles
+  passed. A bundle that is listed and fails the check counts as missing. A fixed chain needs
+  verified bundles of its own nodes.
 - A cached bundle may name an onion key its node has already replaced. The node holds that key
   until the bundle has expired (section "Circuit setup", onion key epochs), so a client that
   takes the bundle from the mirror still builds its circuit.
 - The mirror makes the entry the only node a client contacts. The client trusts the entry with
-  nothing: it verifies every bundle against its own anchor, so the entry can withhold bundles but
-  cannot alter them.
+  nothing: it verifies every bundle against its own anchor, so the entry can withhold bundles,
+  and an altered bundle is as good as withheld.
 - A node run with -auth=false takes no roster. It lists itself in /descriptors under -advertise
   together with the unsigned bundles of the nodes named in -peers, read without verification,
   and extends circuits to any address. It keeps those bundles by passes of the same kind: each

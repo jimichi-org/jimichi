@@ -298,7 +298,7 @@ func acceptScripted(ln net.Listener, p jcrypto.CryptoProvider, privs []*secmem.B
 	if err != nil {
 		return nil, err
 	}
-	conn, err := link.Accept(raw, p, privs[0], pubs[0])
+	conn, err := link.Accept(raw, p, privs[0], pubs[0], nil)
 	if err != nil {
 		_ = raw.Close()
 		return nil, err
@@ -315,7 +315,7 @@ func acceptScripted(ln net.Listener, p jcrypto.CryptoProvider, privs []*secmem.B
 			s.close()
 			return nil, err
 		}
-		layer, err := wire.OpenSetup(p, priv, pubs[i], cell)
+		layer, err := wire.OpenSetup(p, priv, pubs[i], nil, cell)
 		if err != nil {
 			s.close()
 			return nil, fmt.Errorf("setup layer %d: %w", i, err)

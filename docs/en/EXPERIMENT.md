@@ -62,7 +62,7 @@ are not computed yet ([#119](https://github.com/jimichi-org/jimichi/issues/119))
 |---|---|
 | Share of chains with a rogue entry and exit | share of the chains whose first and last node are both rogue, that is held by the adversary, who then links the two ends of the circuit; a chain of one node counts when that node is rogue. A uniform choice of h distinct nodes among N, k of them rogue, gives k(k-1)/(N(N-1)), and k/N for h = 1 |
 | Share of chains with a rogue node | share of the chains that hold at least one rogue node; a uniform choice gives 1 - C(N-k,h)/C(N,h) |
-| Share of refused attempts | share of the attempts to build a chain whose entry serves a mirror the client refuses, one that lacks more than min(-missing, N - h) listed nodes |
+| Share of refused attempts | share of the attempts to build a chain whose entry serves a mirror the client refuses, one that lacks more than min(-missing, N - h) listed nodes; a listed bundle that fails the check counts as lacking |
 | Share of attempts failed at setup | share of the attempts in which the client chooses a chain the nodes do not set up: an honest node extends a circuit only to a node whose verified descriptor it holds, so a chain with an honest node directly before a node that withholds its descriptor fails. The two shares of chains above are taken over the chains that come up |
 | Standard error of a share | sqrt(p(1-p)/n) for a share of n independent draws at the value p the model gives; n is the number of chains that came up, and the number of attempts for the refused and the failed shares |
 
@@ -319,8 +319,9 @@ lab and the benchmarks have no switch for the key-memory measures).
 The binding of every derived key to the transcript, the suite and the scheme version has no
 switch, like the setup replay tag and the link confirmation frame: a build without it would be a
 second key schedule, that is, a downgrade path. No block measures its contribution. The
-benchmarks of crypto/suite time its parts apart: the hash of a setup transcript
-(BenchmarkNewContext; a client makes one per hop, a node one per onion key it holds; a link
+benchmarks of crypto/suite time its parts apart: the hash of the setup transcript of an
+authenticated node, with its identity key (BenchmarkNewContext; a client makes one per hop, a
+node one per onion key it holds; a link
 handshake hashes a transcript of its own, of another length, which is not timed apart), the
 agreement under a context (BenchmarkAgree), the five values a hop
 derives after the agreement: the setup key, the cell key, the replay tag and the two counter

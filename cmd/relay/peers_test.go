@@ -275,6 +275,9 @@ func TestNodeHasNoPeersBeforeTheRoster(t *testing.T) {
 	if rc.Peers == nil {
 		t.Fatal("with -auth the relay extends without asking the node for its peers")
 	}
+	if !bytes.Equal(rc.Identity, f.n.id.Public()) || len(rc.Identity) == 0 {
+		t.Fatal("with -auth the relay does not bind the identity the certificate certifies")
+	}
 	if _, ok := rc.Peers(addrOf("relay-2")); ok {
 		t.Fatal("the relay may extend before a roster arrived")
 	}
@@ -283,11 +286,15 @@ func TestNodeHasNoPeersBeforeTheRoster(t *testing.T) {
 		t.Fatal("the relay may extend to a peer whose descriptor it has not checked yet")
 	}
 	cache.refresh()
-	if key, ok := rc.Peers(addrOf("relay-2")); !ok || !bytes.Equal(key, c.nodes[1].pub) {
+	peer, ok := rc.Peers(addrOf("relay-2"))
+	if !ok || !bytes.Equal(peer.LinkPub, c.nodes[1].pub) {
 		t.Fatal("the relay does not get the link key from the peer's descriptor")
 	}
-	if rc := relayConfig(c.p, nil, nil, config{auth: false}, f.n); rc.Peers != nil {
-		t.Fatal("without -auth the relay is given peers; the baseline extends to any address")
+	if !bytes.Equal(peer.Identity, c.nodes[1].n.id.Public()) {
+		t.Fatal("the relay does not get the identity the peer's certificate certifies")
+	}
+	if rc := relayConfig(c.p, nil, nil, config{auth: false}, f.n); rc.Peers != nil || rc.Identity != nil {
+		t.Fatal("without -auth the relay is given peers or an identity; the baseline extends to any address and binds none")
 	}
 }
 
@@ -302,7 +309,7 @@ func TestPeerCacheRefreshesAndExpires(t *testing.T) {
 			}
 			key := func(f *fixture) bool {
 				k, ok := n1.n.peerKey(f.n.addr)
-				return ok && bytes.Equal(k, f.pub)
+				return ok && bytes.Equal(k.LinkPub, f.pub) && bytes.Equal(k.Identity, f.n.id.Public())
 			}
 
 			if key(n2) || key(n3) || asked() != [2]uint64{0, 0} {
@@ -576,9 +583,14 @@ func TestUnsignedNodeMirrorsItsPeersUnverified(t *testing.T) {
 		t.Fatalf("GET /descriptors = %d, %d entries, %v", code, len(entries), err)
 	}
 	addrs := []string{n1.n.addr, n2.n.addr, n3.n.addr}
-	nodes, err := pki.Unverified(p, addrs, [][]byte{entries[0].Bundle, entries[1].Bundle, entries[2].Bundle})
-	if err != nil || !bytes.Equal(nodes[1].OnionPub, n2.pub) || !bytes.Equal(nodes[2].LinkPub, n3.pub) {
-		t.Fatalf("Unverified = %v, %v", nodes, err)
+	for i, e := range entries {
+		v, err := pki.Unverified(p, addrs[i], e.Bundle)
+		if err != nil || e.Addr != addrs[i] {
+			t.Fatalf("entry %d of %s: %v", i, e.Addr, err)
+		}
+		if i == 1 && !bytes.Equal(v.OnionPub, n2.pub) || i == 2 && !bytes.Equal(v.LinkPub, n3.pub) {
+			t.Fatalf("entry %d does not carry the keys of %s", i, addrs[i])
+		}
 	}
 
 	// an unsigned bundle carries no times: it is asked for again a minute later
@@ -918,7 +930,7 @@ func TestFailedRefetchKeepsTheEntryUntilItExpires(t *testing.T) {
 	}
 	held := func() bool {
 		key, ok := n1.n.peerKey(n2.n.addr)
-		return ok && bytes.Equal(key, n2.pub)
+		return ok && bytes.Equal(key.LinkPub, n2.pub)
 	}
 
 	c.clock.advance(40 * time.Minute)

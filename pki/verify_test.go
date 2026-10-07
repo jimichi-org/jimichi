@@ -200,7 +200,7 @@ func TestCrossSuiteStopsBeforeAnyKeyIsParsed(t *testing.T) {
 			wantErr(t, c.name, err, ErrSuite)
 		}
 		for _, bundle := range [][]byte{foreign, relabelled, unsigned} {
-			_, err := Unverified(cp, []string{n.addr}, [][]byte{bundle})
+			_, err := Unverified(cp, n.addr, bundle)
 			wantErr(t, "unverified bundle of the other suite", err, ErrSuite)
 		}
 		if v := cp.verifies.Load(); v != 0 {
@@ -404,9 +404,6 @@ func TestChainRejectsDuplicates(t *testing.T) {
 			[][]byte{ba, twin.pack(t, twin.descriptor(t0, t0.Add(time.Hour)))}, t0)
 		wantErr(t, "one identity at two addresses", err, ErrDuplicate)
 
-		_, err = Unverified(p, []string{a.addr, b.addr}, [][]byte{ba, ba})
-		wantErr(t, "unverified chain with one onion key twice", err, ErrDuplicate)
-
 		if _, err := VerifyChain(p, e.pol, []string{a.addr}, nil, t0); err == nil {
 			t.Fatal("VerifyChain accepted more addresses than bundles")
 		}
@@ -428,7 +425,7 @@ func TestKeySizeIsChecked(t *testing.T) {
 		wantErr(t, "long link key", err, ErrKeySize)
 
 		d.Sig = nil
-		_, err = Unverified(p, []string{n.addr}, [][]byte{pack(p, nil, d.Marshal())})
+		_, err = Unverified(p, n.addr, pack(p, nil, d.Marshal()))
 		wantErr(t, "unverified long link key", err, ErrKeySize)
 	})
 }
@@ -442,11 +439,11 @@ func TestUnsignedBundle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := Unverified(p, []string{n.addr}, [][]byte{b})
+		got, err := Unverified(p, n.addr, b)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(got[0].LinkPub, link) || !bytes.Equal(got[0].OnionPub, n.onion) || got[0].Addr != n.addr {
+		if !bytes.Equal(got.LinkPub, link) || !bytes.Equal(got.OnionPub, n.onion) || got.Addr != n.addr || len(got.Identity) != 0 {
 			t.Fatal("unverified keys differ from the unsigned bundle")
 		}
 		parsed, err := ParseBundle(b)
@@ -464,8 +461,8 @@ func TestUnsignedBundle(t *testing.T) {
 		_, err = Verify(p, e.pol, n.addr, b, t0)
 		wantErr(t, "unsigned bundle under Verify", err, ErrFormat)
 
-		if _, err := Unverified(p, []string{n.addr}, [][]byte{n.bundle(t, t0, time.Hour)}); err != nil {
-			t.Fatalf("unverified read of a signed bundle: %v", err)
+		if v, err := Unverified(p, n.addr, n.bundle(t, t0, time.Hour)); err != nil || len(v.Identity) != 0 {
+			t.Fatalf("unverified read of a signed bundle: %v, or it carries an identity", err)
 		}
 		_, err = Unsigned(p, link[1:], n.onion)
 		wantErr(t, "unsigned bundle with a short key", err, ErrKeySize)

@@ -47,6 +47,10 @@ func (id *Identity) Locked() bool {
 	return id.priv != nil && id.priv.Locked()
 }
 
+// the key every certificate of this node certifies; it lives as long as the
+// Identity, so it stays the same when the node is enrolled again
+func (id *Identity) Public() []byte { return bytes.Clone(id.pub) }
+
 func (id *Identity) Fingerprint() string { return Fingerprint(id.p, id.pub) }
 
 func (id *Identity) KeyHash() string { return KeyHash(id.p, id.pub) }

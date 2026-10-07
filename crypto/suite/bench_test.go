@@ -53,11 +53,13 @@ func BenchmarkAgree(b *testing.B) {
 	})
 }
 
-// the transcript of one hop of a circuit setup: version, hop index, link id,
-// onion key, ephemeral key
+// the transcript of one hop of a circuit setup at an authenticated node, the
+// default: version, hop index, link id, onion key, ephemeral key, identity key.
+// pub stands for every key; an identity key has the size of an agreement key
+// on both suites
 func setupContext(b *testing.B, p jcrypto.CryptoProvider, pub []byte) jcrypto.Context {
 	b.Helper()
-	ctx, err := jcrypto.NewContext(p, "setup", []byte{2}, []byte{0}, make([]byte, 8), pub, pub)
+	ctx, err := jcrypto.NewContext(p, "setup", []byte{2}, []byte{0}, make([]byte, 8), pub, pub, pub)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -72,9 +74,9 @@ func BenchmarkNewContext(b *testing.B) {
 		}
 		priv.Release()
 		// written out: setupContext calls b.Helper, whose cost would be timed with
-		// the hash and is not small next to SHA-256 over 120 bytes
+		// the hash and is not small next to SHA-256 over 154 bytes
 		for b.Loop() {
-			if _, err := jcrypto.NewContext(p, "setup", []byte{2}, []byte{0}, make([]byte, 8), pub, pub); err != nil {
+			if _, err := jcrypto.NewContext(p, "setup", []byte{2}, []byte{0}, make([]byte, 8), pub, pub, pub); err != nil {
 				b.Fatal(err)
 			}
 		}

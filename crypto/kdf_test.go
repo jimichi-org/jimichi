@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -47,24 +48,24 @@ func TestLabels(t *testing.T) {
 		purpose string
 		want    string
 	}{
-		{jcrypto.SuiteC25519, "agree", "jimichi/v1/c25519/agree"},
-		{jcrypto.SuiteC25519, "mix", "jimichi/v1/c25519/mix"},
-		{jcrypto.SuiteC25519, "setup", "jimichi/v1/c25519/setup"},
-		{jcrypto.SuiteC25519, "cell", "jimichi/v1/c25519/cell"},
-		{jcrypto.SuiteC25519, "setup/replay", "jimichi/v1/c25519/setup/replay"},
-		{jcrypto.SuiteC25519, "counter/fwd", "jimichi/v1/c25519/counter/fwd"},
-		{jcrypto.SuiteC25519, "counter/bwd", "jimichi/v1/c25519/counter/bwd"},
-		{jcrypto.SuiteC25519, "link/i2r", "jimichi/v1/c25519/link/i2r"},
-		{jcrypto.SuiteC25519, "link/r2i", "jimichi/v1/c25519/link/r2i"},
-		{jcrypto.SuiteGOST, "agree", "jimichi/v1/gost/agree"},
-		{jcrypto.SuiteGOST, "mix", "jimichi/v1/gost/mix"},
-		{jcrypto.SuiteGOST, "setup", "jimichi/v1/gost/setup"},
-		{jcrypto.SuiteGOST, "cell", "jimichi/v1/gost/cell"},
-		{jcrypto.SuiteGOST, "setup/replay", "jimichi/v1/gost/setup/replay"},
-		{jcrypto.SuiteGOST, "counter/fwd", "jimichi/v1/gost/counter/fwd"},
-		{jcrypto.SuiteGOST, "counter/bwd", "jimichi/v1/gost/counter/bwd"},
-		{jcrypto.SuiteGOST, "link/i2r", "jimichi/v1/gost/link/i2r"},
-		{jcrypto.SuiteGOST, "link/r2i", "jimichi/v1/gost/link/r2i"},
+		{jcrypto.SuiteC25519, "agree", "jimichi/v2/c25519/agree"},
+		{jcrypto.SuiteC25519, "mix", "jimichi/v2/c25519/mix"},
+		{jcrypto.SuiteC25519, "setup", "jimichi/v2/c25519/setup"},
+		{jcrypto.SuiteC25519, "cell", "jimichi/v2/c25519/cell"},
+		{jcrypto.SuiteC25519, "setup/replay", "jimichi/v2/c25519/setup/replay"},
+		{jcrypto.SuiteC25519, "counter/fwd", "jimichi/v2/c25519/counter/fwd"},
+		{jcrypto.SuiteC25519, "counter/bwd", "jimichi/v2/c25519/counter/bwd"},
+		{jcrypto.SuiteC25519, "link/i2r", "jimichi/v2/c25519/link/i2r"},
+		{jcrypto.SuiteC25519, "link/r2i", "jimichi/v2/c25519/link/r2i"},
+		{jcrypto.SuiteGOST, "agree", "jimichi/v2/gost/agree"},
+		{jcrypto.SuiteGOST, "mix", "jimichi/v2/gost/mix"},
+		{jcrypto.SuiteGOST, "setup", "jimichi/v2/gost/setup"},
+		{jcrypto.SuiteGOST, "cell", "jimichi/v2/gost/cell"},
+		{jcrypto.SuiteGOST, "setup/replay", "jimichi/v2/gost/setup/replay"},
+		{jcrypto.SuiteGOST, "counter/fwd", "jimichi/v2/gost/counter/fwd"},
+		{jcrypto.SuiteGOST, "counter/bwd", "jimichi/v2/gost/counter/bwd"},
+		{jcrypto.SuiteGOST, "link/i2r", "jimichi/v2/gost/link/i2r"},
+		{jcrypto.SuiteGOST, "link/r2i", "jimichi/v2/gost/link/r2i"},
 	} {
 		got, err := jcrypto.Label(tc.suite, tc.purpose)
 		if err != nil || string(got) != tc.want {
@@ -132,58 +133,71 @@ func TestReservedPurposes(t *testing.T) {
 	}
 }
 
-func goldenParts(n int) [3][][]byte {
-	return [3][][]byte{
+// n is the size of an agreement key, s the size of an identity key
+func goldenParts(n, s int) [5][][]byte {
+	return [5][][]byte{
 		{{0x02}, {0x00}, {0, 0, 0, 0, 0, 0, 0, 200}, seq(0x80, n), seq(0x00, n)},
 		{{0x02}, {0x01}, seq(0x00, n), seq(0x40, n), seq(0x80, n)},
 		{{0x02}, {0x00}, seq(0x00, n), seq(0x40, n)},
+		{{0x02}, {0x00}, {0, 0, 0, 0, 0, 0, 0, 200}, seq(0x80, n), seq(0x00, n), seq(0xc0, s)},
+		{{0x02}, {0x01}, seq(0x00, n), seq(0x40, n), seq(0x80, n), seq(0xc0, s)},
 	}
 }
 
-var goldenExchange = [3]string{"setup", "link", "link"}
+var goldenExchange = [5]string{"setup", "link", "link", "setup", "link"}
 
 func hexSeq(first byte, n int) string { return hex.EncodeToString(seq(first, n)) }
 
-// the transcripts G1, G2, G3 of the golden vectors, byte for byte: the ASCII
+// the transcripts G1 to G5 of the golden vectors, byte for byte: the ASCII
 // head, a zero byte, the number of parts, then every part behind its two-byte
-// big-endian length. P is 32 on c25519 and 64 on GOST, which gives 120, 143, 109
-// and 182, 237, 171 bytes
+// big-endian length. The agreement keys take 32 bytes on c25519 and 64 on GOST,
+// and so do the identity keys of G4 and G5, which gives 120, 143, 109, 154, 177
+// and 182, 237, 171, 248, 303 bytes
 func TestTranscriptBytes(t *testing.T) {
 	for _, tc := range []struct {
 		suite   jcrypto.Suite
 		pub     int
 		head    string
 		lenPub  string
-		lengths [3]int
-		sums    [3]string
+		lengths [5]int
+		sums    [5]string
 	}{
 		{
-			jcrypto.SuiteC25519, 32, "jimichi/v1/c25519/transcript/", "0020", [3]int{120, 143, 109},
-			[3]string{
-				"bf5988647af2c8b161b8992b8015c2bea0aed5837cc53e37b60450f5fc43aeb7",
-				"70b1a866bbce04b1e398435c381fe1cb1e9160a8d7e54a86efe2763c51353fd1",
-				"412a81d7b53b40da47fab9eade99cd91d6b4c56b40d2a2d7e0c5d85a88fb9381",
+			jcrypto.SuiteC25519, 32, "jimichi/v2/c25519/transcript/", "0020", [5]int{120, 143, 109, 154, 177},
+			[5]string{
+				"b14c23db2eb7be7e6fb80d79859e002ef40b6c2262082d633aa6d44a2e00928c",
+				"7b9ee2ddeffae097fbe33d8a86e4f800bad67ed18db7886ee15105fa47945c28",
+				"9316cc227c129bc7bc39fe454668267767c8b86735e7d11e6b78de56fbdac044",
+				"3f1268d9cdfeaff916445d4aa1648775fb3a3f290da1142fb0e9128c04422ecb",
+				"bd1fd058596e45ce436a42fe19f45c2f64bef277aef7bcfd0f3353f6737ef7b3",
 			},
 		},
 		{
-			jcrypto.SuiteGOST, 64, "jimichi/v1/gost/transcript/", "0040", [3]int{182, 237, 171},
-			[3]string{
-				"89a0d93bcff53a1914892c6fdf5b8cad7a726f6678cb09c01d91aa532a2b5f1c",
-				"27f9517518d0f810964dc8caa1f85fd088216ec3a1b4140482a27ea8f1339ce0",
-				"9d44cf104c23a21dc4d25daf8383d800307304309eea1ee7b651d2c00da3afe2",
+			jcrypto.SuiteGOST, 64, "jimichi/v2/gost/transcript/", "0040", [5]int{182, 237, 171, 248, 303},
+			[5]string{
+				"c4aff7e929db19a4171ed91d841bfe6ce2658d957a5fa5dc80ef69a76cae1080",
+				"95d4af2336fd54e2bbcfbc13378c70c73107c3065996119a68aba055bcda8d76",
+				"bafb88554bdd02d048d3d96a04233f38bedf2fdac0d69b1550dbf9ff5ead0d1a",
+				"d7117c1346e610f6d636fed3a24a065a1ff72ada68631ad72a1bc2970cfdd646",
+				"9e660f347729b9614cb118a0fbc0135beed6faecab74a0e0974c185049c8c5af",
 			},
 		},
 	} {
 		n, l := tc.pub, tc.lenPub
-		want := [3]string{
-			hex.EncodeToString([]byte(tc.head+"setup")) + "00 05" + "0001 02" + "0001 00" + "0008 00000000000000c8" +
-				l + hexSeq(0x80, n) + l + hexSeq(0x00, n),
-			hex.EncodeToString([]byte(tc.head+"link")) + "00 05" + "0001 02" + "0001 01" +
-				l + hexSeq(0x00, n) + l + hexSeq(0x40, n) + l + hexSeq(0x80, n),
+		setup := hex.EncodeToString([]byte(tc.head+"setup")) + "00 %02x" + "0001 02" + "0001 00" + "0008 00000000000000c8" +
+			l + hexSeq(0x80, n) + l + hexSeq(0x00, n)
+		authenticated := hex.EncodeToString([]byte(tc.head+"link")) + "00 %02x" + "0001 02" + "0001 01" +
+			l + hexSeq(0x00, n) + l + hexSeq(0x40, n) + l + hexSeq(0x80, n)
+		identity := l + hexSeq(0xc0, n)
+		want := [5]string{
+			fmt.Sprintf(setup, 5),
+			fmt.Sprintf(authenticated, 5),
 			hex.EncodeToString([]byte(tc.head+"link")) + "00 04" + "0001 02" + "0001 00" +
 				l + hexSeq(0x00, n) + l + hexSeq(0x40, n),
+			fmt.Sprintf(setup, 6) + identity,
+			fmt.Sprintf(authenticated, 6) + identity,
 		}
-		parts := goldenParts(n)
+		parts := goldenParts(n, n)
 		p := provider(t, tc.suite)
 		for i := range parts {
 			got, err := jcrypto.TranscriptBytes(tc.suite, goldenExchange[i], parts[i]...)
@@ -207,11 +221,11 @@ func TestTranscriptBytes(t *testing.T) {
 	}
 
 	// T(G1) on c25519 once more as one literal string
-	g1 := unhex(t, "6a696d696368692f76312f6332353531392f7472616e7363726970742f7365747570 00 05"+
+	g1 := unhex(t, "6a696d696368692f76322f6332353531392f7472616e7363726970742f7365747570 00 05"+
 		"0001 02 0001 00 0008 00000000000000c8"+
 		"0020 808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"+
 		"0020 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
-	got, err := jcrypto.TranscriptBytes(jcrypto.SuiteC25519, "setup", goldenParts(32)[0]...)
+	got, err := jcrypto.TranscriptBytes(jcrypto.SuiteC25519, "setup", goldenParts(32, 32)[0]...)
 	if err != nil || !bytes.Equal(got, g1) {
 		t.Fatalf("T(G1) = %x, %v", got, err)
 	}
@@ -222,7 +236,7 @@ func TestTranscriptBytes(t *testing.T) {
 		length []byte
 	}{{0x0100, []byte{0x01, 0x00}}, {0x0102, []byte{0x01, 0x02}}, {0xffff, []byte{0xff, 0xff}}} {
 		long := seq(0x00, tc.size)
-		want := append([]byte("jimichi/v1/gost/transcript/test"), 0x00, 0x02)
+		want := append([]byte("jimichi/v2/gost/transcript/test"), 0x00, 0x02)
 		want = append(append(want, tc.length...), long...)
 		want = append(want, 0x00, 0x01, 0xee)
 		got, err := jcrypto.TranscriptBytes(jcrypto.SuiteGOST, "test", long, []byte{0xee})

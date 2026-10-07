@@ -108,7 +108,7 @@ func TestOpenSetupReleasesEverythingButTheCellKey(t *testing.T) {
 		t.Cleanup(k.Release)
 	}
 
-	layer, err := wire.OpenSetup(tp, privs[0], pubs[0], setup.Cell)
+	layer, err := wire.OpenSetup(tp, privs[0], pubs[0], nil, setup.Cell)
 	if err != nil {
 		t.Fatalf("OpenSetup: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestOpenSetupRefusesAnImpossibleHopIndex(t *testing.T) {
 	for _, counter := range []uint64{wire.MaxHops, 1 << 40, 1 << 63, ^uint64(0)} {
 		cell := *setup.Cell
 		binary.BigEndian.PutUint64(cell[10:18], counter)
-		if _, err := wire.OpenSetup(provider(), privs[0], pubs[0], &cell); err == nil {
+		if _, err := wire.OpenSetup(provider(), privs[0], pubs[0], nil, &cell); err == nil {
 			t.Fatalf("OpenSetup accepted hop index %d", counter)
 		}
 	}
@@ -219,7 +219,7 @@ func TestOpenSetupRefusesAnImpossibleHopIndex(t *testing.T) {
 
 func openTag(t *testing.T, priv *secmem.Buffer, pub []byte, cell *wire.Cell) wire.SetupTag {
 	t.Helper()
-	layer, err := wire.OpenSetup(provider(), priv, pub, cell)
+	layer, err := wire.OpenSetup(provider(), priv, pub, nil, cell)
 	if err != nil {
 		t.Fatalf("OpenSetup: %v", err)
 	}
@@ -276,7 +276,7 @@ func refusesChangedCopy(t *testing.T, change func(cell *wire.Cell, at, pubLen in
 	if changed == *setup.Cell {
 		t.Fatal("the copy was not changed")
 	}
-	if _, err := wire.OpenSetup(provider(), privs[0], pubs[0], &changed); !errors.Is(err, jcrypto.ErrOpen) {
+	if _, err := wire.OpenSetup(provider(), privs[0], pubs[0], nil, &changed); !errors.Is(err, jcrypto.ErrOpen) {
 		t.Fatalf("changed copy: %v, want ErrOpen", err)
 	}
 }
@@ -346,29 +346,84 @@ func TestOpenSetupIsBoundToKeyIndexAndLink(t *testing.T) {
 			}
 
 			// the private key is the right one, the public key named with it is not
-			if _, err := wire.OpenSetup(p, privs[0], pubs[1], setup.Cell); !errors.Is(err, jcrypto.ErrOpen) {
+			if _, err := wire.OpenSetup(p, privs[0], pubs[1], nil, setup.Cell); !errors.Is(err, jcrypto.ErrOpen) {
 				t.Fatalf("another public key of the right length: %v, want ErrOpen", err)
 			}
 			for _, pub := range [][]byte{nil, pubs[0][:len(pubs[0])-1], append(append([]byte{}, pubs[0]...), 0)} {
-				if _, err := wire.OpenSetup(p, privs[0], pub, setup.Cell); !errors.Is(err, jcrypto.ErrBadPublicKey) {
+				if _, err := wire.OpenSetup(p, privs[0], pub, nil, setup.Cell); !errors.Is(err, jcrypto.ErrBadPublicKey) {
 					t.Fatalf("public key of %d bytes: %v, want ErrBadPublicKey", len(pub), err)
 				}
 			}
 
 			moved := *setup.Cell
 			binary.BigEndian.PutUint64(moved[10:18], 1)
-			if _, err := wire.OpenSetup(p, privs[0], pubs[0], &moved); !errors.Is(err, jcrypto.ErrOpen) {
+			if _, err := wire.OpenSetup(p, privs[0], pubs[0], nil, &moved); !errors.Is(err, jcrypto.ErrOpen) {
 				t.Fatalf("another hop index: %v, want ErrOpen", err)
 			}
 			relinked := *setup.Cell
 			binary.BigEndian.PutUint64(relinked[2:10], 201)
-			if _, err := wire.OpenSetup(p, privs[0], pubs[0], &relinked); !errors.Is(err, jcrypto.ErrOpen) {
+			if _, err := wire.OpenSetup(p, privs[0], pubs[0], nil, &relinked); !errors.Is(err, jcrypto.ErrOpen) {
 				t.Fatalf("another link identifier: %v, want ErrOpen", err)
 			}
 
-			layer, err := wire.OpenSetup(p, privs[0], pubs[0], setup.Cell)
+			layer, err := wire.OpenSetup(p, privs[0], pubs[0], nil, setup.Cell)
 			if err != nil {
 				t.Fatalf("the unchanged cell: %v", err)
+			}
+			layer.CellKey.Release()
+		})
+	}
+}
+
+// two authenticated nodes, a and c, where the descriptor of c names the onion
+// key of a: a layer built for c under that key does not open at a, which binds
+// its own identity, and a layer built for a does. A node that binds an identity
+// opens no layer built without one, and the other way round
+func TestOpenSetupIsBoundToTheIdentity(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			p, err := suite.New(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			privs, pubs := staticKeys(t, p, 1)
+			identity := func() []byte {
+				priv, pub, err := p.GenerateSigning()
+				if err != nil {
+					t.Fatal(err)
+				}
+				priv.Release()
+				return pub
+			}
+			idA, idC := identity(), identity()
+			build := func(id []byte) *wire.Cell {
+				chain := chainTo(pubs)
+				chain[0].Identity = id
+				setup, err := wire.BuildSetup(p, chain)
+				if err != nil {
+					t.Fatalf("BuildSetup: %v", err)
+				}
+				for _, k := range setup.CellKeys {
+					k.Release()
+				}
+				return setup.Cell
+			}
+
+			for _, tc := range []struct {
+				name        string
+				built, open []byte
+			}{
+				{"built for c, opened at a", idC, idA},
+				{"built without an identity, opened at a", nil, idA},
+				{"built for a, opened without an identity", idA, nil},
+			} {
+				if _, err := wire.OpenSetup(p, privs[0], pubs[0], tc.open, build(tc.built)); !errors.Is(err, jcrypto.ErrOpen) {
+					t.Fatalf("%s: %v, want ErrOpen", tc.name, err)
+				}
+			}
+			layer, err := wire.OpenSetup(p, privs[0], pubs[0], idA, build(idA))
+			if err != nil {
+				t.Fatalf("built for a, opened at a: %v", err)
 			}
 			layer.CellKey.Release()
 		})
@@ -473,7 +528,7 @@ func TestMaxLayersIsWhatASetupCellCarries(t *testing.T) {
 			}
 			cell := setup.Cell
 			for i := 0; i < n; i++ {
-				layer, err := wire.OpenSetup(p, privs[i], pubs[i], cell)
+				layer, err := wire.OpenSetup(p, privs[i], pubs[i], nil, cell)
 				if err != nil {
 					t.Fatalf("OpenSetup %d of %d: %v", i, n, err)
 				}
@@ -514,7 +569,7 @@ func TestSetupHandsBothSidesTheSameOffsets(t *testing.T) {
 			}
 			cell := setup.Cell
 			for i := 0; i < hops; i++ {
-				layer, err := wire.OpenSetup(p, privs[i], pubs[i], cell)
+				layer, err := wire.OpenSetup(p, privs[i], pubs[i], nil, cell)
 				if err != nil {
 					t.Fatalf("OpenSetup %d: %v", i, err)
 				}

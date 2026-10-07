@@ -17,45 +17,58 @@ import (
 // shared secret 40 41 .. 5f, onion key 80 81 .., ephemeral key 00 01 .. (32
 // bytes each on c25519, 64 on gost); once for hop 0 on link 200 and once for
 // hop 2 on link 0102030405060708, so every byte of the index and of the
-// identifier is pinned. The offset is the first 8 bytes of the KDF output, big
-// endian, with the top two bits cleared. Computed outside this code, with
-// openssl dgst (sha256, and md_gost12_256 of gost-engine) over these bytes:
+// identifier is pinned, and once more for hop 0 on link 200 of an
+// authenticated node with the identity key c0 c1 .. (32 bytes on c25519, 64 on
+// gost). The offset is the first 8 bytes of the KDF output, big endian, with
+// the top two bits cleared. Computed outside this code, with Python hashlib
+// and hmac on c25519 and a separate implementation of Streebog on gost, over
+// these bytes; openssl dgst (sha256, and md_gost12_256 of gost-engine) gives
+// the same:
 //
-//	T = "jimichi/v1/<suite>/transcript/setup" || 00 || 05
+//	T = "jimichi/v2/<suite>/transcript/setup" || 00 || 05 (06 with an identity)
 //	    || 0001 02 || 0001 <index> || 0008 <link>
-//	    || u16be(len) onion || u16be(len) ephemeral
-//	  120 bytes on c25519, 182 on gost
+//	    || u16be(len) onion || u16be(len) ephemeral [|| u16be(len) identity]
+//	  120 bytes on c25519, 182 on gost; 154 and 248 with an identity
 //	c25519, th = SHA-256(T)
-//	  HMAC-SHA256(secret, "jimichi/v1/c25519/counter/fwd" || 00 || th || 01)[:8]
-//	  hop 0, link 200: th bf598864..fc43aeb7
-//	    fwd bdeca6ae015c8e00 -> 3deca6ae015c8e00, bwd 29b99d95ce52c6cc -> 29b99d95ce52c6cc
-//	  hop 2, link 0102030405060708: th 326feeeb..32820754
-//	    fwd b4a2a8953d9bb042 -> 34a2a8953d9bb042, bwd cddc0d304f148184 -> 0ddc0d304f148184
+//	  HMAC-SHA256(secret, "jimichi/v2/c25519/counter/fwd" || 00 || th || 01)[:8]
+//	  hop 0, link 200: th b14c23db..2e00928c
+//	    fwd 5bdc9f320a581f9d -> 1bdc9f320a581f9d, bwd c0745a8762bbd942 -> 00745a8762bbd942
+//	  hop 2, link 0102030405060708: th 068c7bd6..d787b0f9
+//	    fwd 0778248061dab8ca -> 0778248061dab8ca, bwd c961738c13a9c105 -> 0961738c13a9c105
+//	  hop 0, link 200, identity: th 3f1268d9..04422ecb
+//	    fwd fa24c2e6990665f2 -> 3a24c2e6990665f2, bwd f6ca6ef42dae9b09 -> 36ca6ef42dae9b09
 //	gost, th = Streebog-256(T), KDF_GOSTR3411_2012_256 (RFC 7836, 4.5) =
-//	  HMAC-Streebog256(secret, 01 || "jimichi/v1/gost/counter/fwd" || 00 || th || 01 00)[:8]
-//	  hop 0, link 200: th 89a0d93b..2a2b5f1c
-//	    fwd 2f610511654c3e3a -> 2f610511654c3e3a, bwd bf3555cb42b9c5ed -> 3f3555cb42b9c5ed
-//	  hop 2, link 0102030405060708: th 8b87e344..50014095
-//	    fwd 27dc77a5bfb21df6 -> 27dc77a5bfb21df6, bwd b607180bb3b60dd0 -> 3607180bb3b60dd0
+//	  HMAC-Streebog256(secret, 01 || "jimichi/v2/gost/counter/fwd" || 00 || th || 01 00)[:8]
+//	  hop 0, link 200: th c4aff7e9..6cae1080
+//	    fwd 95a2d1cbcee19679 -> 15a2d1cbcee19679, bwd 1235e4fa8c36603b -> 1235e4fa8c36603b
+//	  hop 2, link 0102030405060708: th 57868c17..fd01fb20
+//	    fwd a285f620c8a4d7ac -> 2285f620c8a4d7ac, bwd 306883539182f0a2 -> 306883539182f0a2
+//	  hop 0, link 200, identity: th d7117c13..0cfdd646
+//	    fwd 21e06998e88f5a34 -> 21e06998e88f5a34, bwd eeee7d74a91ab022 -> 2eee7d74a91ab022
 func TestCounterOffsetKnownAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		p        jcrypto.CryptoProvider
 		pub      int
 		index    int
 		link     uint64
+		identity bool
 		th       string
 		fwd, bwd uint64
 	}{
-		{c25519.New(), 32, 0, 200, "bf5988647af2c8b161b8992b8015c2bea0aed5837cc53e37b60450f5fc43aeb7",
-			0x3deca6ae015c8e00, 0x29b99d95ce52c6cc},
-		{c25519.New(), 32, 2, 0x0102030405060708, "326feeeb234c925784cde16f4c9d59551914af0237b3ee8c5da7697032820754",
-			0x34a2a8953d9bb042, 0x0ddc0d304f148184},
-		{gost.New(), 64, 0, 200, "89a0d93bcff53a1914892c6fdf5b8cad7a726f6678cb09c01d91aa532a2b5f1c",
-			0x2f610511654c3e3a, 0x3f3555cb42b9c5ed},
-		{gost.New(), 64, 2, 0x0102030405060708, "8b87e34457c514232ff8fe0519f5b55954af93fff4e7a73399917a3f50014095",
-			0x27dc77a5bfb21df6, 0x3607180bb3b60dd0},
+		{c25519.New(), 32, 0, 200, false, "b14c23db2eb7be7e6fb80d79859e002ef40b6c2262082d633aa6d44a2e00928c",
+			0x1bdc9f320a581f9d, 0x00745a8762bbd942},
+		{c25519.New(), 32, 2, 0x0102030405060708, false, "068c7bd6e11a65ebc017f90c1ee536554f95a6c18dbe7528e342ee9bd787b0f9",
+			0x0778248061dab8ca, 0x0961738c13a9c105},
+		{c25519.New(), 32, 0, 200, true, "3f1268d9cdfeaff916445d4aa1648775fb3a3f290da1142fb0e9128c04422ecb",
+			0x3a24c2e6990665f2, 0x36ca6ef42dae9b09},
+		{gost.New(), 64, 0, 200, false, "c4aff7e929db19a4171ed91d841bfe6ce2658d957a5fa5dc80ef69a76cae1080",
+			0x15a2d1cbcee19679, 0x1235e4fa8c36603b},
+		{gost.New(), 64, 2, 0x0102030405060708, false, "57868c17ef09fd83789be00b4ce8f58eca074ab981d154bf8e20bafcfd01fb20",
+			0x2285f620c8a4d7ac, 0x306883539182f0a2},
+		{gost.New(), 64, 0, 200, true, "d7117c1346e610f6d636fed3a24a065a1ff72ada68631ad72a1bc2970cfdd646",
+			0x21e06998e88f5a34, 0x2eee7d74a91ab022},
 	} {
-		t.Run(fmt.Sprintf("%v/hop %d", tc.p.Suite(), tc.index), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%v/hop %d/identity %v", tc.p.Suite(), tc.index, tc.identity), func(t *testing.T) {
 			secret, err := secmem.New(32)
 			if err != nil {
 				t.Fatal(err)
@@ -65,10 +78,14 @@ func TestCounterOffsetKnownAnswer(t *testing.T) {
 				secret.Bytes()[i] = byte(0x40 + i)
 			}
 			onion, eph := make([]byte, tc.pub), make([]byte, tc.pub)
+			var identity []byte
 			for i := range onion {
 				onion[i], eph[i] = byte(0x80+i), byte(i)
+				if tc.identity {
+					identity = append(identity, byte(0xc0+i))
+				}
 			}
-			ctx, err := setupContext(tc.p, tc.index, tc.link, onion, eph)
+			ctx, err := setupContext(tc.p, tc.index, tc.link, onion, eph, identity)
 			if err != nil {
 				t.Fatalf("setupContext: %v", err)
 			}
@@ -228,7 +245,7 @@ func exitSetup(t *testing.T, p jcrypto.CryptoProvider, nodePub []byte, link, fir
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, err := setupContext(p, 0, link, nodePub, ephPub)
+	ctx, err := setupContext(p, 0, link, nodePub, ephPub, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +293,7 @@ func TestOpenSetupRefusesAFirstCounterPastTheLimit(t *testing.T) {
 	}
 	defer priv.Release()
 
-	layer, err := OpenSetup(p, priv, pub, exitSetup(t, p, pub, 77, counterLimit-1))
+	layer, err := OpenSetup(p, priv, pub, nil, exitSetup(t, p, pub, 77, counterLimit-1))
 	if err != nil {
 		t.Fatalf("OpenSetup with the last valid first counter: %v", err)
 	}
@@ -285,7 +302,7 @@ func TestOpenSetupRefusesAFirstCounterPastTheLimit(t *testing.T) {
 		t.Fatalf("exit layer: first %#x, next %q %d", layer.First, layer.NextAddr, layer.NextCircuit)
 	}
 	for _, first := range []uint64{counterLimit, ^uint64(0)} {
-		if _, err := OpenSetup(p, priv, pub, exitSetup(t, p, pub, 78, first)); !errors.Is(err, ErrFraming) {
+		if _, err := OpenSetup(p, priv, pub, nil, exitSetup(t, p, pub, 78, first)); !errors.Is(err, ErrFraming) {
 			t.Fatalf("first counter %#x: %v, want ErrFraming", first, err)
 		}
 	}

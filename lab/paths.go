@@ -26,10 +26,11 @@ func SamplePaths(nodes, hops, samples int, seed int64) ([][]int, error) {
 
 // SampleMirrorPaths draws paths the way a client does when the mirror of its
 // entry need not hold every listed node; mirrors[e][i] says whether entry e
-// serves node i. Each attempt draws the entry among all the nodes, is refused
-// when the client's own rule for that -missing refuses the mirror
-// (client.JudgeMirror), and otherwise draws the other hops among the nodes the
-// mirror holds. A refused attempt gives no path and is counted. With full
+// serves node i in a bundle that passes the client's check, since the client
+// counts one that does not as left out. Each attempt draws the entry among all
+// the nodes, is refused when the client's own rule for that -missing refuses
+// the mirror (client.JudgeMirror), and otherwise draws the other hops among the
+// nodes the mirror holds. A refused attempt gives no path and is counted. With full
 // mirrors the paths are those of SamplePaths for the same seed
 func SampleMirrorPaths(mirrors [][]bool, hops, missing, samples int, seed int64) (paths [][]int, refused int, err error) {
 	nodes := len(mirrors)
