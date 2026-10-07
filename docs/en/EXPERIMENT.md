@@ -82,7 +82,7 @@ distributions yet.
 
 | Metric | Definition |
 |---|---|
-| Bandwidth multiplier | frames on a link within the observation window over messages handed to the clients. Reported separately for the client-entry link and for the observed link between nodes, in each direction. The window opens when the flows start sending: circuit setup and anything sent before it are excluded. A frame on the window boundary is excluded |
+| Bandwidth multiplier | frames on a link within the observation window over messages handed to the clients. Reported separately for the client-entry link and for the observed link between nodes, in each direction. The window opens when the flows start sending, once the setup of every flow has crossed every observed link: circuit setup and anything sent before it are excluded. Clients send only while the window is open. A frame at the moment the window opens counts, a frame at the moment it closes does not. A message handed over just before the window closes can cross a link, or come back, after it closes, so a single run without protection can read one frame per such message below x1 there; such runs are rare, and the median of a series without protection stays at x1 |
 | Goodput (planned, [#118](https://github.com/jimichi-org/jimichi/issues/118)) | payload bytes per second per client |
 | Latency | median, 95th and 99th percentile. The lab harness measures the round trip: from handing a message to the client to the exit's echo coming back, matched to its message by sequence number, not by order |
 | Cost per cell | nanoseconds of CPU and allocations to strip a layer |
@@ -229,6 +229,11 @@ samples, the standard error is 0, and the row says nothing about the choice. The
 | the mirrors of the rogue entries are refused (-leftout above the bound) | a rogue entry and exit, 0 |
 | no mirror lacks more than the bound | refused attempts, 0 |
 | no node withholds, or chains of one or two nodes | attempts failed at setup, 0 |
+
+The printed row gives four decimals. A value they would round to 0 or 1 is printed to two
+significant digits of its distance from it, so a printed 0.0000 or 1.0000 is exactly 0 or 1. A
+sampled share can be exactly 0 or 1 too: a share is exact by construction only when its bracket
+also reads 0.0000 or 1.0000 +- 0.0000.
 
 For N = 5, k = 2 and h = 3 there are 5 * 4 * 3 = 60 ordered chains. Six have rogue nodes at both
 ends (2 choices of the entry, the other rogue node as the exit, any of the 3 honest nodes

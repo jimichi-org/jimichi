@@ -144,6 +144,9 @@ func Execute(cfg Config) (*Run, error) {
 		if err != nil {
 			return nil, err
 		}
+		if exitFirstWriteDelay > 0 {
+			conn = &slowFirstWrite{Conn: conn, delay: exitFirstWriteDelay}
+		}
 		t, back := NewTrace(start), NewTrace(start)
 		exitMu.Lock()
 		exitTraces = append(exitTraces, t)
@@ -189,6 +192,29 @@ func Execute(cfg Config) (*Run, error) {
 		defer exitMu.Unlock()
 		return len(exitTraces)
 	}
+	exitSetUp := func() bool {
+		exitMu.Lock()
+		defer exitMu.Unlock()
+		for _, t := range exitTraces {
+			if t.Len() == 0 {
+				return false
+			}
+		}
+		return true
+	}
+	// the first frame of a forward trace is the setup of its flow
+	lastSetup := func() time.Duration {
+		exitMu.Lock()
+		traces := append(append([]*Trace(nil), entry...), exitTraces...)
+		exitMu.Unlock()
+		var last time.Duration
+		for _, t := range traces {
+			if e := t.Events(); len(e) > 0 {
+				last = max(last, e[0])
+			}
+		}
+		return last
+	}
 	// real clients start at unrelated moments, so each schedule gets a random
 	// phase; dialling back to back instead would put every client in phase and
 	// hand the attack ties that no real network produces
@@ -228,6 +254,14 @@ func Execute(cfg Config) (*Run, error) {
 			}
 		}
 	}
+	// a relay opens the last link, completes its handshake there and only then
+	// writes the setup, so an origin taken once the link exists can still let
+	// the setup of the last flow into the window. A setup that never comes
+	// leaves its circuit closed or a relay limit counted, which marks the run
+	// broken or limited instead of losing the series
+	if cfg.Hops >= 2 {
+		_ = waitFor(exitSetUp, 5*time.Second)
+	}
 
 	latency := newLatency(clients, start)
 	// the last client started its schedule a moment ago, so a window opening
@@ -235,8 +269,8 @@ func Execute(cfg Config) (*Run, error) {
 	if schedule > 0 {
 		time.Sleep(time.Duration(phases.Int63n(int64(schedule))))
 	}
-	origin := time.Since(start)
-	sent := runFlows(cfg, clients, latency)
+	origin := openWindow(func() time.Duration { return time.Since(start) }, lastSetup())
+	sent := runFlows(cfg, clients, latency, start.Add(origin+cfg.Duration))
 
 	// a fixed drain would cut the latency tail of a slow schedule; a message
 	// lost on the way never answers, so the wait is bounded by the configuration
@@ -269,6 +303,32 @@ func (r *Run) addRelay(c relay.Counters) {
 	r.RelayTimedOut += c.TimedOut
 	r.RelayExpired += c.Expired
 	r.RelayRefused += c.RefusedLinks + c.RefusedBusy + c.RefusedSource + c.RefusedRate + c.RefusedSetups
+}
+
+// a frame on the origin counts inside the window, and a coarse clock can give
+// the last setup frame and the origin the same reading
+func openWindow(now func() time.Duration, lastSetup time.Duration) time.Duration {
+	origin := now()
+	for origin <= lastSetup {
+		time.Sleep(time.Millisecond)
+		origin = now()
+	}
+	return origin
+}
+
+// set only by tests: holds back the first write on every exit link, the
+// handshake its relay starts, so the setup behind it is late on purpose
+var exitFirstWriteDelay time.Duration
+
+type slowFirstWrite struct {
+	net.Conn
+	delay time.Duration
+	once  sync.Once
+}
+
+func (c *slowFirstWrite) Write(b []byte) (int, error) {
+	c.once.Do(func() { time.Sleep(c.delay) })
+	return c.Conn.Write(b)
 }
 
 func waitFor(cond func() bool, limit time.Duration) error {
@@ -360,11 +420,12 @@ func (l *latencyCollector) samples() []time.Duration {
 	return out
 }
 
-func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector) int {
+// sending stops where the window closes, so a message is counted only if it
+// was handed over inside the window
+func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector, deadline time.Time) int {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	sent := 0
-	deadline := time.Now().Add(cfg.Duration)
 
 	for i, c := range clients {
 		wg.Add(1)
@@ -384,7 +445,7 @@ func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector) i
 				// regular pattern would make the attack unrealistically easy
 				gap := time.Duration(rng.ExpFloat64() * float64(cfg.SendEvery))
 				time.Sleep(gap)
-				if time.Now().After(deadline) {
+				if !time.Now().Before(deadline) {
 					break
 				}
 				seq := uint64(local)
