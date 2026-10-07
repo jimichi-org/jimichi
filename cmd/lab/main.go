@@ -6,10 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -409,13 +411,14 @@ func printSummary(w io.Writer, sum []summary) {
 	fmt.Fprintln(w, "both are left out of the medians, ranges and deg, which rest on the clean runs")
 }
 
-// the report keeps latency to the microsecond, so a value below a millisecond
-// needs a third decimal to read the same as the report
+// the report keeps latency to the microsecond, and the median of an even
+// number of runs can fall half way between two microseconds
 func milliseconds(v float64) string {
-	if v < 1 {
-		return fmt.Sprintf("%.3f", v)
+	halves := math.Round(v * 2000)
+	if math.Mod(halves, 2) != 0 {
+		return strconv.FormatFloat(halves/2000, 'f', 4, 64)
 	}
-	return fmt.Sprintf("%.2f", v)
+	return strconv.FormatFloat(halves/2000, 'f', 3, 64)
 }
 
 // the first three fields of /proc/loadavg; empty where there is no such file
