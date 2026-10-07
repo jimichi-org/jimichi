@@ -330,8 +330,10 @@ and has no primitives of its own.
 - Identity signatures never authenticate client messages. A client has no signing key: its
   identity key is an agreement key and never goes into Sign. A sender's signature over a message
   or a transcript would prove to a third party who sent it. The packages of the end-to-end layer
-  (noise, e2e) do not call GenerateSigning, Sign or Verify; their tests check this with a provider
-  on which such a call fails the test. Only the CA and the nodes sign.
+  (noise, e2e) do not call GenerateSigning, Sign or Verify. Their tests check this twice: the
+  source of the packages holds no such call, and every test of the packages, the refused,
+  replayed and forged inputs included, runs on a provider on which such a call fails the test.
+  Only the CA and the nodes sign.
 - The CA key and the node signing key are held in secmem buffers, and pki hands out only the
   public keys. The copies libraries make during generation and signing are listed under
   "Known gaps".
@@ -387,7 +389,7 @@ handshake payload.
 | `e2e/step` | SID, direction, u32be(n) | 82 / 80 |
 | `e2e/card` | the card | 130 / 160 |
 | `e2e/check` | a one-time public key, the peer's key | 108 / 170 |
-| `mailbox/queue` | the fetch capability F, 16 bytes | 62 / 60 |
+| `mailbox/queue` | the fetch capability F, 16 bytes (the mailbox, planned, #18) | 62 / 60 |
 
 The lengths for cards and for the exchange `e2e/card` assume a 38-byte mailbox address.
 
@@ -400,8 +402,9 @@ u8 version = 1 | u8 suite (1 GOST, 2 c25519) | u8 address length | mailbox addre
 - The canonical form: decoding and encoding give the same bytes, and no trailing bytes are
   allowed. The address passes the pki rules for node addresses, the queue is not all zeroes, and
   the key is exactly P bytes.
-- The queue is the first 16 bytes of the hash of the `mailbox/queue` transcript of the fetch
-  capability F.
+- The queue is to be the first 16 bytes of the hash of the `mailbox/queue` transcript of the
+  fetch capability F. That derivation belongs to the mailbox, which is planned (#18); until then
+  a card takes any queue that is not all zeroes.
 - The text is `<suite>:<base64 with padding>`; the prefix equals the suite inside the card, and a
   round trip proves the one spelling, as for the trust anchor.
 - `card_hash` is the hash of the `e2e/card` transcript of the card, 32 bytes. There is no short
@@ -531,6 +534,11 @@ inner   = flags (bit 0: dummy, the rest 0) | u16be(length) | body | zeroes, 371 
   - otherwise a temporary copy of the chain steps to n, the record is opened, and only on success
     does the state change (the skipped numbers count as lost). A forged number costs at most 64
     steps. Skipped keys are not stored.
+- After a gap of more than 64 records in one direction, such as a burst dropped at the mailbox
+  or a long outage, every later record of that direction is outside the window and is lost as
+  well. Only a new session brings the direction back: the receiving side opens nothing and goes
+  stale, a stale side seals nothing, so the other side goes stale too, and the initiator starts a
+  new handshake. With a fetch every 200 ms this takes at most 2 x 90 s plus the 60 s wait for kk2.
 - A dummy record is empty. Non-zero padding, extra flag bits, a length above 368 and a dummy
   with a body are refused. A real record and a dummy one cost the same provider calls.
 - Forward secrecy per record. There is no post-compromise recovery (no DH ratchet); a new
