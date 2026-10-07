@@ -468,6 +468,68 @@ func TestBindingTableIsBounded(t *testing.T) {
 	}
 }
 
+func (f *fixture) refused(circuit uint64, req Request) bool {
+	f.t.Helper()
+	r, err := ParseReply(f.s.Deliver(circuit, req.Bytes()))
+	if err != nil {
+		f.t.Fatalf("reply does not parse: %v", err)
+	}
+	return r.Status == StatusBad
+}
+
+func TestBindingTableEvictsTheLeastRecentlySeen(t *testing.T) {
+	f := newFixture(t, func(l *Limits) { l.Circuits = 3 })
+	for c := range uint64(3) {
+		f.fetch(c, capOf(byte(c+1)))
+		f.clk.add(time.Second)
+	}
+	f.fetch(0, capOf(1))
+	f.fetch(3, capOf(4))
+	f.fetch(4, capOf(5))
+	if !f.refused(0, Request{Tag: 3, Fetch: capOf(0x77)}) {
+		t.Fatal("the circuit seen last lost its binding to a newer one")
+	}
+	for _, c := range []uint64{1, 2} {
+		if f.refused(c, Request{Tag: 3, Fetch: capOf(0x77)}) {
+			t.Fatalf("circuit %d seen least recently kept its binding", c)
+		}
+	}
+}
+
+func TestSweepKeepsABindingCreatedFirstButSeenRecently(t *testing.T) {
+	f := newFixture(t, nil)
+	for c := range uint64(3) {
+		f.fetch(c, capOf(byte(c+1)))
+		f.clk.add(time.Second)
+	}
+	f.clk.add(4 * time.Minute)
+	f.fetch(0, capOf(1))
+	f.s.Sweep(f.clk.now().Add(time.Minute + 10*time.Second))
+	if s := f.s.Stats(); s.Bindings != 1 {
+		t.Fatalf("%d bindings after the sweep, want only the one seen recently", s.Bindings)
+	}
+	if !f.refused(0, Request{Tag: 3, Fetch: capOf(0x77)}) {
+		t.Fatal("the sweep took the binding seen recently")
+	}
+}
+
+// a queue nobody fetched is past its hold, yet its younger record keeps it
+func TestSweepKeepsAnUnfetchedQueueWithALiveRecord(t *testing.T) {
+	f := newFixture(t, nil)
+	a := capOf(0xaa)
+	f.put(1, f.id(a), 1)
+	f.clk.add(4 * time.Minute)
+	f.put(1, f.id(a), 2)
+	f.clk.add(time.Minute + time.Second)
+	f.s.Sweep(f.clk.now())
+	if s := f.s.Stats(); s.Queues != 1 || s.Records != 1 || s.Expired != 1 {
+		t.Fatalf("after the sweep: %+v", s)
+	}
+	if got := f.fetch(2, a); got != 2 {
+		t.Fatalf("fetched %d, want the younger record", got)
+	}
+}
+
 func TestCloseZeroesEverything(t *testing.T) {
 	f := newFixture(t, nil)
 	a := capOf(0xaa)

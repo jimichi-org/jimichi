@@ -98,8 +98,8 @@ func NewStore(p jcrypto.CryptoProvider, lim Limits, now func() time.Time) (*Stor
 // the exit, unique among its live circuits. The payload is zeroed before the
 // call returns and the reply is always ReplySize bytes
 func (s *Store) Deliver(circuit uint64, payload []byte) []byte {
-	// one hash on every request, whatever it holds, so the time to the reply
-	// says nothing about the state of the store
+	// one hash on every request, whatever it holds, so the hash adds the same
+	// time to every reply; the rest of the work is bounded, not constant
 	var fetchCap [CapSize]byte
 	if len(payload) >= 3+CapSize {
 		copy(fetchCap[:], payload[3:3+CapSize])
