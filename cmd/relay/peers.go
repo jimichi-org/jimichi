@@ -76,7 +76,7 @@ type peerEntry struct {
 }
 
 // what the info port serves as /descriptors, with the moment the next bundle
-// leaves or joins it
+// leaves or joins it; no body until this node's own bundle starts
 type mirror struct {
 	body  []byte
 	until int64
@@ -87,8 +87,8 @@ type mirror struct {
 type peerCache struct {
 	self  string
 	addrs []string
-	// the bundle this node serves itself and when it runs out
-	own    func() ([]byte, int64, bool)
+	// the bundle this node serves itself, when it starts and when it runs out
+	own    func(now int64) ([]byte, int64, int64, bool)
 	fetch  func(addr string) ([]byte, error)
 	read   func(addr string, bundle []byte, now time.Time) (*peerEntry, error)
 	now    func() time.Time
@@ -123,10 +123,11 @@ func newPeerCache(n *node, addrs []string, read func(string, []byte, time.Time) 
 	}
 }
 
-// a client checks a bundle on its own clock, so the mirror holds a peer's
-// bundle only while a clock up to Skew ahead of this node's finds it valid,
-// whatever lifetime the peer signed it for
-const mirrorMargin = pki.Skew
+// a client checks a bundle on its own clock, up to Skew ahead of this node's,
+// once the mirror has arrived, up to fetch.Timeout after the check here, which
+// reads whole seconds: the mirror holds a peer's bundle only while such a
+// clock finds it valid, whatever lifetime the peer signed it for
+const mirrorMargin = pki.Skew + fetch.Timeout + time.Second
 
 // on the from edge a clock up to Skew behind this node's is covered by the
 // verifier's allowance, so the node's own clock decides there
@@ -206,12 +207,16 @@ func (c *peerCache) refresh() bool {
 func (c *peerCache) publish() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	own, until, ok := c.own()
-	if !ok {
+	now := c.now().Unix()
+	own, from, until, ok := c.own(now)
+	switch {
+	case !ok:
 		c.mirror.Store(nil)
 		return
+	case now < from:
+		c.mirror.Store(&mirror{until: from})
+		return
 	}
-	now := c.now().Unix()
 	entries := make([]pki.MirrorEntry, 0, len(c.addrs)+1)
 	entries = append(entries, pki.MirrorEntry{Addr: c.self, Bundle: own})
 	// a peer whose bundle this node does not hold is left out: were the mirror
@@ -289,7 +294,7 @@ func (c *peerCache) descriptors() ([]byte, bool) {
 		c.publish()
 		m = c.mirror.Load()
 	}
-	if m == nil || c.now().Unix() >= m.until {
+	if m == nil || m.body == nil || c.now().Unix() >= m.until {
 		return nil, false
 	}
 	return m.body, true

@@ -22,6 +22,7 @@ import (
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/internal/fetch"
 	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/relay"
 	"github.com/jimichi-org/jimichi/wire"
@@ -382,13 +383,14 @@ func TestMirroredBundleOfTheReplacedKeyStaysUsable(t *testing.T) {
 			c.route(n2.n.addr, "")
 
 			step(30 * time.Minute)
-			// the bundle leaves the mirror 120 s before it expires: one second
-			// earlier a clock 119 s ahead reads 2 s before the expiry
-			step(30*time.Minute - pki.Skew - time.Second)
+			// the bundle leaves the mirror 126 s before it expires; one second
+			// earlier, 127 s before, a clock 119 s ahead that reads it 5 s later is
+			// 3 s before the expiry
+			step(30*time.Minute - mirrorMargin - time.Second)
 			held := mirrored()
-			v, err := pki.Verify(c.p, pki.Policy{Anchor: c.ca.Anchor(), Skew: pki.Skew}, n2.n.addr, held, c.clock.Now().Add(pki.Skew-time.Second))
+			v, err := pki.Verify(c.p, pki.Policy{Anchor: c.ca.Anchor(), Skew: pki.Skew}, n2.n.addr, held, c.clock.Now().Add(pki.Skew-time.Second+fetch.Timeout))
 			if err != nil {
-				t.Fatalf("the mirrored bundle a second before it leaves the mirror, on a clock 119 s ahead: %v", err)
+				t.Fatalf("the mirrored bundle a second before it leaves the mirror, on a clock 119 s ahead 5 s later: %v", err)
 			}
 			if v.Epoch != 0 || !bytes.Equal(v.OnionPub, k0) || !v.DescUntil.Equal(rotated.Add(time.Hour)) {
 				t.Fatalf("relay-1 mirrors epoch %d until %v, want the bundle signed for the replaced key at the rotation", v.Epoch, v.DescUntil)
@@ -400,9 +402,9 @@ func TestMirroredBundleOfTheReplacedKeyStaysUsable(t *testing.T) {
 
 			step(time.Second)
 			if listed := n1.mirrored(t); len(listed) == 0 || slices.Contains(listed, n2.n.addr) {
-				t.Fatalf("GET /descriptors 120 s before the held bundle expires lists %v, want the mirror without relay-2", listed)
+				t.Fatalf("GET /descriptors 126 s before the held bundle expires lists %v, want the mirror without relay-2", listed)
 			}
-			c.clock.advance(pki.Skew)
+			c.clock.advance(mirrorMargin)
 			if err := n2.verifyAt(held, c.clock.Now()); !errors.Is(err, pki.ErrDescTime) {
 				t.Fatalf("the held bundle at its expiry = %v, want %v", err, pki.ErrDescTime)
 			}
@@ -556,6 +558,22 @@ func TestRotateFlags(t *testing.T) {
 	defer got.letGo()
 	if got.grace != 30*time.Minute+pki.Skew || got.rotateAt.wall != t0.Add(time.Hour).UnixNano() || got.retireAt.pending() {
 		t.Fatalf("newOnionKeys: grace %v, first rotation at %v", got.grace, time.Unix(0, got.rotateAt.wall))
+	}
+}
+
+// the shortest -descriptor-ttl is 16 min and -onion-rotate is not shorter, so a
+// replaced key is held for 16 + 2 = 18 min, the next rotation waits for that
+// release, and a key opens setups for at most 18 + 16 + 2 = 36 min after it was
+// first published
+func TestShortestForwardSecrecyWindow(t *testing.T) {
+	ttl := minDescriptorTTL
+	if checkTTL(ttl-time.Second) == nil || checkRotateFlags(ttl-time.Second, ttl) == nil {
+		t.Fatalf("flags under %v accepted", ttl)
+	}
+	o := newOnionKeys(nil, ttl, ttl, false, t0)
+	defer o.letGo()
+	if window := max(o.every, o.grace) + o.grace; window != 36*time.Minute {
+		t.Fatalf("shortest window %v, want 36m", window)
 	}
 }
 

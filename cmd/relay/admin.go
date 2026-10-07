@@ -27,8 +27,9 @@ const (
 	minCheckEvery = time.Second
 	// a peer signs again by half its lifetime plus a timer period, and the new
 	// bundle has to reach a mirror whose clock is up to Skew off before the held
-	// one leaves it a margin before expiry: ttl/2 - 1 min - 2 Skew is 3 min here
-	minDescriptorTTL = 8 * mirrorMargin
+	// one leaves it, mirrorMargin before expiry: ttl/2 - 1 min - Skew -
+	// mirrorMargin is 174 s here
+	minDescriptorTTL = 16 * time.Minute
 )
 
 const (
@@ -170,28 +171,33 @@ func (n *node) certState() string {
 	}
 }
 
-// the bundle in service and the unix second it runs out
-func (n *node) current() ([]byte, int64, bool) {
+// the bundle in service, the unix second the mirror may list it from and the
+// one it runs out. A certificate may start up to Skew after this node's clock,
+// and until then a client whose clock is behind by up to Skew would refuse the
+// bundle
+func (n *node) current(now int64) ([]byte, int64, int64, bool) {
 	if n.id == nil {
 		b := n.unsigned
 		if s := n.out.Load(); s != nil {
 			b = s.bundle
 		}
-		return b, math.MaxInt64, b != nil
+		return b, 0, math.MaxInt64, b != nil
 	}
 	s := n.out.Load()
 	if s == nil {
-		return nil, 0, false
+		return nil, 0, 0, false
 	}
 	until := min(s.notAfter, s.expires)
-	if n.now().Unix() >= until {
-		return nil, 0, false
+	if now >= until {
+		return nil, 0, 0, false
 	}
-	return s.bundle, until, true
+	return s.bundle, max(s.published, s.notBefore), until, true
 }
 
+// served before its start as well: a peer lists it in its mirror only from
+// then, and enroll checks it on the clock that set not_before
 func (n *node) descriptor() ([]byte, bool) {
-	b, _, ok := n.current()
+	b, _, _, ok := n.current(n.now().Unix())
 	return b, ok
 }
 
