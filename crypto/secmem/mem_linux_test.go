@@ -13,13 +13,23 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
+// these tests are the evidence the threat model cites for key memory, so CI
+// must fail where a developer machine may skip
+func unavailable(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf(format, args...)
+	}
+	t.Skipf(format, args...)
+}
+
 // what the kernel records for the mapping that holds a buffer: "lo" is locked,
 // "dd" is excluded from core dumps
 func vmFlags(t *testing.T, addr uintptr) string {
 	t.Helper()
 	f, err := os.Open("/proc/self/smaps")
 	if err != nil {
-		t.Skipf("no smaps: %v", err)
+		unavailable(t, "no smaps: %v", err)
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -45,7 +55,7 @@ func TestProtectedPagesAreLockedAndUndumpable(t *testing.T) {
 	}
 	b, err := secmem.New(32)
 	if err != nil {
-		t.Skipf("cannot lock memory here: %v", err)
+		unavailable(t, "cannot lock memory here: %v", err)
 	}
 	defer b.Release()
 	flags := vmFlags(t, uintptr(unsafe.Pointer(&b.Bytes()[0])))

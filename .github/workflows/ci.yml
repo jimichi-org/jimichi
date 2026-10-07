@@ -40,6 +40,14 @@ jobs:
       # actually run, so the race detector and the real secmem path go together
       - name: unit and integration tests
         run: go test -race -count=1 ./...
+      # the threat model cites these as the check of key memory: the log must show
+      # both as passed, and a rename that leaves the pattern matching nothing fails
+      - name: key memory flags
+        run: |
+          log="$RUNNER_TEMP/secmem.log"
+          go test -race -count=1 -v -run '^(TestProtectedPagesAreLockedAndUndumpable|TestOffHeapWithoutMeasuresIsPlainMapping)$' ./crypto/secmem > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          test "$(grep -c -- '--- PASS' "$log")" -eq 2
 
   vulncheck:
     runs-on: ubuntu-latest
