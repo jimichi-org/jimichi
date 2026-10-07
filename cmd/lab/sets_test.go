@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -18,21 +19,21 @@ type setRow struct {
 	traffic, mode, rate, cover, relay string
 }
 
-// runs one correlation set through the command on three flows over three relays
-// for 300 ms each and checks what it prints and writes: one row per variant
+// runs one correlation set through the command on three flows over the given
+// number of relays and suite, for 300 ms each, and checks what it prints and writes: one row per variant
 // and window in the order of the set, every row with the configuration of its
 // variant and of the flags, the detail of every run and a summary line per
 // row. Timing decides the scores, so only the structure is checked, and that
 // a run without protection carries no frame beyond the messages sent
-func runSet(t *testing.T, set string, want []setRow) {
+func runSet(t *testing.T, set string, hops int, suiteName string, want []setRow) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("runs a live chain for every variant of the set")
 	}
 	dir := t.TempDir()
 	var out, errOut bytes.Buffer
-	status := command([]string{"-set", set, "-flows", "3", "-hops", "3", "-duration", "300ms", "-send", "30ms",
-		"-bins", "50ms,100ms", "-seed", "3", "-rev", "abc", "-out", dir}, &out, &errOut)
+	status := command([]string{"-set", set, "-flows", "3", "-hops", strconv.Itoa(hops), "-suite", suiteName,
+		"-duration", "300ms", "-send", "30ms", "-bins", "50ms,100ms", "-seed", "3", "-rev", "abc", "-out", dir}, &out, &errOut)
 	if status != 0 || errOut.Len() != 0 {
 		t.Fatalf("status %d, stderr %q", status, errOut.String())
 	}
@@ -78,8 +79,8 @@ func runSet(t *testing.T, set string, want []setRow) {
 		if got != w || r.Bin != bin {
 			t.Errorf("row %d: %+v at %s, want %+v at %s", i, got, r.Bin, w, bin)
 		}
-		if r.Flows != 3 || r.Hops != 3 || r.Duration != "300ms" || r.Send != "30ms" || r.Rev != "abc" ||
-			r.Suite != "c25519" || r.BaseSeed != 3 || r.Seed != lab.Derive(3, 0) || r.Repeat != 0 {
+		if r.Flows != 3 || r.Hops != hops || r.Duration != "300ms" || r.Send != "30ms" || r.Rev != "abc" ||
+			r.Suite != suiteName || r.BaseSeed != 3 || r.Seed != lab.Derive(3, 0) || r.Repeat != 0 {
 			t.Errorf("row %d does not carry the flags: %s", i, encode(t, r))
 		}
 		if r.Messages == 0 || r.Cells == 0 {
@@ -114,7 +115,7 @@ func runSet(t *testing.T, set string, want []setRow) {
 		t.Fatalf("%d summary lines for %d rows", len(sum), len(rows))
 	}
 	for i, s := range sum {
-		if s.Traffic != rows[i].Traffic || s.Bin != rows[i].Bin || s.Suite != "c25519" || s.Runs != 1 {
+		if s.Traffic != rows[i].Traffic || s.Bin != rows[i].Bin || s.Suite != suiteName || s.Runs != 1 {
 			t.Errorf("summary line %d: %s", i, encode(t, s))
 		}
 	}
@@ -136,7 +137,7 @@ func runSet(t *testing.T, set string, want []setRow) {
 }
 
 func TestMainSetFromTheCommandLine(t *testing.T) {
-	runSet(t, "main", []setRow{
+	runSet(t, "main", 2, "gost", []setRow{
 		{"none", "immediate", "0s", "0s", "0s"},
 		{"add-0.5x", "immediate", "0s", "400ms", "0s"},
 		{"add-1x", "immediate", "0s", "200ms", "0s"},
@@ -148,7 +149,7 @@ func TestMainSetFromTheCommandLine(t *testing.T) {
 }
 
 func TestRatesSetFromTheCommandLine(t *testing.T) {
-	runSet(t, "rates", []setRow{
+	runSet(t, "rates", 4, "c25519", []setRow{
 		{"none", "immediate", "0s", "0s", "0s"},
 		{"fixed-200ms", "constant-rate", "200ms", "0s", "0s"},
 		{"fixed-140ms", "constant-rate", "140ms", "0s", "0s"},
@@ -163,7 +164,7 @@ func TestRatesSetFromTheCommandLine(t *testing.T) {
 // relays tick 5% faster than the client: 70 ms * 0.95 = 66.5 ms and
 // 35 ms * 0.95 = 33.25 ms
 func TestPacedSetFromTheCommandLine(t *testing.T) {
-	runSet(t, "paced", []setRow{
+	runSet(t, "paced", 3, "c25519", []setRow{
 		{"none", "immediate", "0s", "0s", "0s"},
 		{"fixed-70ms", "constant-rate", "70ms", "0s", "0s"},
 		{"relay-70ms", "immediate", "0s", "0s", "66.5ms"},
