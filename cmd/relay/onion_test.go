@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -889,7 +891,7 @@ type tightProvider struct {
 
 func (p *tightProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	if !p.room() {
-		return nil, nil, errors.New("no room for a key")
+		return nil, nil, noRoom(32)
 	}
 	return p.CryptoProvider.GenerateEphemeral()
 }
@@ -928,7 +930,7 @@ func TestRotationGivesItsHeldPageToTheNewKey(t *testing.T) {
 	if got := f.stats(t); !strings.Contains(got, `"onion_rotate_failed":2`) || !strings.Contains(got, `"onion_epoch":1`) {
 		t.Fatalf("stats after two failed attempts: %s", got)
 	}
-	if n := strings.Count(f.log.String(), "onion key rotation: no room for a key"); n != 1 {
+	if n := strings.Count(f.log.String(), "onion key rotation: "+secmem.ErrNotLocked.Error()); n != 1 {
 		t.Fatalf("the failure was logged %d times, want once: %q", n, f.log.String())
 	}
 	last := f.n.onion.reserve
@@ -995,7 +997,11 @@ type shortProvider struct {
 	step string
 }
 
-var errNoRoom = errors.New("no room to lock a page")
+// what secmem returns when a page cannot be locked: the size is the one of the
+// allocation that found no room
+func noRoom(size int) error {
+	return fmt.Errorf("%w: mlock %d bytes (check RLIMIT_MEMLOCK): %w", secmem.ErrNotLocked, size, syscall.ENOMEM)
+}
 
 func (p *shortProvider) failAt(step string) {
 	p.mu.Lock()
@@ -1011,20 +1017,20 @@ func (p *shortProvider) fails(step string) bool {
 
 func (p *shortProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	if p.fails("generate") {
-		return nil, nil, errNoRoom
+		return nil, nil, noRoom(64)
 	}
 	return p.CryptoProvider.GenerateEphemeral()
 }
 
 func (p *shortProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	if p.fails("agree") {
-		return nil, errNoRoom
+		return nil, noRoom(32)
 	}
 	return p.CryptoProvider.Agree(priv, peerPub, ctx)
 }
 
 // one cause is one line, whether the key or the secret of its pair check found
-// no room
+// no room, though the two allocations differ in size
 func TestShortMemoryIsOneLineWhereverItStrikes(t *testing.T) {
 	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
 		t.Run(s.String(), func(t *testing.T) {
@@ -1056,7 +1062,7 @@ func TestShortMemoryIsOneLineWhereverItStrikes(t *testing.T) {
 				t.Fatalf("epoch %d after %d failed attempts, want 0 after 4", epoch, f.n.onionFailures())
 			}
 			lines := strings.Count(f.log.String(), "onion key rotation: ")
-			if lines != 1 || !strings.Contains(f.log.String(), "onion key rotation: "+errNoRoom.Error()+"\n") {
+			if lines != 1 || !strings.Contains(f.log.String(), "onion key rotation: "+secmem.ErrNotLocked.Error()+"\n") {
 				t.Fatalf("%d lines for one cause, want one naming it: %q", lines, f.log.String())
 			}
 			if strings.Contains(f.log.String(), relay.ErrOnionKey.Error()) {
@@ -1118,6 +1124,24 @@ func TestRotatingNodeReleasesItsKeys(t *testing.T) {
 	for i, k := range p.keys {
 		if k.Bytes() != nil {
 			t.Fatalf("key %d was not released when the node stopped", i)
+		}
+	}
+}
+
+func TestRotationClass(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{noRoom(32), secmem.ErrNotLocked.Error()},
+		{noRoom(64), secmem.ErrNotLocked.Error()},
+		{fmt.Errorf("%w: mmap 4096 bytes: %w", secmem.ErrNotMapped, syscall.ENOMEM), secmem.ErrNotMapped.Error()},
+		{fmt.Errorf("%w: %v", relay.ErrOnionKey, jcrypto.ErrBadPublicKey), relay.ErrOnionKey.Error()},
+		{errOnionUnlocked, errOnionUnlocked.Error()},
+		{errors.New("entropy source failed at 0xc000123456"), "onion key not made"},
+	} {
+		if got := rotationClass(c.err); got != c.want {
+			t.Errorf("rotationClass(%v) = %q, want %q", c.err, got, c.want)
 		}
 	}
 }

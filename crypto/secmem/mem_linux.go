@@ -16,7 +16,7 @@ func alloc(size int, p Policy) ([]byte, bool, error) {
 		unix.PROT_READ|unix.PROT_WRITE,
 		unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
 	if err != nil {
-		return nil, false, fmt.Errorf("secmem: mmap %d bytes: %w", size, err)
+		return nil, false, fmt.Errorf("%w: mmap %d bytes: %w", ErrNotMapped, size, err)
 	}
 
 	// keeps the pages out of core dumps even when dumping is on for the process
@@ -32,7 +32,7 @@ func alloc(size int, p Policy) ([]byte, bool, error) {
 	}
 	if err := unix.Mlock(mem); err != nil {
 		_ = unix.Munmap(mem)
-		return nil, false, fmt.Errorf("secmem: mlock %d bytes (check RLIMIT_MEMLOCK): %w", size, err)
+		return nil, false, fmt.Errorf("%w: mlock %d bytes (check RLIMIT_MEMLOCK): %w", ErrNotLocked, size, err)
 	}
 	return mem, true, nil
 }

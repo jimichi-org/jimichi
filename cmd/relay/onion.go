@@ -19,6 +19,21 @@ const onionCheckEvery = time.Second
 
 var errOnionUnlocked = errors.New("key memory is not locked")
 
+// what a failed rotation is logged as. A memory failure carries the size of the
+// allocation that found no room, and on GOST the key and the secrets of its
+// pair check differ in size, so the error itself would give one cause several
+// lines
+var rotationFailures = []error{secmem.ErrNotLocked, secmem.ErrNotMapped, errOnionUnlocked, relay.ErrOnionKey}
+
+func rotationClass(err error) string {
+	for _, known := range rotationFailures {
+		if errors.Is(err, known) {
+			return known.Error()
+		}
+	}
+	return "onion key not made"
+}
+
 // a moment that has come once the wall clock or the running time says so,
 // whichever is first. time.Now carries both readings and two such values
 // compare by the running time alone, which stands still while the host sleeps
@@ -166,9 +181,9 @@ func (n *node) rotateIfDue() {
 	epoch, err := n.rotate()
 	if err != nil {
 		o.failures.Add(1)
-		if cause := err.Error(); cause != o.failed {
+		if cause := rotationClass(err); cause != o.failed {
 			o.failed = cause
-			n.logger.Printf("onion key rotation: %v", err)
+			n.logger.Printf("onion key rotation: %s", cause)
 		}
 		return
 	}
