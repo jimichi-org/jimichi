@@ -325,10 +325,11 @@ and has no primitives of its own.
   does nothing but zero it, and that only with zeroing on. Process hardening returns an error
   there: with the default flags a node, a client and jimichi enroll refuse to start and run only
   with -harden=false and a -keymem without lock.
-- In a container mlock is bounded by RLIMIT_MEMLOCK. A node checks the budget at start and refuses
-  to run below 80 KiB, or when locking was asked for and failed. A rotating node holds one locked
-  page per onion key, two at most, and, when memory allows, four more that it gives back right
-  before it makes the next key: one for the key, three for its key pair check. It takes them after
+- In a container mlock is bounded by RLIMIT_MEMLOCK. A node checks the budget at start, before
+  it makes its first key, and refuses to run below 80 KiB, or when locking was asked for and
+  failed. A rotating node holds one locked page per onion key, two at most, and, when memory
+  allows, four more that it gives back right before it makes the next key: one for the key,
+  three for its key pair check. It takes them at start, after the pair checks of its keys, after
   each rotation and, if there was no room then, again once the replaced key is released. It does
   not take a new onion key whose page is not locked.
 - Every measure is switched by configuration, so its contribution can be measured:

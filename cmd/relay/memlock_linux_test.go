@@ -4,8 +4,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -106,6 +108,7 @@ func TestHeldPagesCoverARotationWithLockedMemoryUsedUp(t *testing.T) {
 			var out logBuffer
 			n := &node{p: p, link: link, ttl: time.Hour, now: clk.Now, logger: log.New(&out, "", 0)}
 			n.onion = newOnionKeys(ring, 3*time.Hour, time.Hour, true, clk.Now())
+			n.onion.hold()
 			t.Cleanup(n.closeOnion)
 			if n.onion.reserve == nil {
 				t.Fatal("no pages held before the locked memory is used up")
@@ -136,6 +139,37 @@ func TestHeldPagesCoverARotationWithLockedMemoryUsedUp(t *testing.T) {
 			n.rotateIfDue()
 			rotated(2, "the rotation after the release, with no page left again")
 		})
+	}
+}
+
+// a limit just under the minimum is refused by the minimum before any key is
+// made, and not by whichever allocation of the start found no room first
+func TestNodeUnderTheMemlockMinimumNamesTheLimit(t *testing.T) {
+	protectedPolicy(t)
+	boundMemlock(t, minMemlock-1)
+	// a node that went on would fail here and not at the minimum
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		p, err := suite.New(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out logBuffer
+		cfg := config{
+			listen: taken.Addr().String(), info: "127.0.0.1:0", stats: "127.0.0.1:0",
+			descriptorTTL: time.Hour, onionRotate: time.Hour, lock: true,
+		}
+		err = serveNode(p, cfg, log.New(&out, "", 0), make(chan os.Signal))
+		if err == nil || !strings.Contains(err.Error(), "RLIMIT_MEMLOCK is") || errors.Is(err, secmem.ErrNotLocked) {
+			t.Fatalf("%s: serveNode under the minimum: %v\n%s", s, err, out.String())
+		}
+		if out.String() != "" {
+			t.Fatalf("%s: a node refused by the minimum logged %q", s, out.String())
+		}
 	}
 }
 

@@ -72,9 +72,9 @@ type onionKeys struct {
 	retireAt deadline
 	// pages given back right before the next key is made, so the key and its
 	// pair check find room when the locked memory is used up. Taken when memory
-	// allows: after each rotation and, if that found no room, once the replaced
-	// key is released; nothing keeps another allocation from taking the room
-	// before that
+	// allows: at start once the other keys are checked, after each rotation and,
+	// if that found no room, once the replaced key is released; nothing keeps
+	// another allocation from taking the room before that
 	reserve *secmem.Buffer
 	closed  bool
 	// the last failure, so one that repeats every second is one line
@@ -96,10 +96,10 @@ func checkRotateFlags(rotate, ttl time.Duration) error {
 	return nil
 }
 
+// holds no pages yet: the caller takes them with hold once its other keys are
+// made and checked
 func newOnionKeys(ring *relay.OnionRing, every, ttl time.Duration, lock bool, now time.Time) *onionKeys {
-	o := &onionKeys{ring: ring, every: every, grace: ttl + pki.Skew, lock: lock, rotateAt: after(now, every)}
-	o.hold()
-	return o
+	return &onionKeys{ring: ring, every: every, grace: ttl + pki.Skew, lock: lock, rotateAt: after(now, every)}
 }
 
 // the new key, the one-time key of its pair check and the two secrets the check

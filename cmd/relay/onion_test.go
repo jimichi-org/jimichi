@@ -41,6 +41,7 @@ func (f *fixture) rotating(t *testing.T, every time.Duration) *relay.OnionRing {
 	f.n.mu.Lock()
 	f.n.link = f.pub
 	f.n.onion = newOnionKeys(ring, every, f.n.ttl, false, f.clock.Now())
+	f.n.onion.hold()
 	f.n.mu.Unlock()
 	t.Cleanup(f.n.closeOnion)
 	return ring
