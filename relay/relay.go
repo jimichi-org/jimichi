@@ -29,10 +29,9 @@ type Config struct {
 	// the public half as the node publishes it: an initiator that authenticates
 	// the link, and a client when Onion is nil, bind their keys to these bytes
 	StaticPub []byte
-	// the node's identity key, the one its certificate certifies, which every
-	// setup layer and every authenticated link of this node binds; empty when
-	// nodes are not authenticated. Both ends must agree on it, so a node with
-	// it and a client without it share no key
+	// the key its certificate certifies, bound by its setup layers and
+	// authenticated links; empty without node authentication, and a side that
+	// binds another value shares no key with the node
 	Identity []byte
 	// the keys that open setup layers, closed by the caller after Close; nil
 	// keeps StaticPriv, the link key, in that role as well for the life of the

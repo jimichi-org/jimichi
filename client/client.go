@@ -27,8 +27,7 @@ type Node struct {
 	StaticPub []byte
 	// the entry link key; empty means StaticPub
 	LinkPub []byte
-	// the key the node's certificate certifies, which its setup layer and, at
-	// the entry, the link bind; empty when nodes are not authenticated
+	// the key its certificate certifies; empty without node authentication
 	Identity []byte
 }
 

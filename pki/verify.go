@@ -184,10 +184,9 @@ func Verify(p jcrypto.CryptoProvider, pol Policy, addr string, bundle []byte, no
 	}, nil
 }
 
-// every bundle of a list and the list as a whole: one that fails, or two nodes
-// with one address, onion key or identity, refuse it. This is the check of an
-// enrollment, whose operator can act on both names; a client reads every
-// bundle on its own with Verify
+// the check of an enrollment, whose operator can act on both names: a bundle
+// that fails, or two nodes with one address, onion key or identity, refuse the
+// list; a client verifies every bundle on its own
 func VerifyChain(p jcrypto.CryptoProvider, pol Policy, addrs []string, bundles [][]byte, now time.Time) ([]Verified, error) {
 	if len(addrs) != len(bundles) {
 		return nil, fmt.Errorf("pki: %d addresses for %d bundles", len(addrs), len(bundles))
@@ -213,8 +212,7 @@ func VerifyChain(p jcrypto.CryptoProvider, pol Policy, addrs []string, bundles [
 }
 
 // the baseline for measuring what authentication is worth: the same bundle
-// read with no signature, time or address checked. It carries no identity, so
-// nothing binds one
+// read with no signature, time or address checked, and with no identity
 func Unverified(p jcrypto.CryptoProvider, addr string, bundle []byte) (*Verified, error) {
 	b, err := ParseBundle(bundle)
 	if err != nil {

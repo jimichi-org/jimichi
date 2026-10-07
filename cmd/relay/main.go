@@ -296,9 +296,8 @@ func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, sta
 		SourceSetupRate:        cfg.limits.SourceSetupRate,
 		SourceSetupBurst:       cfg.limits.SourceSetupBurst,
 	}
-	// set from the start, so until a roster arrives the node extends nowhere.
-	// The identity is bound from the start as well: before its certificate the
-	// node serves no descriptor, so no client knows the keys to reach it by
+	// both from the start: before a roster the node extends nowhere, and before
+	// a certificate it serves no descriptor that would name its keys
 	if cfg.auth {
 		rc.Peers = n.peerKey
 		if n.id != nil {

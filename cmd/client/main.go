@@ -356,8 +356,8 @@ func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger) ([]client
 
 // a mirror that waits for every node would let one node that withholds its
 // descriptor empty the mirrors of all the others, so the entry may leave out a
-// bounded number of nodes; a fixed chain needs exactly its own. at holds the
-// usable nodes, failed why a served bundle did not pass
+// bounded number of nodes, and a fixed chain needs exactly its own; at holds
+// the usable nodes and failed why a served bundle did not pass
 func (s selection) enough(at []int, failed []error, entry int) error {
 	missing := func(i int) error {
 		if failed[i] != nil {

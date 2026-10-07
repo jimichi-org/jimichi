@@ -44,8 +44,7 @@ var (
 type SetupHop struct {
 	// public key of the relay this layer is addressed to
 	StaticPub []byte
-	// the identity key its certificate certifies, empty when nodes are not
-	// authenticated; the layer opens only at a node that binds the same one
+	// the key its certificate certifies; empty without node authentication
 	Identity []byte
 	// address of the next relay, empty at the exit
 	NextAddr string
@@ -407,7 +406,7 @@ func setupAAD(index int) []byte {
 
 // one transcript per hop: version, hop index, identifier of the link into the
 // hop, the hop's onion key, the client's ephemeral key and, when nodes are
-// authenticated, the hop's identity key. Without authentication the part is
+// authenticated, the hop's identity key; without authentication the part is
 // left out rather than sent empty, and the count of parts keeps the two forms
 // apart
 func setupContext(p jcrypto.CryptoProvider, index int, link uint64, staticPub, ephPub, identity []byte) (jcrypto.Context, error) {
