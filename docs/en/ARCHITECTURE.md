@@ -362,7 +362,7 @@ dropped. The mailbox can drop everything anyway, and closing would give it one m
 Handling one request:
 
 1. The hash QueueID(F) is computed before any check and before the lock, on every request, for a
-   zero F and for a bad request too: the work per request does not depend on its content.
+   zero F and for a bad request too: whether it runs does not depend on the content of the request.
 2. Length not 427 or version not 1: reply 0x80.
 3. Binding: a circuit (its identifier on the inbound link of the exit, unique among the live
    circuits of the node) gets its fetch queue from the first non-zero F and its put queue from the
@@ -377,9 +377,13 @@ Handling one request:
 6. The payload slice is zeroed and the reply is built in a new slice.
 
 - A queue lives as long as its owner fetches. It is held while its last fetch, or its creation
-  for a queue not fetched yet, is within the TTL. Nobody evicts a held queue: holding N queues
-  takes N live circuits, each fetching its queue more often than once per TTL, and the nodes
-  limit circuit setup.
+  for a queue not fetched yet, is within the TTL, whether or not the circuit that did it is still
+  open. Nobody evicts a held queue.
+- One circuit holds two queues for a TTL, even after it closes: the one its put created and the
+  one it fetched. Holding N queues therefore takes about N/2 circuit setups per TTL, not N live
+  circuits. Every node limits setups per source address, the mailbox too, where a preceding relay
+  is one source: at 0.2 per second and a TTL of 5 min one source brings about 60 setups, that is
+  about 120 held queues, and the default 1024 queues take about 9 sources.
 - The binding table is bounded; when it is full, the binding seen least recently is evicted. An
   evicted honest circuit binds again to the same identifiers.
 - Every 30 s the expired records, the empty queues not fetched within the TTL and the bindings
@@ -391,8 +395,11 @@ Handling one request:
 - The array of a record is zeroed when it is fetched, when it expires, when its queue is evicted
   and when the node stops. Copies of the request remain in the cell body, in the link buffer and
   in the hash transcript on the heap, and nobody zeroes them.
-- Work per request: one hash and operations on maps and lists, no walk over the queues; only the
-  timed sweep walks them.
+- Work per request is bounded, not constant: one hash, operations on maps and lists, a copy of one
+  record for a put or a fetched head, and at most -mailbox-depth removals of expired records at
+  the head of the fetched queue. No request walks the queues; only the timed sweep does. The
+  difference is microseconds; outside the exit it shows only when the exit forwards at once
+  (-period 0).
 
 | Limit | Flag | Default |
 |---|---|---|
