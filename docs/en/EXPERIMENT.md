@@ -62,7 +62,7 @@ are not computed yet ([#119](https://github.com/jimichi-org/jimichi/issues/119))
 |---|---|
 | Share of chains with a rogue entry and exit | share of the chains whose first and last node are both rogue, that is held by the adversary, who then links the two ends of the circuit; a chain of one node counts when that node is rogue. A uniform choice of h distinct nodes among N, k of them rogue, gives k(k-1)/(N(N-1)), and k/N for h = 1 |
 | Share of chains with a rogue node | share of the chains that hold at least one rogue node; a uniform choice gives 1 - C(N-k,h)/C(N,h) |
-| Share of refused attempts | share of the attempts to build a chain whose entry serves a mirror the client refuses, one that lacks more than min(-missing, N - h) listed nodes; a listed bundle that fails the check counts as lacking |
+| Share of refused attempts | share of the attempts to build a chain whose entry serves a mirror the client refuses, one that lacks more than min(-missing, N - h) listed nodes or lacks a verified bundle of the entry itself; a listed bundle that fails the check counts as lacking |
 | Share of attempts failed at setup | share of the attempts in which the client chooses a chain the nodes do not set up: an honest node extends a circuit only to a node whose verified descriptor it holds, so a chain with an honest node directly before a node that withholds its descriptor fails. The two shares of chains above are taken over the chains that come up |
 | Standard error of a share | sqrt(p(1-p)/n) for a share of n independent draws at the value p the model gives; n is the number of chains that came up, and the number of attempts for the refused and the failed shares |
 
@@ -184,7 +184,8 @@ The choice of the chain is measured without traffic and without nodes. `cmd/lab 
 -samples attempts to draw a chain of -hops nodes among -nodes the way the client does, with the
 client's own functions for the entry, for taking or refusing its mirror and for the rest of the
 chain, on a stream derived from -seed in place of the system generator: the entry among all the
-nodes, a refusal when its mirror lacks more than min(-missing, N - h) of them (the bound), the
+nodes, a refusal when its mirror lacks more than min(-missing, N - h) of them (the bound) or a
+verified bundle of the entry itself, the
 other hops among the nodes the mirror holds. A chosen chain then comes up when every node on it
 extends the circuit to the next one, and here the lab applies the rule of the node: an honest
 node extends only to a node whose descriptor it holds, a rogue node to any node. The first

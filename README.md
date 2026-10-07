@@ -198,7 +198,7 @@ The client lists all five relays and builds a chain of three (`-hops`). At every
 its entry at random, asks that entry for the signed bundles of every listed node, verifies each
 bundle it gets against the anchor and only then draws the other two hops among the verified nodes.
 The entry may leave out one listed node, and a bundle that does not verify counts as left out
-(`-missing`, 1 by default), which lets a rogue entry narrow the choice
+(`-missing`, 1 by default; the entry's own bundle must verify), which lets a rogue entry narrow the choice
 ([LIMITATIONS](docs/en/LIMITATIONS.md)). The client does not log the chain, and after any
 failure it exits and draws a new one at its next start. `-fixed-chain` keeps the listed order
 for measurements that need a known path.
