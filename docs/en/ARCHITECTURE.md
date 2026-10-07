@@ -39,12 +39,13 @@ as the reply. A recipient client (client-b) and an end-to-end layer are planned
 2. It obtains the signed bundles of the listed nodes from the entry, the only node it connects to.
    The entry may leave out up to -missing of them (1 by default). A bundle is the node's
    certificate from the CA and a descriptor with the node keys, signed by the node signing key.
-3. Before the circuit setup the client checks every bundle against the trust anchor (section
-   "Node authentication"). If any listed node fails the check, the client refuses to build the
-   circuit.
-4. It draws the other nodes of the chain uniformly among the other nodes whose bundles it holds
-   (section "Choice of the chain") and agrees an ephemeral session key with each node of the
-   chain separately.
+3. Before the circuit setup the client checks every bundle against the trust anchor, each on its
+   own (section "Node authentication"). A bundle that fails the check counts as a node the entry
+   left out, within -missing. The entry's own bundle must pass, or the client refuses to build
+   the circuit.
+4. It draws the other nodes of the chain uniformly among the other nodes whose bundles passed the
+   check (section "Choice of the chain") and agrees an ephemeral session key with each node of
+   the chain separately.
 5. The client wraps the message in one layer per node: the outer one for the entry, the inner one
    for the exit.
 6. Each node strips exactly its own layer and learns only the next hop.
