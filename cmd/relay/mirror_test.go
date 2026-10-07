@@ -44,7 +44,8 @@ func (c *cluster) add(t *testing.T, name string, own *clock, ttl time.Duration) 
 
 // what a client that drew f as its entry makes of f's mirror when its clock is
 // ahead of the cluster's by the given time, behind when negative: every listed
-// bundle has to verify, as in cmd/client, and the client's own rule decides on
+// bundle has to verify, stricter than cmd/client, where a bundle that fails is a
+// node left out, and the client's own rule decides on
 // the set, for -missing 1 and a chain one hop shorter than the roster, so that
 // one node may be left out: min(1, n - (n-1)) = 1
 func (c *cluster) clientTakes(t *testing.T, f *fixture, ahead time.Duration) ([]string, error) {
