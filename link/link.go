@@ -28,7 +28,10 @@ const (
 	modeAuthenticated = 1
 )
 
-var ErrHandshake = errors.New("link: handshake failed")
+var (
+	ErrHandshake = errors.New("link: handshake failed")
+	ErrFrame     = errors.New("link: frame did not open")
+)
 
 type Conn struct {
 	raw   net.Conn
@@ -45,6 +48,9 @@ type Conn struct {
 	rmu     sync.Mutex
 	recvSeq uint64
 	buf     []byte
+	// the same on the read side: a frame cut short leaves the stream out of
+	// step, and one that did not open came from someone other than the peer
+	rerr error
 }
 
 // the provider has no size query, so a key pair is made once per suite and
@@ -321,7 +327,11 @@ func (c *Conn) ReadCell(cell *wire.Cell) error {
 func (c *Conn) readFrame(cell *wire.Cell) error {
 	c.rmu.Lock()
 	defer c.rmu.Unlock()
+	if c.rerr != nil {
+		return c.rerr
+	}
 	if _, err := io.ReadFull(c.raw, c.buf); err != nil {
+		c.rerr = err
 		return err
 	}
 	if c.recv == nil {
@@ -329,7 +339,8 @@ func (c *Conn) readFrame(cell *wire.Cell) error {
 	}
 	plain, err := c.recv.Open(nil, nonce(c.recv.NonceSize(), c.recvSeq), c.buf, nil)
 	if err != nil {
-		return err
+		c.rerr = fmt.Errorf("%w: %w", ErrFrame, err)
+		return c.rerr
 	}
 	c.recvSeq++
 	copy(cell[:], plain)
