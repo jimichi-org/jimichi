@@ -365,8 +365,8 @@ benchmark to compare with.
   circuit can be counted by several relays), broken_flows (clients that refused a reply or a link
   frame) and, per flow, flow_closed and flow_closed_after: whether the circuit closed before the
   run was read, as the client saw it and whatever the cause, and how long after the flows started
-  ("" for one that stayed open). A circuit ended by a relay or by the far side shows only in
-  flow_closed.
+  ("" for one that stayed open). Of the client fields, a circuit ended by a relay or by the far
+  side shows in flow_closed and not in broken_flows.
 - A row also carries relay_timed_out (handshake, setup and write deadlines that ran out),
   relay_expired (circuits closed for idleness or age) and relay_refused (connections and setups
   the relays turned away), summed over the relays. A run is limited when any of them is non-zero:
