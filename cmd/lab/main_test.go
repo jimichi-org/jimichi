@@ -37,6 +37,52 @@ func syntheticRun(broken uint64, brokenFlows int, closures ...lab.Closure) *lab.
 	}
 }
 
+// a run without protection as the harness hands it over: the setup of each
+// flow before the origin, two messages and their echoes inside the window,
+// one of them on the origin itself, and a frame exactly where the window
+// closes. The window is [100 ms, 1100 ms), so each direction of each link
+// counts 2 frames per flow, 4 for the 4 messages sent: x1 on every link
+func TestCostWithoutProtectionIsExactlyOneOnEveryLinkAndDirection(t *testing.T) {
+	start := time.Now()
+	ms := time.Millisecond
+	traces := func(offsets ...time.Duration) []*lab.Trace {
+		out := make([]*lab.Trace, 2)
+		for i := range out {
+			out[i] = lab.NewTrace(start)
+			for _, o := range offsets {
+				out[i].Mark(start.Add(o))
+			}
+		}
+		return out
+	}
+	run := &lab.Run{
+		Config:    lab.Config{Hops: 3, Flows: 2, Duration: time.Second, Suite: jcrypto.SuiteC25519, Payload: 128},
+		Entry:     traces(40*ms, 100*ms, 600*ms, 1100*ms),
+		Exit:      traces(60*ms, 100*ms, 601*ms, 1100*ms),
+		EntryBack: traces(102*ms, 603*ms, 1100*ms),
+		ExitBack:  traces(101*ms, 602*ms, 1100*ms),
+		Sent:      4,
+		Origin:    100 * ms,
+	}
+	res, _ := analyse(run, "none", 100*ms)
+	for _, c := range []struct {
+		name string
+		got  float64
+	}{
+		{"entry", res.Multiplier},
+		{"entry back", res.EntryBackMultiplier},
+		{"relay link", res.RelayMultiplier},
+		{"relay link back", res.RelayBackMultiplier},
+	} {
+		if c.got != 1 {
+			t.Errorf("%s: x%v, want exactly 1", c.name, c.got)
+		}
+	}
+	if res.Cells != 4 || res.Messages != 4 {
+		t.Errorf("%d cells for %d messages at the entry, want 4 and 4", res.Cells, res.Messages)
+	}
+}
+
 // flow 0 closed 350 ms on the trace clock, 250 ms after the flows started at
 // 100 ms; flow 1 stayed open
 func TestFlowClosuresReachTheReport(t *testing.T) {
@@ -147,6 +193,44 @@ func TestNoLatencySampleLeavesTheLatencyMedianNull(t *testing.T) {
 	}
 	if m["auc_median"] != 0.6 || m["ci_degenerate_runs"] != 0.0 {
 		t.Fatalf("clean fields lost: %s", encode(t, sum[0]))
+	}
+}
+
+// the report holds a latency to the microsecond: 155 us is 0.155 ms, which two
+// decimals would print as 0.15 or 0.16, and 1.555 ms as 1.55 or 1.56. The
+// median of 155 and 156 us is 155.5 us, 0.1555 ms, and of 82.59 and 82.6 ms
+// it is 82.595 ms
+func TestSummaryPrintsLatencyAsTheReportHoldsIt(t *testing.T) {
+	sum := summarise([]result{
+		{Suite: "c25519", Traffic: "fast", Bin: "100ms", AUC: 1, P50: "155µs"},
+		{Suite: "c25519", Traffic: "edge", Bin: "100ms", AUC: 1, P50: "999µs"},
+		{Suite: "c25519", Traffic: "one", Bin: "100ms", AUC: 1, P50: "1ms"},
+		{Suite: "c25519", Traffic: "mid", Bin: "100ms", AUC: 1, P50: "1.555ms"},
+		{Suite: "c25519", Traffic: "five", Bin: "100ms", AUC: 1, P50: "5ms"},
+		{Suite: "c25519", Traffic: "slow", Bin: "100ms", AUC: 1, P50: "48.5ms"},
+		{Suite: "c25519", Traffic: "half", Bin: "100ms", AUC: 1, P50: "155µs"},
+		{Suite: "c25519", Traffic: "half", Bin: "100ms", AUC: 1, P50: "156µs"},
+		{Suite: "c25519", Traffic: "paced", Bin: "100ms", AUC: 1, P50: "82.59ms"},
+		{Suite: "c25519", Traffic: "paced", Bin: "100ms", AUC: 1, P50: "82.6ms"},
+	})
+	var out bytes.Buffer
+	printSummary(&out, sum)
+	lines := map[string][]string{}
+	for _, l := range strings.Split(out.String(), "\n") {
+		if f := strings.Fields(l); len(f) > 0 {
+			lines[f[0]] = f
+		}
+	}
+	// traffic, bin, runs, brk, lim, clean, auc and its two bounds, top1, mult and
+	// relay-x come before p50
+	for traffic, want := range map[string]string{
+		"fast": "0.155", "edge": "0.999", "one": "1.000", "mid": "1.555", "five": "5.000", "slow": "48.500",
+		"half": "0.1555", "paced": "82.595",
+	} {
+		f := lines[traffic]
+		if len(f) < 13 || f[12] != want {
+			t.Errorf("%s: p50 printed in %q, want %s", traffic, strings.Join(f, " "), want)
+		}
 	}
 }
 
