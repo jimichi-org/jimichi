@@ -285,6 +285,50 @@ func TestNothingOpensAfterAFrameThatDidNot(t *testing.T) {
 	}
 }
 
+// a read cut short mid-frame leaves the stream out of step, so the link reads
+// nothing more, even once the socket would give it a whole genuine frame
+func TestNothingIsReadAfterAReadCutShort(t *testing.T) {
+	p := c25519.New()
+	priv, pub := keyPair(t, p)
+	a, b := net.Pipe()
+	m := &meter{Conn: a}
+	accepted := make(chan *link.Conn, 1)
+	go func() {
+		srv, err := link.Accept(b, p, priv, pub)
+		if err != nil {
+			t.Errorf("Accept: %v", err)
+		}
+		accepted <- srv
+	}()
+	client, err := link.Dial(m, p, pub)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	server := <-accepted
+	if server == nil {
+		t.FailNow()
+	}
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+
+	half := bytes.Repeat([]byte{0xA5}, client.FrameSize()/2)
+	go func() { _, _ = b.Write(half) }()
+	_ = a.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	var got wire.Cell
+	if err := client.ReadCell(&got); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the read cut short returned %v, want a deadline error", err)
+	}
+	_ = a.SetReadDeadline(time.Time{})
+	before, _ := m.totals()
+
+	go func() { _ = server.WriteCell(sample(7)) }()
+	if err := client.ReadCell(&got); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the read after it returned %v, cell %x, want the same deadline error", err, got[:8])
+	}
+	if after, _ := m.totals(); after != before {
+		t.Fatalf("the link read %d more bytes after a read cut short", after-before)
+	}
+}
+
 // a peer that stops reading must not hold the writer, and once a frame has
 // failed the link sends nothing more: the peer's frame numbers are out of step
 func TestWriteGivesUpOnAPeerThatStopsReading(t *testing.T) {
