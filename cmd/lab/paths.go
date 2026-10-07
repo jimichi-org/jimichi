@@ -173,22 +173,27 @@ var pathsLegend = []string{
 	"chains: the attempts whose chain came up; the last two columns are shares of those chains",
 	"in brackets what the model gives and the standard error of a share of that many draws at that value",
 	"where that value is 0 or 1 every draw gives the same answer: the share is exact by construction, not sampled",
-	"a value four decimals would round to 0 or 1 is printed with more, so 0.0000 and 1.0000 are exact",
+	"a printed 0.0000 or 1.0000 is exactly 0 or 1; a value four decimals would round to either is printed to two significant digits of its distance from it",
 }
 
 func share(sampled, expected, stderr float64) string {
 	return fmt.Sprintf("%6s [%s +- %s]", fraction(sampled), fraction(expected), fraction(stderr))
 }
 
-// four decimals, and more for a value they would round to 0 or 1, so that
-// 0.0000 and 1.0000 are left to the shares that are exact by construction
+// four decimals, and for a value they would round to 0 or 1 two significant
+// digits of its distance from it, so a printed 0.0000 or 1.0000 is exact; a
+// sampled share can be exactly 0 or 1 too, only its bracket tells it from a
+// share exact by construction
 func fraction(v float64) string {
-	for digits := 4; digits < 17; digits++ {
-		s := strconv.FormatFloat(v, 'f', digits, 64)
-		zeros := strings.Repeat("0", digits)
-		if (s != "0."+zeros || v == 0) && (s != "1."+zeros || v == 1) {
-			return s
-		}
+	s := strconv.FormatFloat(v, 'f', 4, 64)
+	if (s != "0.0000" || v == 0) && (s != "1.0000" || v == 1) {
+		return s
 	}
-	return strconv.FormatFloat(v, 'g', -1, 64)
+	// the exponent of the distance as two significant digits round it
+	_, exponent, _ := strings.Cut(strconv.FormatFloat(min(v, 1-v), 'e', 1, 64), "e")
+	digits, err := strconv.Atoi(exponent)
+	if err != nil || 1-digits > 17 {
+		return strconv.FormatFloat(v, 'g', 2, 64)
+	}
+	return strconv.FormatFloat(v, 'f', 1-digits, 64)
 }
