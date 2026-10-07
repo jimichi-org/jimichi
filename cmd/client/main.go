@@ -167,7 +167,7 @@ func exchange(c circuit, logger *log.Logger, message []byte, count int, interval
 		if err := c.Send(message); err != nil {
 			// the class is set before the link closes, so a send that failed on
 			// that close is reported as the refusal it follows
-			if refused := c.Refused(); refused != nil {
+			if refused := c.Refused(); refused != nil || errors.Is(err, client.ErrCircuitClosed) {
 				return ending(refused)
 			}
 			return 1, "send: " + cause(err)

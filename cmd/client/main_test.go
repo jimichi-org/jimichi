@@ -887,6 +887,7 @@ func TestEndingOfACircuit(t *testing.T) {
 		{client.ErrReplyNotOpened, 3, "circuit closed: client: reply refused: did not open"},
 		{client.ErrReplyOutOfTurn, 3, "circuit closed: client: reply refused: out of turn"},
 		{client.ErrReplyUnsolicited, 3, "circuit closed: client: reply refused: more replies than cells written"},
+		{client.ErrReplyFrame, 3, "circuit closed: client: reply refused: link: frame did not open"},
 	} {
 		if code, line := ending(c.refused); code != c.code || line != c.line {
 			t.Errorf("ending(%v) = %d, %q, want %d, %q", c.refused, code, line, c.code, c.line)
@@ -943,6 +944,9 @@ func TestExchangeEndsWithTheCodeAndLineOfTheCircuit(t *testing.T) {
 		{"send failed on the close of a refusal, fixed chain", 1, 0, brokenPipe, client.ErrReplyNotOpened, true, 3, "circuit closed: client: reply refused: did not open"},
 		{"send failed with no refusal", 1, 0, brokenPipe, nil, false, 1, "send: connection failed"},
 		{"send failed with no refusal, fixed chain", 1, 0, brokenPipe, nil, true, 1, "send: " + brokenPipe.Error()},
+		{"send refused after the far side closed", 1, 0, client.ErrCircuitClosed, nil, false, 1, "circuit closed"},
+		{"send refused after the far side closed, fixed chain", 1, 0, client.ErrCircuitClosed, nil, true, 1, "circuit closed"},
+		{"send refused after a frame that did not open", 1, 0, client.ErrCircuitClosed, client.ErrReplyFrame, false, 3, "circuit closed: client: reply refused: link: frame did not open"},
 		{"send failed on a refusal after a round trip, endless count", 0, 1, brokenPipe, client.ErrReplyHeader, false, 3, "circuit closed: client: reply refused: bad header"},
 		{"reply channel closed over a refusal after two round trips", 5, 2, nil, client.ErrReplyUnsolicited, false, 3, "circuit closed: client: reply refused: more replies than cells written"},
 	} {

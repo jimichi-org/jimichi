@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -348,6 +349,12 @@ func dialScripted(t *testing.T, p jcrypto.CryptoProvider) (*Client, *scriptedCha
 
 func dialScriptedThrough(t *testing.T, p jcrypto.CryptoProvider, dial func(ctx context.Context, network, addr string) (net.Conn, error)) (*Client, *scriptedChain) {
 	t.Helper()
+	return dialScriptedAs(t, p, Config{Dial: dial})
+}
+
+// cfg gives everything but the provider and the chain
+func dialScriptedAs(t *testing.T, p jcrypto.CryptoProvider, cfg Config) (*Client, *scriptedChain) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +384,8 @@ func dialScriptedThrough(t *testing.T, p jcrypto.CryptoProvider, dial func(ctx c
 		s, err := acceptScripted(ln, p, privs, pubs)
 		got <- accepted{s, err}
 	}()
-	cl, err := Dial(Config{Provider: p, Chain: nodes, Dial: dial})
+	cfg.Provider, cfg.Chain = p, nodes
+	cl, err := Dial(cfg)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -650,4 +658,116 @@ func TestClassIsOnRecordWhenASendFailsOnTheRefusal(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("the client kept its link open")
 	}
+}
+
+func dialWatched(t *testing.T, cfg Config) (*Client, *scriptedChain, *closeWatch) {
+	t.Helper()
+	watch := &closeWatch{atClose: make(chan error, 1)}
+	cfg.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		raw, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		watch.Conn = raw
+		return watch, nil
+	}
+	cl, s := dialScriptedAs(t, replyProvider(t, jcrypto.SuiteC25519), cfg)
+	watch.client.Store(cl)
+	return cl, s, watch
+}
+
+// the client closed its socket before anyone called Close, with this class on
+// record
+func (w *closeWatch) expect(t *testing.T, want error) {
+	t.Helper()
+	select {
+	case got := <-w.atClose:
+		if got != want {
+			t.Fatalf("Refused = %v as the client closed its link, want %v", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the client kept its link open")
+	}
+}
+
+// a link the far side closed is the end of the circuit for sending too: the
+// client closes its own socket, with no class, and seals nothing more, so a
+// caller that never calls Close cannot keep writing
+func TestFarSideCloseEndsSending(t *testing.T) {
+	t.Run("immediate", func(t *testing.T) {
+		cl, s, watch := dialWatched(t, Config{})
+		write(t, cl, s, 1)
+		_ = s.conn.Close()
+
+		if got := repliesUntilClosed(t, cl); len(got) != 0 {
+			t.Fatalf("the client passed on %q", got)
+		}
+		watch.expect(t, nil)
+		if err := cl.Send([]byte("ping")); !errors.Is(err, ErrCircuitClosed) {
+			t.Fatalf("Send after the far side closed: %v, want %v", err, ErrCircuitClosed)
+		}
+		if err := cl.SendCover(); !errors.Is(err, ErrCircuitClosed) {
+			t.Fatalf("SendCover after the far side closed: %v, want %v", err, ErrCircuitClosed)
+		}
+		if cl.Refused() != nil {
+			t.Fatalf("Refused = %v after a close by the far side", cl.Refused())
+		}
+		if got := cl.sent.Load(); got != 1 {
+			t.Fatalf("%d cells sealed, want 1", got)
+		}
+	})
+
+	// Send only queues here, and the schedule is what must stop
+	t.Run("constant rate", func(t *testing.T) {
+		const rate = 5 * time.Millisecond
+		cl, s, watch := dialWatched(t, Config{Mode: ConstantRate, Rate: rate})
+		s.read(t, 2)
+		_ = s.conn.Close()
+
+		if got := repliesUntilClosed(t, cl); len(got) != 0 {
+			t.Fatalf("the client passed on %q", got)
+		}
+		watch.expect(t, nil)
+		// a tick that passed the check before the end holds sendMu until it has
+		// counted its cell
+		sealed := func() uint64 {
+			cl.sendMu.Lock()
+			defer cl.sendMu.Unlock()
+			return cl.sent.Load()
+		}
+		before := sealed()
+		if err := cl.Send([]byte("ping")); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		time.Sleep(10 * rate)
+		if after := sealed(); after != before {
+			t.Fatalf("the schedule sealed %d cells after the far side closed", after-before)
+		}
+	})
+}
+
+// a frame from the entry that does not open is refused like a reply: the link
+// closes with the class on record, and the genuine reply behind the frame is
+// not passed on
+func TestFrameThatDoesNotOpenEndsTheCircuit(t *testing.T) {
+	cl, s, watch := dialWatched(t, Config{})
+	write(t, cl, s, 1)
+	if _, err := s.raw.Write(bytes.Repeat([]byte{0xA5}, s.conn.FrameSize())); err != nil {
+		t.Fatal(err)
+	}
+	// the client may have closed its socket by now
+	_ = s.conn.WriteCell(s.reply(t, 0, "a"))
+
+	if got := repliesUntilClosed(t, cl); len(got) != 0 {
+		t.Fatalf("the client passed on %q", got)
+	}
+	watch.expect(t, ErrReplyFrame)
+	if got := cl.Refused(); !errors.Is(got, ErrReply) || !errors.Is(got, link.ErrFrame) {
+		t.Fatalf("Refused = %v, want a refusal that names the link frame", got)
+	}
+	if err := cl.Send([]byte("ping")); !errors.Is(err, ErrCircuitClosed) {
+		t.Fatalf("Send after a refused frame: %v, want %v", err, ErrCircuitClosed)
+	}
+	s.expectClosedByClient(t)
 }

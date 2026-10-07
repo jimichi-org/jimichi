@@ -86,6 +86,7 @@ type Client struct {
 
 	mu      sync.Mutex
 	closed  bool
+	ended   bool
 	refused error
 
 	// the link has its own write lock; holding mu across a write to a stalled
@@ -231,14 +232,16 @@ func (c *Client) receive() {
 	for want := uint64(0); ; want++ {
 		var cell wire.Cell
 		if err := c.conn.ReadCell(&cell); err != nil {
+			var refused error
+			if errors.Is(err, link.ErrFrame) {
+				refused = ErrReplyFrame
+			}
+			c.end(refused)
 			return
 		}
 		payload, cover, err := c.open(&cell, want)
 		if err != nil {
-			c.mu.Lock()
-			c.refused = err
-			c.mu.Unlock()
-			_ = c.conn.Close()
+			c.end(err)
 			return
 		}
 		if cover {
@@ -251,7 +254,18 @@ func (c *Client) receive() {
 	}
 }
 
-// a refusal is reported as one of the four classes and nothing else: the cause
+// the end of the link, whichever side ended it, ends the circuit: a frame that
+// did not open is refused like a reply, and a link closed by the far side or
+// cut short leaves no class. The class is on record before the link closes
+func (c *Client) end(refused error) {
+	c.mu.Lock()
+	c.ended = true
+	c.refused = refused
+	c.mu.Unlock()
+	_ = c.conn.Close()
+}
+
+// a refusal is reported as one of these classes and nothing else: the cause
 // would carry values read from the cell
 var (
 	ErrReply            = errors.New("client: reply refused")
@@ -259,7 +273,12 @@ var (
 	ErrReplyNotOpened   = fmt.Errorf("%w: did not open", ErrReply)
 	ErrReplyOutOfTurn   = fmt.Errorf("%w: out of turn", ErrReply)
 	ErrReplyUnsolicited = fmt.Errorf("%w: more replies than cells written", ErrReply)
+	// a frame on the link from the entry that did not open, whether it carried
+	// a reply or link padding
+	ErrReplyFrame = fmt.Errorf("%w: %w", ErrReply, link.ErrFrame)
 )
+
+var ErrCircuitClosed = errors.New("client: circuit closed")
 
 func (c *Client) open(cell *wire.Cell, want uint64) ([]byte, bool, error) {
 	h, err := cell.Header()
@@ -282,8 +301,8 @@ func (c *Client) open(cell *wire.Cell, want uint64) ([]byte, bool, error) {
 	return payload, cover, nil
 }
 
-// the class of the reply this client closed its circuit over; nil while the
-// circuit lives and when the far side or Close ended it
+// the class of the reply or frame this client closed its circuit over; nil
+// while the circuit lives and when the far side or Close ended it
 func (c *Client) Refused() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -357,9 +376,9 @@ func (c *Client) SendCover() error {
 
 func (c *Client) send(cover bool, payload []byte) error {
 	c.mu.Lock()
-	if c.closed {
+	if err := c.usable(); err != nil {
 		c.mu.Unlock()
-		return errors.New("client: closed")
+		return err
 	}
 	c.busy.Add(1)
 	c.mu.Unlock()
@@ -375,14 +394,13 @@ func (c *Client) send(cover bool, payload []byte) error {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	c.mu.Lock()
-	closed := c.closed
+	err := c.usable()
 	c.mu.Unlock()
-	if closed {
-		return errors.New("client: closed")
+	if err != nil {
+		return err
 	}
 	n := c.sent.Load()
 	var cell *wire.Cell
-	var err error
 	if cover {
 		cell, err = c.circuit.SealCover(n)
 	} else {
@@ -394,6 +412,17 @@ func (c *Client) send(cover bool, payload []byte) error {
 	// counted before the write, since the reply may arrive before it returns
 	c.sent.Store(n + 1)
 	return c.conn.WriteCell(cell)
+}
+
+// called with mu held
+func (c *Client) usable() error {
+	switch {
+	case c.closed:
+		return errors.New("client: closed")
+	case c.ended:
+		return ErrCircuitClosed
+	}
+	return nil
 }
 
 // jitter is drawn per cell, so the send pattern does not repeat
