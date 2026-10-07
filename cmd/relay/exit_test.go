@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"log"
 	"net"
 	"net/http"
@@ -18,6 +19,32 @@ import (
 	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/relay"
 )
+
+// the testbed and CI start relays without -exit and expect the echo
+func TestExitDefaultsToEcho(t *testing.T) {
+	fs := flag.NewFlagSet("relay", flag.ContinueOnError)
+	var cfg config
+	registerFlags(fs, &cfg)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.exit != exitEcho || fs.Lookup("exit").DefValue != exitEcho {
+		t.Fatalf("-exit defaults to %q", cfg.exit)
+	}
+	if fs.Lookup("echo") != nil {
+		t.Fatal("-echo is still registered")
+	}
+	if cfg.mailbox != mailbox.DefaultLimits() {
+		t.Fatalf("mailbox limits default to %+v, want %+v", cfg.mailbox, mailbox.DefaultLimits())
+	}
+	for name, want := range map[string]string{
+		"mailbox-ttl": "5m0s", "mailbox-depth": "16", "mailbox-queues": "1024", "mailbox-records": "16384",
+	} {
+		if f := fs.Lookup(name); f == nil || f.DefValue != want {
+			t.Fatalf("-%s: %+v, want default %s", name, f, want)
+		}
+	}
+}
 
 func TestCheckExit(t *testing.T) {
 	def := mailbox.DefaultLimits()
