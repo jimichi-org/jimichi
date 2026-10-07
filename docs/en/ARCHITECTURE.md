@@ -387,18 +387,21 @@ Circuit teardown:
   with the closed ones. Link padding does not count as traffic.
 - Circuit keys are released once every goroutine using them has stopped.
 - The client sees the break as its reply channel closing and exits. The orchestrator restarts
-  it, and it draws a new chain.
-- When the client closed the circuit itself over a reply, it exits with code 3 and the line
-  `circuit closed: client: reply refused: <check>`, the check being one of four: `bad header`,
-  `did not open`, `out of turn`, `more replies than cells written`. That line names neither a
-  node nor a cell number. Any other break gives code 1 and the line `circuit closed`, or `send:`
-  with the cause. Code 1 does not mean the path was honest: a copy, a gap or a reorder made by a
-  node past the entry closes the circuit at the node before it, provided that node has already
-  taken a backward cell, a damaged frame closes the link, and a node can simply close the
-  connection. Before its first backward cell a node has nothing to compare with: every node on
-  the way back takes the first backward counter as it comes, so when a node past the entry skips
-  the first replies, the later reply passes every node and only the client refuses it, as
-  `out of turn`, with code 3.
+  it, and it draws a new chain. Whichever side ended the link, the client closes its own
+  connection and seals no more cells: Send returns client.ErrCircuitClosed.
+- When the client closed the circuit itself over a reply or a frame, it exits with code 3 and the
+  line `circuit closed: client: reply refused: <check>`, the check being one of five:
+  `bad header`, `did not open`, `out of turn`, `more replies than cells written`, and
+  `link: frame did not open` for a frame from the entry that does not open under the link keys,
+  whether it carried a reply or link padding. That line names neither a node nor a cell number.
+  Any other break gives code 1 and the line `circuit closed`, or `send:` with the cause. Code 1
+  does not mean the path was honest: a copy, a gap or a reorder made by a node past the entry
+  closes the circuit at the node before it, provided that node has already taken a backward cell,
+  a damaged frame between nodes closes that link, and a node can simply close the connection.
+  Before its first backward cell a node has nothing to compare with: every node on the way back
+  takes the first backward counter as it comes, so when a node past the entry skips the first
+  replies, the later reply passes every node and only the client refuses it, as `out of turn`,
+  with code 3.
 
 ## Node limits
 
@@ -806,7 +809,7 @@ those come from the nodes' agreement keys, which the CA never sees.
 
 | Source | Data |
 |---|---|
-| client | on the testbed (cmd/client), per message: the size of the reply and the round-trip time, or a line when no reply comes within 5 s; at start the name, fingerprint and certificate validity of every listed node whose bundle it verified, in the listed order (with -fixed-chain the descriptor validity as well), how many of the listed nodes were verified, and the number of hops; with a drawn chain never which nodes form it. In the lab harness, per run: the round-trip time of every message whose echo came back, matched by flow and sequence number, the number of messages a constant-rate schedule dropped, the number left unanswered, and per flow whether and when its circuit closed |
+| client | on the testbed (cmd/client), per message: the size of the reply and the round-trip time, or a line when no reply comes within 5 s; at the end of the circuit the line `circuit closed`, or `circuit closed: client: reply refused: <check>` with the class of the reply or frame the client refused, naming neither a node nor a cell number; at start the name, fingerprint and certificate validity of every listed node whose bundle it verified, in the listed order (with -fixed-chain the descriptor validity as well), how many of the listed nodes were verified, and the number of hops; with a drawn chain never which nodes form it. In the lab harness, per run: the round-trip time of every message whose echo came back, matched by flow and sequence number, the number of messages a constant-rate schedule dropped, the number left unanswered, and per flow whether and when its circuit closed |
 | relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests), the epoch of the onion key and the failed attempts to rotate it (onion_epoch, onion_rotate_failed). No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, on every rotation of the onion key a line with the new epoch and no key material, on a failed rotation one line per kind of cause (pages not mapped, pages not locked, key not locked, key refused by the ring, other), a fixed class with no size and no text of the underlying error, with no new line while consecutive failures share the class and a line again for the first failure after a success, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified |
 | network | in the lab harness only, inside its process and without a packet capture: the moment every frame crosses the client-entry link and the last link between nodes, the one into the exit, in both directions. There is no link past the exit to observe yet ([#47](https://github.com/jimichi-org/jimichi/issues/47)) |
 | memory | planned: dumps of the relay process in the key extraction scenario ([#24](https://github.com/jimichi-org/jimichi/issues/24)); nothing takes a dump yet |

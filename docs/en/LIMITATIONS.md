@@ -29,6 +29,13 @@ English | [Русский](../ru/LIMITATIONS.md)
   ([#36](https://github.com/jimichi-org/jimichi/issues/36)). mlock does not stop reading by a
   process with sufficient privileges either. Against root on the machine hosting a node,
   process-level measures do not work; that is the expected result.
+- The client does not wipe the plaintext of replies. wire.Circuit.OpenExit strips the layers into
+  fresh buffers on the Go heap, and neither those buffers nor the reply itself, accepted or
+  refused, is wiped: an accepted reply goes to the application, a refused one is dropped, and both
+  stay in the process memory until it is reused. This is not key material, and the secmem
+  measures do not cover it. Wiping would have to be done in wire.Circuit.OpenExit and in the
+  client together, on the path of every reply that the latency measurements include, so it is not
+  done.
 - Sending on a node's own clock requires the node's period to be shorter than the client's, with a
   margin of a few percent. The node does not know how fast a client sends: if the client sends more
   often, the node's queue fills up and the circuit closes, since the node cannot lose a cell of a
