@@ -37,6 +37,52 @@ func syntheticRun(broken uint64, brokenFlows int, closures ...lab.Closure) *lab.
 	}
 }
 
+// a run without protection as the harness hands it over: the setup of each
+// flow before the origin, two messages and their echoes inside the window,
+// one of them on the origin itself, and a frame exactly where the window
+// closes. The window is [100 ms, 1100 ms), so each direction of each link
+// counts 2 frames per flow, 4 for the 4 messages sent: x1 on every link
+func TestCostWithoutProtectionIsExactlyOneOnEveryLinkAndDirection(t *testing.T) {
+	start := time.Now()
+	ms := time.Millisecond
+	traces := func(offsets ...time.Duration) []*lab.Trace {
+		out := make([]*lab.Trace, 2)
+		for i := range out {
+			out[i] = lab.NewTrace(start)
+			for _, o := range offsets {
+				out[i].Mark(start.Add(o))
+			}
+		}
+		return out
+	}
+	run := &lab.Run{
+		Config:    lab.Config{Hops: 3, Flows: 2, Duration: time.Second, Suite: jcrypto.SuiteC25519, Payload: 128},
+		Entry:     traces(40*ms, 100*ms, 600*ms, 1100*ms),
+		Exit:      traces(60*ms, 100*ms, 601*ms, 1100*ms),
+		EntryBack: traces(102*ms, 603*ms, 1100*ms),
+		ExitBack:  traces(101*ms, 602*ms, 1100*ms),
+		Sent:      4,
+		Origin:    100 * ms,
+	}
+	res, _ := analyse(run, "none", 100*ms)
+	for _, c := range []struct {
+		name string
+		got  float64
+	}{
+		{"entry", res.Multiplier},
+		{"entry back", res.EntryBackMultiplier},
+		{"relay link", res.RelayMultiplier},
+		{"relay link back", res.RelayBackMultiplier},
+	} {
+		if c.got != 1 {
+			t.Errorf("%s: x%v, want exactly 1", c.name, c.got)
+		}
+	}
+	if res.Cells != 4 || res.Messages != 4 {
+		t.Errorf("%d cells for %d messages at the entry, want 4 and 4", res.Cells, res.Messages)
+	}
+}
+
 // flow 0 closed 350 ms on the trace clock, 250 ms after the flows started at
 // 100 ms; flow 1 stayed open
 func TestFlowClosuresReachTheReport(t *testing.T) {

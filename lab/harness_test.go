@@ -76,8 +76,11 @@ func TestTapsCountTheCellsOfAFlowWithoutTheHandshake(t *testing.T) {
 // the window opens each forward trace holds one frame, the setup of its flow,
 // and nothing has come back; from the origin on every frame is a message or
 // its echo, so each direction of each tapped link counts exactly the messages
-// sent, a multiplier of exactly 1
+// sent, a multiplier of exactly 1. Every exit link starts its handshake late,
+// so a window opened as soon as the links exist lets the setups in every time
 func TestWindowOpensAfterEverySetupCrossedTheLastLink(t *testing.T) {
+	exitFirstWriteDelay = 30 * time.Millisecond
+	t.Cleanup(func() { exitFirstWriteDelay = 0 })
 	run, err := Execute(Config{Flows: 3, Duration: 300 * time.Millisecond, SendEvery: 20 * time.Millisecond, Seed: 13})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -115,6 +118,30 @@ func TestWindowOpensAfterEverySetupCrossedTheLastLink(t *testing.T) {
 		}
 		if inside != run.Sent {
 			t.Errorf("%s: %d frames inside the window for %d messages", tc.name, inside, run.Sent)
+		}
+	}
+}
+
+// a clock that reads the last setup again, or an earlier moment, keeps the
+// window shut until it reads later than that setup
+func TestWindowOpensStrictlyAfterTheLastSetup(t *testing.T) {
+	for _, c := range []struct {
+		readings []time.Duration
+		want     time.Duration
+	}{
+		{[]time.Duration{6}, 6},
+		{[]time.Duration{5, 5, 6}, 6},
+		{[]time.Duration{4, 5, 7}, 7},
+	} {
+		i := 0
+		now := func() time.Duration {
+			r := c.readings[i]
+			i++
+			return r
+		}
+		if got := openWindow(now, 5); got != c.want || i != len(c.readings) {
+			t.Errorf("readings %v after a setup at 5: origin %v after %d readings, want %v after %d",
+				c.readings, got, i, c.want, len(c.readings))
 		}
 	}
 }
