@@ -298,18 +298,6 @@ func TestEverySecretIsReleased(t *testing.T) {
 	})
 }
 
-func TestNoSignatures(t *testing.T) {
-	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
-		ns := noSigning{CryptoProvider: p, t: t}
-		si, sr := staticKey(t, ns), staticKey(t, ns)
-		ini, resp := kkStates(t, ns, si, sr, prologue, prologue)
-		mustRead(t, resp, mustWrite(t, ini, nil))
-		mustRead(t, ini, mustWrite(t, resp, nil))
-		mustSplit(t, ini)
-		mustSplit(t, resp)
-	})
-}
-
 func TestKeyPairAfterClose(t *testing.T) {
 	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
 		kp, other := staticKey(t, p), staticKey(t, p)

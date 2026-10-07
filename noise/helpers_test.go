@@ -12,6 +12,8 @@ import (
 	"github.com/jimichi-org/jimichi/noise"
 )
 
+// every test runs on a provider that fails it on a signing call, so no path
+// of the handshake, refused and forged messages included, can sign or verify
 func eachSuite(t *testing.T, run func(t *testing.T, p jcrypto.CryptoProvider)) {
 	t.Helper()
 	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
@@ -19,7 +21,7 @@ func eachSuite(t *testing.T, run func(t *testing.T, p jcrypto.CryptoProvider)) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Run(s.String(), func(t *testing.T) { run(t, p) })
+		t.Run(s.String(), func(t *testing.T) { run(t, noSigning{CryptoProvider: p, t: t}) })
 	}
 }
 

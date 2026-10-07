@@ -5,7 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"reflect"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +19,8 @@ import (
 
 const testMailbox = "relay-5.jimichi.svc.cluster.local:9000"
 
+// every test runs on a provider that fails it on a signing call, so no path
+// of the layer, refused and forged inputs included, can sign or verify
 func eachSuite(t *testing.T, run func(t *testing.T, p jcrypto.CryptoProvider)) {
 	t.Helper()
 	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
@@ -23,7 +28,7 @@ func eachSuite(t *testing.T, run func(t *testing.T, p jcrypto.CryptoProvider)) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Run(s.String(), func(t *testing.T) { run(t, p) })
+		t.Run(s.String(), func(t *testing.T) { run(t, noSigning{CryptoProvider: p, t: t}) })
 	}
 }
 
@@ -33,7 +38,8 @@ type tracked struct {
 }
 
 // keeps every secret the provider hands out with what made it, counts the
-// calls and records the public outputs, so a test can see what a session did
+// calls and records the public outputs and the plaintexts, so a test can see
+// what a session did
 type trackingProvider struct {
 	jcrypto.CryptoProvider
 	mu     sync.Mutex
@@ -41,6 +47,7 @@ type trackingProvider struct {
 	calls  map[string]int
 	hashes map[string]bool
 	keys   map[string]bool
+	plain  [][]byte
 }
 
 func track(p jcrypto.CryptoProvider) *trackingProvider {
@@ -109,12 +116,37 @@ type countingAEAD struct {
 
 func (a *countingAEAD) Seal(dst, nonce, pt, ad []byte) []byte {
 	a.p.count("seal")
+	a.p.keepPlain(pt)
 	return a.AEAD.Seal(dst, nonce, pt, ad)
 }
 
 func (a *countingAEAD) Open(dst, nonce, ct, ad []byte) ([]byte, error) {
 	a.p.count("open")
-	return a.AEAD.Open(dst, nonce, ct, ad)
+	pt, err := a.AEAD.Open(dst, nonce, ct, ad)
+	if err == nil {
+		a.p.keepPlain(pt)
+	}
+	return pt, err
+}
+
+func (p *trackingProvider) keepPlain(b []byte) {
+	p.mu.Lock()
+	p.plain = append(p.plain, b)
+	p.mu.Unlock()
+}
+
+// the plaintext buffers the layer handed to Seal or got from Open that still
+// hold a non-zero byte
+func (p *trackingProvider) unwiped() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, b := range p.plain {
+		if !allZero(b) {
+			n++
+		}
+	}
+	return n
 }
 
 func (a *countingAEAD) Destroy() {
@@ -135,6 +167,21 @@ func (p *trackingProvider) held() map[string]int {
 	return out
 }
 
+func (p *trackingProvider) heldCount() int {
+	n := 0
+	for _, c := range p.held() {
+		n += c
+	}
+	return n
+}
+
+func wantHeld(t testing.TB, what string, p *trackingProvider, want int) {
+	t.Helper()
+	if held := p.held(); p.heldCount() != want {
+		t.Fatalf("%s holds %v, want %d buffers", what, held, want)
+	}
+}
+
 func (p *trackingProvider) snapshot() map[string]int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -148,7 +195,7 @@ func (p *trackingProvider) snapshot() map[string]int {
 // client identities are agreement keys only: any signing call fails the test
 type noSigning struct {
 	jcrypto.CryptoProvider
-	t *testing.T
+	t testing.TB
 }
 
 func (p noSigning) GenerateSigning() (*secmem.Buffer, []byte, error) {
@@ -297,6 +344,93 @@ func (pr *pair) confirm(t testing.TB) {
 	mustReceive(t, pr.resp, rec, EventDummy)
 	if st := pr.resp.State(); st != StateConfirmed {
 		t.Fatalf("responder in %v after the first record", st)
+	}
+}
+
+var errInjected = errors.New("injected failure")
+
+// fails Agree or NewAEAD while a test asks it to, as a full key memory or a
+// broken provider would
+type faultyProvider struct {
+	jcrypto.CryptoProvider
+	agree, aead atomic.Bool
+}
+
+func (p *faultyProvider) Agree(priv *secmem.Buffer, pub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	if p.agree.Load() {
+		return nil, errInjected
+	}
+	return p.CryptoProvider.Agree(priv, pub, ctx)
+}
+
+func (p *faultyProvider) NewAEAD(key *secmem.Buffer) (jcrypto.AEAD, error) {
+	if p.aead.Load() {
+		return nil, errInjected
+	}
+	return p.CryptoProvider.NewAEAD(key)
+}
+
+// everything a refused input must leave as it was, the counters apart
+type view struct {
+	State                          State
+	Epoch                          uint64
+	Established, Confirmed, Stale  bool
+	NeedsRecord, HSStored, Pending bool
+	StoredAt                       time.Time
+	Fetches                        int
+	Offer, Accepted, SID           []byte
+	SendCK, RecvCK                 []byte
+	SendN, RecvN, RecvOpened       uint64
+	Seen                           []string
+	SeenNext                       int
+}
+
+func (s *Session) view() view {
+	v := view{State: s.State(), Epoch: s.Epoch()}
+	v.Offer, _ = s.Handshake()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v.Established, v.Confirmed, v.Stale = s.established, s.confirmed, s.stale
+	v.NeedsRecord, v.HSStored, v.Pending = s.needsRecord, s.hsStored, s.hs != nil
+	v.StoredAt, v.Fetches = s.storedAt, s.fetches
+	v.Accepted, v.SID = bytes.Clone(s.accepted), bytes.Clone(s.sid)
+	if s.send.ck != nil {
+		v.SendCK = bytes.Clone(s.send.ck.Bytes())
+	}
+	if s.recv.ck != nil {
+		v.RecvCK = bytes.Clone(s.recv.ck.Bytes())
+	}
+	v.SendN, v.RecvN, v.RecvOpened = s.send.n, s.recv.n, s.recv.opened
+	v.Seen, v.SeenNext = slices.Clone(s.seen.keys), s.seen.next
+	return v
+}
+
+func viewsEqual(a, b view) bool { return reflect.DeepEqual(a, b) }
+
+// feeds rec to s and requires the refusal want, one more on its counter and
+// nothing else changed
+func wantRefusedAsIs(t testing.TB, what string, s *Session, rec []byte, want error) {
+	t.Helper()
+	before, stats := s.view(), s.Stats()
+	_, err := s.Receive(rec)
+	wantErr(t, what, err, want)
+	if after := s.view(); !viewsEqual(after, before) {
+		t.Fatalf("%s changed the session:\n before %+v\n after  %+v", what, before, after)
+	}
+	switch want {
+	case ErrBad:
+		stats.Bad++
+	case ErrCopy:
+		stats.Copies++
+	case ErrLate:
+		stats.Late++
+	case ErrWindow:
+		stats.Window++
+	case ErrReplayedHandshake:
+		stats.ReplayedHandshakes++
+	}
+	if got := s.Stats(); got != stats {
+		t.Fatalf("%s: stats %+v, want %+v", what, got, stats)
 	}
 }
 

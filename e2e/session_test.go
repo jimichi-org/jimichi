@@ -253,11 +253,19 @@ func TestSeenRing(t *testing.T) {
 		wantErr(t, "the kk1 of the session", err, ErrCopy)
 		// the first one was pushed out: an old kk1 outside the ring resets an
 		// unconfirmed session only, the case the rules allow; taking it pushes
-		// out the second
+		// out the second, the oldest left, and the newer ones stay
 		mustReceive(t, pr.resp, kk1s[0], EventSession)
-		_, err = pr.resp.Receive(kk1s[2])
-		wantErr(t, "a kk1 still in the ring", err, ErrReplayedHandshake)
-		if st := pr.resp.Stats(); st.ReplayedHandshakes != 2 || st.Handshakes != seen+2 {
+		for _, i := range []int{2, 3, 4} {
+			_, err = pr.resp.Receive(kk1s[i])
+			wantErr(t, "a kk1 still in the ring", err, ErrReplayedHandshake)
+		}
+		mustReceive(t, pr.resp, kk1s[1], EventSession)
+		for _, i := range []int{0, 3, 4} {
+			_, err = pr.resp.Receive(kk1s[i])
+			wantErr(t, "a kk1 still in the ring", err, ErrReplayedHandshake)
+		}
+		mustReceive(t, pr.resp, kk1s[2], EventSession)
+		if st := pr.resp.Stats(); st.ReplayedHandshakes != 7 || st.Handshakes != seen+4 {
 			t.Fatalf("stats %+v", st)
 		}
 	})
@@ -532,22 +540,6 @@ func TestLiveSessionHoldsTwoChainKeys(t *testing.T) {
 			if held["ephemeral"] != 1 || held[purposeStepNext] != 2 || len(held) != 2 {
 				t.Fatalf("%s holds %v", name, held)
 			}
-		}
-	})
-}
-
-func TestNoSignatures(t *testing.T) {
-	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
-		ns := noSigning{CryptoProvider: p, t: t}
-		pr := newPair(t, ns, Options{StaleFetches: 1})
-		pr.handshake(t)
-		pr.confirm(t)
-		mustReceive(t, pr.ini, mustSeal(t, pr.resp, "x"), EventMessage)
-		pr.ini.Fetched()
-		pr.ini.Tick()
-		mustHandshake(t, pr.ini)
-		if _, err := CardHash(ns, pr.idI.Card()); err != nil {
-			t.Fatal(err)
 		}
 	})
 }

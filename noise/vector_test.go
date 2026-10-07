@@ -101,10 +101,11 @@ func card(t *testing.T, s jcrypto.Suite, queue, static string) []byte {
 func TestKKVectors(t *testing.T) {
 	for _, v := range kkVectors {
 		t.Run(v.suite.String(), func(t *testing.T) {
-			p, err := suite.New(v.suite)
+			base, err := suite.New(v.suite)
 			if err != nil {
 				t.Fatal(err)
 			}
+			p := noSigning{CryptoProvider: base, t: t}
 			keyPair := func(priv, pub string) *noise.KeyPair {
 				b, err := secmem.NewFrom(unhex(t, priv))
 				if err != nil {

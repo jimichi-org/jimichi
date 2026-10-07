@@ -47,65 +47,62 @@ func TestRatchetSkipAndWindow(t *testing.T) {
 	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
 		pr := livePair(t, p)
 		var recs [][]byte
-		for i := 0; i < 2*MaxSkip+2; i++ {
+		for i := 0; i < 130; i++ {
 			recs = append(recs, mustSeal(t, pr.ini, "r"))
 		}
 		// recs[i] carries number i+1; the next expected is 1
-		_, err := pr.resp.Receive(recs[MaxSkip+1])
-		wantErr(t, "65 numbers ahead", err, ErrWindow)
-		mustReceive(t, pr.resp, recs[MaxSkip], EventMessage)
-		if st := pr.resp.Stats(); st.Lost != MaxSkip || st.Window != 1 {
+		wantRefusedAsIs(t, "65 numbers ahead", pr.resp, recs[65], ErrWindow)
+		mustReceive(t, pr.resp, recs[64], EventMessage)
+		if st := pr.resp.Stats(); st.Lost != 64 || st.Window != 1 {
 			t.Fatalf("after a skip of 64: %+v", st)
 		}
 
-		_, err = pr.resp.Receive(recs[MaxSkip])
-		wantErr(t, "the same record again", err, ErrCopy)
-		_, err = pr.resp.Receive(recs[3])
-		wantErr(t, "a skipped record arriving later", err, ErrLate)
-		mustReceive(t, pr.resp, recs[MaxSkip+1], EventMessage)
-		_, err = pr.resp.Receive(recs[MaxSkip])
-		wantErr(t, "a copy one behind", err, ErrCopy)
-		if st := pr.resp.Stats(); st.Copies != 2 || st.Late != 1 || st.Lost != MaxSkip {
+		wantRefusedAsIs(t, "the same record again", pr.resp, recs[64], ErrCopy)
+		wantRefusedAsIs(t, "a skipped record arriving later", pr.resp, recs[3], ErrLate)
+		mustReceive(t, pr.resp, recs[65], EventMessage)
+		wantRefusedAsIs(t, "a copy one behind", pr.resp, recs[64], ErrCopy)
+		if st := pr.resp.Stats(); st.Copies != 2 || st.Late != 1 || st.Lost != 64 {
 			t.Fatalf("stats %+v", st)
 		}
 		// beyond the bitmap a copy cannot be told from a late record
-		mustReceive(t, pr.resp, recs[2*MaxSkip+1], EventMessage)
-		_, err = pr.resp.Receive(recs[MaxSkip])
-		wantErr(t, "a record past the bitmap", err, ErrLate)
+		mustReceive(t, pr.resp, recs[129], EventMessage)
+		wantRefusedAsIs(t, "a record past the bitmap", pr.resp, recs[64], ErrLate)
 	})
 }
 
-// a forged number costs at most MaxSkip steps and changes nothing
+// a forged number costs at most 64 steps and changes nothing, the count of
+// fetches and the staleness included
 func TestGarbageNumberChangesNothing(t *testing.T) {
 	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
-		pr := livePair(t, p)
+		pr := newPair(t, p, Options{StaleFetches: 3})
+		pr.handshake(t)
+		pr.confirm(t)
 		rec := mustSeal(t, pr.ini, "real")
-		for _, n := range []uint32{1, 2, MaxSkip, MaxSkip + 1} {
+		forge := func(n uint32) []byte {
 			bad := bytes.Clone(rec)
 			binary.BigEndian.PutUint32(bad[1:], n)
 			if n == 1 {
 				bad[RecordSize-1] ^= 1
 			}
-			before := pr.resp.recvState()
-			_, err := pr.resp.Receive(bad)
-			wantErr(t, "a forged record", err, ErrBad)
-			if after := pr.resp.recvState(); !bytes.Equal(after, before) {
-				t.Fatal("a refused record changed the chain")
-			}
+			return bad
+		}
+		pr.resp.Fetched()
+		pr.resp.Fetched()
+		for _, n := range []uint32{1, 2, 64, 65} {
+			wantRefusedAsIs(t, "a forged record", pr.resp, forge(n), ErrBad)
+		}
+		pr.resp.Fetched()
+		if pr.resp.State() != StateStale {
+			t.Fatal("a forged record reset the count of fetches")
+		}
+		for _, n := range []uint32{1, 3} {
+			wantRefusedAsIs(t, "a forged record to a stale session", pr.resp, forge(n), ErrBad)
 		}
 		mustReceive(t, pr.resp, rec, EventMessage)
-		if st := pr.resp.Stats(); st.Lost != 0 || st.Bad != 4 {
-			t.Fatalf("stats %+v", st)
+		if st := pr.resp.Stats(); st.Lost != 0 || st.Bad != 6 || pr.resp.State() != StateConfirmed {
+			t.Fatalf("stats %+v, state %v", st, pr.resp.State())
 		}
 	})
-}
-
-// the chain key and the count of the receiving direction, for comparing state
-func (s *Session) recvState() []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := bytes.Clone(s.recv.ck.Bytes())
-	return binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(out, s.recv.n), s.recv.opened)
 }
 
 func TestDirectionsAreIndependent(t *testing.T) {
@@ -153,38 +150,17 @@ func TestBodyLimits(t *testing.T) {
 func TestInnerLayoutRules(t *testing.T) {
 	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
 		pr := livePair(t, p)
-		inner := func(flags byte, n int, body []byte, tail byte) []byte {
-			b := make([]byte, InnerSize)
-			b[0] = flags
-			binary.BigEndian.PutUint16(b[1:], uint16(n))
-			copy(b[innerHeader:], body)
-			if tail != 0 {
-				b[InnerSize-1] = tail
-			}
-			return b
-		}
 		for _, tc := range []struct {
 			name  string
 			inner []byte
 		}{
-			{"an unknown flag", inner(0x02, 1, []byte("a"), 0)},
-			{"a dummy with a body", inner(flagDummy, 1, []byte("a"), 0)},
-			{"a length past the body", inner(0, MaxBody+1, nil, 0)},
-			{"padding not zero", inner(0, 1, []byte("a"), 7)},
-			{"a dummy with padding", inner(flagDummy, 0, nil, 7)},
+			{"an unknown flag", rawInner(0x02, 1, []byte("a"), 0)},
+			{"a dummy with a body", rawInner(flagDummy, 1, []byte("a"), 0)},
+			{"a length past the body", rawInner(0, MaxBody+1, nil, 0)},
+			{"padding not zero", rawInner(0, 1, []byte("a"), 7)},
+			{"a dummy with padding", rawInner(flagDummy, 0, nil, 7)},
 		} {
-			pr.ini.mu.Lock()
-			rec, err := pr.ini.sealInner(tc.inner)
-			pr.ini.mu.Unlock()
-			if err != nil {
-				t.Fatal(err)
-			}
-			before := pr.resp.recvState()
-			_, err = pr.resp.Receive(rec)
-			wantErr(t, tc.name, err, ErrBad)
-			if !bytes.Equal(pr.resp.recvState(), before) {
-				t.Fatalf("%s changed the chain", tc.name)
-			}
+			wantRefusedAsIs(t, tc.name, pr.resp, sealRaw(t, pr.ini, tc.inner), ErrBad)
 		}
 		// the refused numbers count as lost once a good record opens
 		mustReceive(t, pr.resp, mustSeal(t, pr.ini, "good"), EventMessage)
@@ -192,6 +168,29 @@ func TestInnerLayoutRules(t *testing.T) {
 			t.Fatalf("lost %d", st.Lost)
 		}
 	})
+}
+
+func rawInner(flags byte, n int, body []byte, tail byte) []byte {
+	b := make([]byte, InnerSize)
+	b[0] = flags
+	binary.BigEndian.PutUint16(b[1:], uint16(n))
+	copy(b[innerHeader:], body)
+	if tail != 0 {
+		b[InnerSize-1] = tail
+	}
+	return b
+}
+
+// seals an inner the layer would never build: a record only the peer can make
+func sealRaw(t testing.TB, s *Session, inner []byte) []byte {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, err := s.sealInner(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec
 }
 
 // a dummy costs what a message costs, call for call

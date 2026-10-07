@@ -65,6 +65,9 @@ type e2eVector struct {
 	hashKK2, sid, i2r, r2i string
 	mk0I, ck1I, dataI      string
 	mk0R, dataR, dummyI    string
+	// mk_1..mk_3 of i2r and the record n = 3 with the body "hello"
+	mkI   []string
+	data3 string
 	// GOST only: th[0:8] of the context of each DH token
 	ukm []string
 }
@@ -110,6 +113,12 @@ var e2eVectors = []e2eVector{
 		mk0R:      "3a96e87298f4fd11be764e4ed4c64067b1779a6e9a2be2a7918ba5fd7236da62",
 		dataR:     "13c6d0cbdcc12a686252779575222fd6c8d8a647465bdad586802249b8c6d1b8",
 		dummyI:    "312781c083588851255aa62d8b145c630b4ba3c7f444404a444db32d0ee9c998",
+		mkI: []string{
+			"e301f0e7c98c863b88fc542adccef3bd0cf313a7da301c1de8bff09472fdfefe",
+			"fe1468872408d3fbecc3b2a841666f38a996acbfff64cdcc1002f07471e3a736",
+			"b5570c30aacf1858c16769c41bd269a83bb6171241c8fa39a8e676f151e51b82",
+		},
+		data3: "c690cdd83195109f2d95e050ee58efeef496f47008df9002127a6dcc54c12802",
 	},
 	{
 		suite: jcrypto.SuiteGOST,
@@ -155,7 +164,13 @@ var e2eVectors = []e2eVector{
 		mk0R:      "3d2d0324bc8c895d940a38483d49558b05b4348bdaa4c26b6ac2ee81f247c7d4",
 		dataR:     "fc625268f34e1dd66c812f3f4576ec8a7f40ea7496082631e64c1d829abf23f4",
 		dummyI:    "32f002c7e4da7bfdb358d6d2a0d055a09d88996ae21eae1757564a6ba5b08dca",
-		ukm:       []string{"8c28b12a7ae59d34", "5cdcfbf49dfd8ede", "7d62add7405b97c7", "7bd25ae59e89c4be"},
+		mkI: []string{
+			"c8298e32e716173bcd2b26f014574621ee27eb9883123b21fdc55f265a614b8c",
+			"26bb8bc87675cb97f5b440fd143a94b673d525125249aa933e6a6f934ce7f7dc",
+			"75aae09a4ece60add4fbeda6eee3aaba17ddc9489ed1b7c965d79a796eeb764f",
+		},
+		data3: "4522a61c899d1835c8a5b9370ba2fe960d175a33e92037dbcc1532e842e34ca8",
+		ukm:   []string{"8c28b12a7ae59d34", "5cdcfbf49dfd8ede", "7d62add7405b97c7", "7bd25ae59e89c4be"},
 	},
 }
 
@@ -249,10 +264,11 @@ func checkHex(t *testing.T, what string, got []byte, want string) {
 func TestVectors(t *testing.T) {
 	for _, v := range e2eVectors {
 		t.Run(v.suite.String(), func(t *testing.T) {
-			p, err := suite.New(v.suite)
+			base, err := suite.New(v.suite)
 			if err != nil {
 				t.Fatal(err)
 			}
+			p := noSigning{CryptoProvider: base, t: t}
 			// the size probe of wire draws an ephemeral key once per suite; it
 			// must not take one of the fixed keys
 			if _, err := wire.PublicKeySize(p); err != nil {
@@ -338,6 +354,21 @@ func TestVectors(t *testing.T) {
 			} {
 				if !k.tp.keys[k.want] {
 					t.Fatalf("%s %s never derived", k.name, k.want)
+				}
+			}
+
+			// the chain steps on from ck_1: three more records of i2r
+			var last []byte
+			for range 3 {
+				last = mustSeal(t, ini.s, "hello")
+				mustReceive(t, resp.s, last, EventMessage)
+			}
+			checkHex(t, "Hash(data i2r n=3)", p.Hash(last), v.data3)
+			for i, want := range v.mkI {
+				for _, side := range []vectorSide{ini, resp} {
+					if !side.tp.keys[want] {
+						t.Fatalf("mk_%d i2r %s never derived", i+1, want)
+					}
 				}
 			}
 
