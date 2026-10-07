@@ -77,7 +77,9 @@ func TestTapsCountTheCellsOfAFlowWithoutTheHandshake(t *testing.T) {
 // and nothing has come back; from the origin on every frame is a message or
 // its echo, so each direction of each tapped link counts exactly the messages
 // sent, a multiplier of exactly 1. Every exit link starts its handshake late,
-// so a window opened as soon as the links exist lets the setups in every time
+// so a window opened as soon as the links exist lets the setups in every time.
+// A client writes its entry frame while Send runs, so no entry frame follows
+// the end of the window by more than scheduling slack
 func TestWindowOpensAfterEverySetupCrossedTheLastLink(t *testing.T) {
 	exitFirstWriteDelay = 30 * time.Millisecond
 	t.Cleanup(func() { exitFirstWriteDelay = 0 })
@@ -118,6 +120,14 @@ func TestWindowOpensAfterEverySetupCrossedTheLastLink(t *testing.T) {
 		}
 		if inside != run.Sent {
 			t.Errorf("%s: %d frames inside the window for %d messages", tc.name, inside, run.Sent)
+		}
+	}
+	end := run.Origin + run.Config.Duration
+	for i, tr := range run.Entry {
+		for _, e := range tr.Events() {
+			if e >= end+time.Millisecond {
+				t.Errorf("entry, flow %d: frame at %v, the window closed at %v", i, e, end)
+			}
 		}
 	}
 }
