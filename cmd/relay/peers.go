@@ -67,13 +67,16 @@ var (
 type peerEntry struct {
 	bundle  []byte
 	linkPub []byte
-	// unix seconds: when the bundle is fetched again and when it is dropped
+	// unix seconds: when a client may take the bundle, the later of the
+	// descriptor's published time and the certificate's not_before, when the
+	// bundle is fetched again and when it is dropped
+	from    int64
 	due     int64
 	expires int64
 }
 
-// what the info port serves as /descriptors, with the moment its first bundle
-// runs out
+// what the info port serves as /descriptors, with the moment the next bundle
+// leaves or joins it; no body until this node's own bundle starts
 type mirror struct {
 	body  []byte
 	until int64
@@ -84,8 +87,8 @@ type mirror struct {
 type peerCache struct {
 	self  string
 	addrs []string
-	// the bundle this node serves itself and when it runs out
-	own    func() ([]byte, int64, bool)
+	// the bundle this node serves itself, when it starts and when it runs out
+	own    func(now int64) ([]byte, int64, int64, bool)
 	fetch  func(addr string) ([]byte, error)
 	read   func(addr string, bundle []byte, now time.Time) (*peerEntry, error)
 	now    func() time.Time
@@ -120,6 +123,18 @@ func newPeerCache(n *node, addrs []string, read func(string, []byte, time.Time) 
 	}
 }
 
+// a client checks a bundle on its own clock, up to Skew ahead of this node's,
+// once the mirror has arrived, up to fetch.Timeout after the check here, which
+// reads whole seconds: the mirror holds a peer's bundle only while such a
+// clock finds it valid, whatever lifetime the peer signed it for
+const mirrorMargin = pki.Skew + fetch.Timeout + time.Second
+
+// on the from edge a clock up to Skew behind this node's is covered by the
+// verifier's allowance, so the node's own clock decides there
+func (c *peerCache) mirrored(e *peerEntry, now int64) bool {
+	return now >= e.from && now < e.expires-int64(mirrorMargin/time.Second)
+}
+
 // Verify bounds the descriptor by its certificate, so expires alone ends the entry
 func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []byte, time.Time) (*peerEntry, error) {
 	policy := pki.Policy{Anchor: anchor, Skew: pki.Skew}
@@ -132,7 +147,7 @@ func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []by
 		if err != nil {
 			return nil, err
 		}
-		return &peerEntry{bundle: bundle, linkPub: v.LinkPub, due: s.published + (s.expires-s.published)/2, expires: s.expires}, nil
+		return &peerEntry{bundle: bundle, linkPub: v.LinkPub, from: max(s.published, s.notBefore), due: s.published + (s.expires-s.published)/2, expires: s.expires}, nil
 	}
 }
 
@@ -175,7 +190,11 @@ func (c *peerCache) refresh() bool {
 			}
 		} else {
 			delete(c.failed, addr)
-			c.entries[addr] = fresh
+			// a bundle the mirror cannot hold yet does not displace one it holds; the
+			// held entry stays due, so the peer is asked again after the retry pause
+			if e == nil || c.mirrored(fresh, now.Unix()) || !c.mirrored(e, now.Unix()) {
+				c.entries[addr] = fresh
+			}
 		}
 		c.mu.Unlock()
 	}
@@ -188,12 +207,16 @@ func (c *peerCache) refresh() bool {
 func (c *peerCache) publish() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	own, until, ok := c.own()
-	if !ok {
+	now := c.now().Unix()
+	own, from, until, ok := c.own(now)
+	switch {
+	case !ok:
 		c.mirror.Store(nil)
 		return
+	case now < from:
+		c.mirror.Store(&mirror{until: from})
+		return
 	}
-	now := c.now().Unix()
 	entries := make([]pki.MirrorEntry, 0, len(c.addrs)+1)
 	entries = append(entries, pki.MirrorEntry{Addr: c.self, Bundle: own})
 	// a peer whose bundle this node does not hold is left out: were the mirror
@@ -201,11 +224,14 @@ func (c *peerCache) publish() {
 	// would empty the mirror of every node it withholds from
 	for _, addr := range c.addrs {
 		e := c.entries[addr]
-		if e == nil || now >= e.expires {
-			continue
+		switch {
+		case e == nil:
+		case now < e.from:
+			until = min(until, e.from)
+		case c.mirrored(e, now):
+			entries = append(entries, pki.MirrorEntry{Addr: addr, Bundle: e.bundle})
+			until = min(until, e.expires-int64(mirrorMargin/time.Second))
 		}
-		entries = append(entries, pki.MirrorEntry{Addr: addr, Bundle: e.bundle})
-		until = min(until, e.expires)
 	}
 	body, err := pki.MarshalMirror(entries)
 	if err != nil {
@@ -263,12 +289,12 @@ func (c *peerCache) held() int {
 func (c *peerCache) descriptors() ([]byte, bool) {
 	m := c.mirror.Load()
 	if m != nil && c.now().Unix() >= m.until {
-		// an entry ran out since the last refresh: it is dropped here once, and the
-		// rebuilt mirror lasts until the next entry runs out
+		// a bundle left or joined since the last refresh: the mirror is rebuilt here
+		// once and lasts until the next such moment
 		c.publish()
 		m = c.mirror.Load()
 	}
-	if m == nil || c.now().Unix() >= m.until {
+	if m == nil || m.body == nil || c.now().Unix() >= m.until {
 		return nil, false
 	}
 	return m.body, true

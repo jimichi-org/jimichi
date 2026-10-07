@@ -158,8 +158,11 @@ English | [Русский](../ru/LIMITATIONS.md)
   descriptor lifetime plus the allowance when that is longer, since a rotation waits for the
   release of the replaced key. On the testbed (-onion-rotate 1 h, -descriptor-ttl 20 min) that
   is 1 h + 20 min + 2 min = 1 h 22 min; with the defaults of the binary (1 h and 1 h) it is
-  1 h 2 min + 1 h + 2 min = 2 h 4 min. Node memory taken after the release does not open the
-  cell. A wire capture cannot be read without the links' ephemeral keys.
+  1 h 2 min + 1 h + 2 min = 2 h 4 min. The shortest window a node can be configured for is
+  36 min: -descriptor-ttl is at least 16 min and -onion-rotate is not shorter, so the rotation
+  period is 16 min + 2 min = 18 min and the window 18 min + 16 min + 2 min. Node memory taken
+  after the release does not open the cell. A wire capture cannot be read without the links'
+  ephemeral keys.
 - The window is counted on two clocks, the wall clock and the running time of the host, and each
   of its two steps, the rotation and the release, happens as soon as either clock says so. The
   node reads them once a second, so each step can come up to a second late. A host that sleeps

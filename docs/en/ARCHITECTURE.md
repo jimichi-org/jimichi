@@ -713,10 +713,34 @@ finds by the label of their deployments (app=relay).
 - GET /descriptors on the info port is the mirror: the node's own bundle and the cached
   bundles of its roster peers. It is encoded when the roster is installed, when the cache is
   refreshed and when the node signs its own descriptor. A request copies ready bytes; only the
-  first request after a bundle in the mirror has expired encodes it again, without that bundle.
-  The mirror lists what the node holds: a peer whose bundle it does not hold, or whose bundle
-  has expired, is left out. The answer is 503 while the node has no roster or no descriptor of
-  its own in service.
+  first request after a bundle has left the mirror or may join it encodes it again. The answer
+  is 503 while the node has no roster or no descriptor of its own in service, and before its
+  own bundle may be listed (below).
+- A client checks the bundles on its own clock, which it reads once the mirror has arrived,
+  after any retries, so the mirror lists a bundle only while a clock that differs from the
+  node's within the allowance finds it valid on arrival: from the later of the descriptor's
+  published time and the certificate's not_before, on the node's clock, until 2 min 6 s before
+  its expires, whatever lifetime the peer signed it for. The margin is Skew, 2 min, plus the
+  5 s a request may take, plus 1 s because the node compares whole seconds. A peer whose
+  bundle the node does not hold, or holds outside that window, is left out of the mirror and
+  counts as one of the nodes the client's -missing allows; the entry in the cache and the
+  extension of circuits to that peer still last until expires. A fetched bundle that the
+  mirror cannot hold yet does not displace one it holds, and the peer is asked again after the
+  5 s pause.
+- The node's own bundle starts the same way: a certificate may begin up to Skew after the
+  node's clock, and until that clock reaches the later of published and not_before,
+  /descriptors answers 503. /descriptor serves the bundle as soon as it is signed: a peer lists
+  it in its mirror only from that start, and enroll checks it on the clock that set not_before.
+- -descriptor-ttl is at least 16 min and at most 24 h, so a peer that signs again on time stays
+  in the mirror while its clock is within Skew of the node's: its next descriptor is signed
+  before the age of the held one reaches ttl/2 + 1 min and is taken on the first pass once it
+  is signed and its published time has come on the node's clock, while the held one stays in
+  the mirror until its age reaches ttl - 2 min 6 s. With the peer's clock up to 2 min behind,
+  that leaves ttl/2 - 1 min - Skew - 2 min 6 s for the 5 s pause and one pass over the peers:
+  2 min 54 s with the shortest lifetime and 4 min 54 s with the testbed's 20 min. A descriptor
+  cut to the certificate's not_after leaves the mirrors of the peers 2 min 6 s before
+  not_after; the node itself serves its descriptor and its own mirror, and takes circuits,
+  until not_after.
 - The client (-missing, 1 by default, at most the listed nodes beyond -hops) accepts a mirror that
   lists the entry itself and all but that many listed nodes, verifies every bundle the mirror
   does list, and draws the other hops among those nodes. A bundle that is listed and fails the

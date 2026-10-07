@@ -977,8 +977,9 @@ func TestDescriptorTTLIsCheckedInEveryMode(t *testing.T) {
 		ttl time.Duration
 		ok  bool
 	}{
-		{time.Hour, true}, {time.Minute, true}, {24 * time.Hour, true},
-		{0, false}, {-time.Second, false}, {59 * time.Second, false}, {25 * time.Hour, false},
+		{time.Hour, true}, {16 * time.Minute, true}, {20 * time.Minute, true}, {24 * time.Hour, true},
+		{0, false}, {-time.Second, false}, {time.Minute, false}, {15 * time.Minute, false},
+		{16*time.Minute - time.Second, false}, {24*time.Hour + time.Second, false}, {25 * time.Hour, false},
 	} {
 		if err := checkTTL(c.ttl); (err == nil) != c.ok {
 			t.Errorf("checkTTL(%v) = %v, want ok %v", c.ttl, err, c.ok)

@@ -25,6 +25,11 @@ const (
 	maxAdminBody  = pki.MaxRoster
 	maxCheckEvery = time.Minute
 	minCheckEvery = time.Second
+	// a peer signs again by half its lifetime plus a timer period, and the new
+	// bundle has to reach a mirror whose clock is up to Skew off before the held
+	// one leaves it, mirrorMargin before expiry: ttl/2 - 1 min - Skew -
+	// mirrorMargin is 174 s here
+	minDescriptorTTL = 16 * time.Minute
 )
 
 const (
@@ -43,6 +48,7 @@ var (
 // the bundle clients get, with the times that end it
 type served struct {
 	bundle    []byte
+	notBefore int64
 	notAfter  int64
 	published int64
 	expires   int64
@@ -114,8 +120,8 @@ func checkAuthFlags(stats, name, advertise string, ttl time.Duration) error {
 }
 
 func checkTTL(ttl time.Duration) error {
-	if ttl < time.Minute || ttl > pki.MaxDescriptorLife {
-		return fmt.Errorf("-descriptor-ttl %v: want between 1m and %v", ttl, pki.MaxDescriptorLife)
+	if ttl < minDescriptorTTL || ttl > pki.MaxDescriptorLife {
+		return fmt.Errorf("-descriptor-ttl %v: want between %v and %v", ttl, minDescriptorTTL, pki.MaxDescriptorLife)
 	}
 	return nil
 }
@@ -165,28 +171,33 @@ func (n *node) certState() string {
 	}
 }
 
-// the bundle in service and the unix second it runs out
-func (n *node) current() ([]byte, int64, bool) {
+// the bundle in service, the unix second the mirror may list it from and the
+// one it runs out. A certificate may start up to Skew after this node's clock,
+// and until then a client whose clock is behind by up to Skew would refuse the
+// bundle
+func (n *node) current(now int64) ([]byte, int64, int64, bool) {
 	if n.id == nil {
 		b := n.unsigned
 		if s := n.out.Load(); s != nil {
 			b = s.bundle
 		}
-		return b, math.MaxInt64, b != nil
+		return b, 0, math.MaxInt64, b != nil
 	}
 	s := n.out.Load()
 	if s == nil {
-		return nil, 0, false
+		return nil, 0, 0, false
 	}
 	until := min(s.notAfter, s.expires)
-	if n.now().Unix() >= until {
-		return nil, 0, false
+	if now >= until {
+		return nil, 0, 0, false
 	}
-	return s.bundle, until, true
+	return s.bundle, max(s.published, s.notBefore), until, true
 }
 
+// served before its start as well: a peer lists it in its mirror only from
+// then, and enroll checks it on the clock that set not_before
 func (n *node) descriptor() ([]byte, bool) {
-	b, _, ok := n.current()
+	b, _, _, ok := n.current(n.now().Unix())
 	return b, ok
 }
 
@@ -404,7 +415,7 @@ func servedFrom(b []byte) (*served, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &served{bundle: b, notAfter: c.NotAfter, published: d.Published, expires: d.Expires}, nil
+	return &served{bundle: b, notBefore: c.NotBefore, notAfter: c.NotAfter, published: d.Published, expires: d.Expires}, nil
 }
 
 // a signature on GOST costs math/big work and leaves heap copies of the key,
@@ -420,8 +431,8 @@ func (n *node) keepFresh() {
 }
 
 // a quarter of the lifetime keeps a re-signing due at half of it from
-// slipping past the expiry, even for the shortest lifetime of a minute; the
-// lower bound keeps a ticker valid whatever lifetime it is given
+// slipping past the expiry; the lower bound keeps a ticker valid whatever
+// lifetime it is given
 func checkEvery(ttl time.Duration) time.Duration {
 	return max(min(ttl/4, maxCheckEvery), minCheckEvery)
 }
