@@ -137,7 +137,11 @@ th = Hash(T)        SHA-256 or Streebog-256, 32 bytes
   of parts and the length of every part. The same bytes cut at other places give another hash.
 - NewContext takes the hash and the suite name from the provider it is given, so a context is as
   trustworthy as that provider: the type guarantees that a context is present, not that it is the
-  suite hash of a transcript. wire, link and relay pass the provider of the suite itself.
+  suite hash of a transcript. wire, link and relay pass the provider of the suite itself. The
+  hash is not picked by suite inside crypto: the GOST package imports crypto itself, so
+  Streebog would have to come into the interface package straight from a third-party library,
+  and the interface package imports no crypto library. Nor would it help: a wrapper that returns
+  bytes of its choosing from Hash returns them from Agree and DeriveKey just as well.
 - NewContext copies the parts into T and hashes it at once: a slice of a cell body cannot change
   between two derivations.
 - The transcript consists of public data and is not signed with the node signing key. Sum
@@ -321,10 +325,11 @@ and has no primitives of its own.
   does nothing but zero it, and that only with zeroing on. Process hardening returns an error
   there: with the default flags a node, a client and jimichi enroll refuse to start and run only
   with -harden=false and a -keymem without lock.
-- In a container mlock is bounded by RLIMIT_MEMLOCK. A node checks the budget at start and refuses
-  to run below 80 KiB, or when locking was asked for and failed. A rotating node holds one locked
-  page per onion key, two at most, and, when memory allows, four more that it gives back right
-  before it makes the next key: one for the key, three for its key pair check. It takes them after
+- In a container mlock is bounded by RLIMIT_MEMLOCK. A node checks the budget at start, before
+  it makes its first key, and refuses to run below 80 KiB, or when locking was asked for and
+  failed. A rotating node holds one locked page per onion key, two at most, and, when memory
+  allows, four more that it gives back right before it makes the next key: one for the key,
+  three for its key pair check. It takes them at start, after the pair checks of its keys, after
   each rotation and, if there was no room then, again once the replaced key is released. It does
   not take a new onion key whose page is not locked.
 - Every measure is switched by configuration, so its contribution can be measured:

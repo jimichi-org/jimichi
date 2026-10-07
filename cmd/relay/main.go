@@ -110,11 +110,6 @@ func main() {
 			logger.Fatalf("harden: %v", err)
 		}
 	}
-	if policy.Lock {
-		if err := checkMemlock(); err != nil {
-			logger.Fatal(err)
-		}
-	}
 	cfg.lock = policy.Lock
 	cfg.keymem = policy.String()
 
@@ -138,6 +133,13 @@ func main() {
 }
 
 func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, stop <-chan os.Signal) error {
+	// before any key: below the minimum a node fails on whichever allocation
+	// finds no room, and that names no limit
+	if cfg.lock {
+		if err := checkMemlock(); err != nil {
+			return err
+		}
+	}
 	staticPriv, staticPub, err := provider.GenerateEphemeral()
 	if err != nil {
 		return fmt.Errorf("static key: %w", err)
@@ -209,6 +211,11 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		return fmt.Errorf("relay: %w", err)
 	}
 	defer r.Close()
+	// after the pair check of the link key, whose pages are given back by now:
+	// held first, they could leave the check without room
+	if n.onion != nil {
+		n.onion.hold()
+	}
 
 	// bound here rather than inside the serving goroutines: a node whose
 	// enrollment port is taken would otherwise run on and never get a certificate

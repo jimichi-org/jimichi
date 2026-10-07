@@ -4,11 +4,15 @@ package secmem_test
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"testing"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
@@ -79,5 +83,51 @@ func TestOffHeapWithoutMeasuresIsPlainMapping(t *testing.T) {
 	flags := vmFlags(t, uintptr(unsafe.Pointer(&b.Bytes()[0])))
 	if strings.Contains(flags, " lo") || strings.Contains(flags, " dd") {
 		t.Fatalf("mapping flags %q show a measure that was switched off", flags)
+	}
+}
+
+// whatever the size that found no room, the failure names one cause, so a
+// node that logs it writes one line for it
+func TestLockFailureNamesItsCause(t *testing.T) {
+	if err := secmem.SetPolicy(secmem.Protected); err != nil {
+		t.Fatal(err)
+	}
+	var was unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &was); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &unix.Rlimit{Cur: 0, Max: was.Max}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &was); err != nil {
+			t.Errorf("RLIMIT_MEMLOCK not restored: %v", err)
+		}
+	})
+	for _, size := range []int{32, 64 << 10} {
+		b, err := secmem.New(size)
+		if err == nil {
+			b.Release()
+			t.Skip("locked memory is not bounded by RLIMIT_MEMLOCK here")
+		}
+		if !errors.Is(err, secmem.ErrNotLocked) || errors.Is(err, secmem.ErrNotMapped) {
+			t.Fatalf("New(%d) under a zero limit: %v, want %v", size, err, secmem.ErrNotLocked)
+		}
+	}
+}
+
+// half the largest int is past the user address space of a 64-bit process, so
+// mmap itself refuses it, before any page is locked
+func TestMapFailureNamesItsCause(t *testing.T) {
+	if err := secmem.SetPolicy(secmem.Protected); err != nil {
+		t.Fatal(err)
+	}
+	b, err := secmem.New(math.MaxInt / 2)
+	if err == nil {
+		b.Release()
+		t.Skip("the mapping was granted here")
+	}
+	if !errors.Is(err, secmem.ErrNotMapped) || errors.Is(err, secmem.ErrNotLocked) {
+		t.Fatalf("New(MaxInt/2): %v, want %v", err, secmem.ErrNotMapped)
 	}
 }

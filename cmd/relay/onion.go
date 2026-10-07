@@ -19,6 +19,20 @@ const onionCheckEvery = time.Second
 
 var errOnionUnlocked = errors.New("key memory is not locked")
 
+// what a failed rotation is logged as. The error itself carries the allocation
+// size and the errno, which say nothing the class does not, and would split one
+// cause into several lines as soon as any allocation on the path changed size
+var rotationFailures = []error{secmem.ErrNotLocked, secmem.ErrNotMapped, errOnionUnlocked, relay.ErrOnionKey}
+
+func rotationClass(err error) string {
+	for _, known := range rotationFailures {
+		if errors.Is(err, known) {
+			return known.Error()
+		}
+	}
+	return "onion key not made"
+}
+
 // a moment that has come once the wall clock or the running time says so,
 // whichever is first. time.Now carries both readings and two such values
 // compare by the running time alone, which stands still while the host sleeps
@@ -57,9 +71,9 @@ type onionKeys struct {
 	retireAt deadline
 	// pages given back right before the next key is made, so the key and its
 	// pair check find room when the locked memory is used up. Taken when memory
-	// allows: after each rotation and, if that found no room, once the replaced
-	// key is released; nothing keeps another allocation from taking the room
-	// before that
+	// allows: at start once the other keys are checked, after each rotation and,
+	// if that found no room, once the replaced key is released; nothing keeps
+	// another allocation from taking the room before that
 	reserve *secmem.Buffer
 	closed  bool
 	// the last failure, so one that repeats every second is one line
@@ -81,10 +95,10 @@ func checkRotateFlags(rotate, ttl time.Duration) error {
 	return nil
 }
 
+// holds no pages yet: the caller takes them with hold once its other keys are
+// made and checked
 func newOnionKeys(ring *relay.OnionRing, every, ttl time.Duration, lock bool, now time.Time) *onionKeys {
-	o := &onionKeys{ring: ring, every: every, grace: ttl + pki.Skew, lock: lock, rotateAt: after(now, every)}
-	o.hold()
-	return o
+	return &onionKeys{ring: ring, every: every, grace: ttl + pki.Skew, lock: lock, rotateAt: after(now, every)}
 }
 
 // the new key, the one-time key of its pair check and the two secrets the check
@@ -166,9 +180,9 @@ func (n *node) rotateIfDue() {
 	epoch, err := n.rotate()
 	if err != nil {
 		o.failures.Add(1)
-		if cause := err.Error(); cause != o.failed {
+		if cause := rotationClass(err); cause != o.failed {
 			o.failed = cause
-			n.logger.Printf("onion key rotation: %v", err)
+			n.logger.Printf("onion key rotation: %s", cause)
 		}
 		return
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -33,6 +34,8 @@ type cluster struct {
 
 	mu     sync.Mutex
 	routes map[string]string
+	// hosts reached over an in-memory connection instead of a socket
+	pipes map[string]func() net.Conn
 }
 
 func newCluster(t *testing.T, s jcrypto.Suite, names ...string) *cluster {
@@ -41,7 +44,19 @@ func newCluster(t *testing.T, s jcrypto.Suite, names ...string) *cluster {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &cluster{p: p, ca: newCA(t, p), clock: &clock{now: t0}, web: fetch.NewClient(), routes: make(map[string]string)}
+	c := &cluster{p: p, ca: newCA(t, p), clock: &clock{now: t0}, web: fetch.NewClient(),
+		routes: make(map[string]string), pipes: make(map[string]func() net.Conn)}
+	tr := c.web.Transport.(*http.Transport)
+	dial := tr.DialContext
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c.mu.Lock()
+		pipe := c.pipes[addr]
+		c.mu.Unlock()
+		if pipe != nil {
+			return pipe(), nil
+		}
+		return dial(ctx, network, addr)
+	}
 	for _, name := range names {
 		f := newNode(t, p, c.ca, c.clock, name)
 		f.n.fetchPeer = c.fetch
@@ -618,37 +633,39 @@ func TestPeerFlags(t *testing.T) {
 	}
 }
 
-// a listener that answers every request with the given bytes, whatever was asked
-func rawPeer(t *testing.T, answer func(n int) []byte) string {
+// a peer that reads one request and answers it with the given bytes, whatever
+// was asked. It is reached over an in-memory connection: through a socket, a
+// host short of ports under load fails the dial now and then, and that failure
+// is a class of its own
+func (c *cluster) rawPeer(t *testing.T, answer func(n int) []byte) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
 	var asked atomic.Int32
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
+	c.mu.Lock()
+	host := fmt.Sprintf("raw-%d.test:80", len(c.pipes)+1)
+	c.pipes[host] = func() net.Conn {
+		near, far := net.Pipe()
+		n := int(asked.Add(1))
+		go func() {
+			defer far.Close()
+			if _, err := http.ReadRequest(bufio.NewReader(far)); err != nil {
 				return
 			}
-			n := int(asked.Add(1))
-			go func() {
-				defer conn.Close()
-				_, _ = conn.Read(make([]byte, 4096))
-				_, _ = conn.Write(answer(n))
-			}()
-		}
-	}()
-	return "http://" + ln.Addr().String()
+			_, _ = far.Write(answer(n))
+		}()
+		return near
+	}
+	c.mu.Unlock()
+	return "http://" + host
 }
 
 // what a peer puts on its status line reaches neither the log nor the cache:
 // the cause is one of a fixed set, and a peer that fails the same way in other
 // words is still one line
 func TestPeerFailureIsLoggedAsABoundedClass(t *testing.T) {
-	c := three(t, jcrypto.SuiteC25519)
+	// the one peer is the raw one, so no refresh dials a socket: a third node
+	// reached over one could fail its fetch under load and add a line
+	c := newCluster(t, jcrypto.SuiteC25519, "relay-1", "relay-2")
+	c.enroll(t, t0.Add(72*time.Hour))
 	n1, n2 := c.nodes[0], c.nodes[1]
 	cache := n1.takeRoster(t, c.roster())
 	base := len(n1.log.String())
@@ -666,8 +683,8 @@ func TestPeerFailureIsLoggedAsABoundedClass(t *testing.T) {
 		return added
 	}
 
-	c.route(n2.n.addr, rawPeer(t, func(n int) []byte {
-		line := fmt.Sprintf("HTTP/1.1 404 try %d \x1b[2J\x07 %s\r\nContent-Length: 0\r\n\r\n", n, strings.Repeat("AAAA", 64))
+	c.route(n2.n.addr, c.rawPeer(t, func(n int) []byte {
+		line := fmt.Sprintf("HTTP/1.1 404 try %d \x1b[2J\x07 %s\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", n, strings.Repeat("AAAA", 64))
 		return []byte(line)
 	}))
 	for range 3 {
@@ -678,7 +695,7 @@ func TestPeerFailureIsLoggedAsABoundedClass(t *testing.T) {
 		t.Fatalf("three answers with status 404 gave %q, want once %q", added, want)
 	}
 
-	c.route(n2.n.addr, rawPeer(t, func(int) []byte {
+	c.route(n2.n.addr, c.rawPeer(t, func(int) []byte {
 		line := append([]byte("HTTP/1.1 404 "), bytes.Repeat([]byte("AAAA\x1b"), 1<<18)...)
 		return append(line, "\r\nContent-Length: 0\r\n\r\n"...)
 	}))
@@ -690,8 +707,8 @@ func TestPeerFailureIsLoggedAsABoundedClass(t *testing.T) {
 		t.Fatalf("an oversized status line gave %q, want one more line %q", added, want)
 	}
 
-	c.route(n2.n.addr, rawPeer(t, func(int) []byte {
-		return append([]byte("HTTP/1.1 200 OK\r\n\r\n"), bytes.Repeat([]byte("AAAA"), fetch.MaxBundle)...)
+	c.route(n2.n.addr, c.rawPeer(t, func(int) []byte {
+		return append([]byte("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"), bytes.Repeat([]byte("AAAA"), fetch.MaxBundle)...)
 	}))
 	cache.refresh()
 	added = clean("a body over the size limit")
