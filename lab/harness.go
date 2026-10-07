@@ -445,7 +445,7 @@ func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector, d
 				// regular pattern would make the attack unrealistically easy
 				gap := time.Duration(rng.ExpFloat64() * float64(cfg.SendEvery))
 				time.Sleep(gap)
-				if time.Now().After(deadline) {
+				if !time.Now().Before(deadline) {
 					break
 				}
 				seq := uint64(local)
