@@ -189,6 +189,16 @@ func Execute(cfg Config) (*Run, error) {
 		defer exitMu.Unlock()
 		return len(exitTraces)
 	}
+	exitSetUp := func() bool {
+		exitMu.Lock()
+		defer exitMu.Unlock()
+		for _, t := range exitTraces {
+			if t.Len() == 0 {
+				return false
+			}
+		}
+		return true
+	}
 	// real clients start at unrelated moments, so each schedule gets a random
 	// phase; dialling back to back instead would put every client in phase and
 	// hand the attack ties that no real network produces
@@ -228,6 +238,15 @@ func Execute(cfg Config) (*Run, error) {
 			}
 		}
 	}
+	// a relay opens the last link, completes its handshake there and only then
+	// writes the setup, so an origin taken once the link exists can still let
+	// the setup of the last flow into the window
+	if cfg.Hops >= 2 {
+		if err := waitFor(exitSetUp, 5*time.Second); err != nil {
+			return nil, fmt.Errorf("setup on the exit links: %w", err)
+		}
+	}
+	setUp := time.Since(start)
 
 	latency := newLatency(clients, start)
 	// the last client started its schedule a moment ago, so a window opening
@@ -235,7 +254,13 @@ func Execute(cfg Config) (*Run, error) {
 	if schedule > 0 {
 		time.Sleep(time.Duration(phases.Int63n(int64(schedule))))
 	}
+	// a frame on the origin counts inside the window, and a coarse clock can
+	// give a setup frame and the origin the same reading
 	origin := time.Since(start)
+	for origin <= setUp {
+		time.Sleep(time.Millisecond)
+		origin = time.Since(start)
+	}
 	sent := runFlows(cfg, clients, latency)
 
 	// a fixed drain would cut the latency tail of a slow schedule; a message

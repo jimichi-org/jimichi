@@ -72,6 +72,53 @@ func TestTapsCountTheCellsOfAFlowWithoutTheHandshake(t *testing.T) {
 	}
 }
 
+// three flows sent at once and without cover, the none row of a series: before
+// the window opens each forward trace holds one frame, the setup of its flow,
+// and nothing has come back; from the origin on every frame is a message or
+// its echo, so each direction of each tapped link counts exactly the messages
+// sent, a multiplier of exactly 1
+func TestWindowOpensAfterEverySetupCrossedTheLastLink(t *testing.T) {
+	run, err := Execute(Config{Flows: 3, Duration: 300 * time.Millisecond, SendEvery: 20 * time.Millisecond, Seed: 13})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if run.Sent == 0 || run.Unanswered != 0 || run.Dropped != 0 || run.RelayDropped != 0 {
+		t.Fatalf("%d sent, %d unanswered, %d dropped by clients, %d by relays; want every message of a quiet run echoed",
+			run.Sent, run.Unanswered, run.Dropped, run.RelayDropped)
+	}
+	for _, tc := range []struct {
+		name   string
+		traces []*Trace
+		setup  int
+	}{
+		{"entry", run.Entry, 1},
+		{"exit", run.Exit, 1},
+		{"entry back", run.EntryBack, 0},
+		{"exit back", run.ExitBack, 0},
+	} {
+		if len(tc.traces) != 3 {
+			t.Fatalf("%s: %d traces for 3 flows", tc.name, len(tc.traces))
+		}
+		inside := 0
+		for i, tr := range tc.traces {
+			before := 0
+			for _, e := range tr.Events() {
+				if e < run.Origin {
+					before++
+				} else {
+					inside++
+				}
+			}
+			if before != tc.setup {
+				t.Errorf("%s, flow %d: %d frames before the window opened, want %d", tc.name, i, before, tc.setup)
+			}
+		}
+		if inside != run.Sent {
+			t.Errorf("%s: %d frames inside the window for %d messages", tc.name, inside, run.Sent)
+		}
+	}
+}
+
 // a paced chain keeps both directions of both links busy while flows are quiet
 func TestPacedRunFillsBothDirections(t *testing.T) {
 	if testing.Short() {
