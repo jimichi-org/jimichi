@@ -150,6 +150,33 @@ func TestNoLatencySampleLeavesTheLatencyMedianNull(t *testing.T) {
 	}
 }
 
+// the report holds a latency to the microsecond: 155 us is 0.155 ms, which two
+// decimals would print as 0.15 or 0.16; from a millisecond on two decimals
+// keep the same microseconds, 48.5 ms as 48.50
+func TestSummaryPrintsLatencyAsTheReportHoldsIt(t *testing.T) {
+	sum := summarise([]result{
+		{Suite: "c25519", Traffic: "fast", Bin: "100ms", AUC: 1, P50: "155µs"},
+		{Suite: "c25519", Traffic: "edge", Bin: "100ms", AUC: 1, P50: "999µs"},
+		{Suite: "c25519", Traffic: "slow", Bin: "100ms", AUC: 1, P50: "48.5ms"},
+	})
+	var out bytes.Buffer
+	printSummary(&out, sum)
+	lines := map[string][]string{}
+	for _, l := range strings.Split(out.String(), "\n") {
+		if f := strings.Fields(l); len(f) > 0 {
+			lines[f[0]] = f
+		}
+	}
+	// traffic, bin, runs, brk, lim, clean, auc and its two bounds, top1, mult and
+	// relay-x come before p50
+	for traffic, want := range map[string]string{"fast": "0.155", "edge": "0.999", "slow": "48.50"} {
+		f := lines[traffic]
+		if len(f) < 13 || f[12] != want {
+			t.Errorf("%s: p50 printed in %q, want %s", traffic, strings.Join(f, " "), want)
+		}
+	}
+}
+
 // one clean run gives values, not a median, and the printed line says so; a
 // line with no clean run prints no numbers at all
 func TestSummaryMarksLinesWithOneOrNoCleanRun(t *testing.T) {

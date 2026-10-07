@@ -396,7 +396,7 @@ func printSummary(w io.Writer, sum []summary) {
 		}
 		p50 := "-"
 		if s.LatencyP50Ms != nil {
-			p50 = fmt.Sprintf("%.2f", *s.LatencyP50Ms)
+			p50 = milliseconds(*s.LatencyP50Ms)
 		}
 		note := ""
 		if s.CleanRuns == 1 {
@@ -407,6 +407,15 @@ func printSummary(w io.Writer, sum []summary) {
 	}
 	fmt.Fprintln(w, "brk: runs where a circuit closed; lim: runs where a relay deadline, lifetime or admission limit acted")
 	fmt.Fprintln(w, "both are left out of the medians, ranges and deg, which rest on the clean runs")
+}
+
+// the report keeps latency to the microsecond, so a value below a millisecond
+// needs a third decimal to read the same as the report
+func milliseconds(v float64) string {
+	if v < 1 {
+		return fmt.Sprintf("%.3f", v)
+	}
+	return fmt.Sprintf("%.2f", v)
 }
 
 // the first three fields of /proc/loadavg; empty where there is no such file
