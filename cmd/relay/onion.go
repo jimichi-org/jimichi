@@ -19,10 +19,9 @@ const onionCheckEvery = time.Second
 
 var errOnionUnlocked = errors.New("key memory is not locked")
 
-// what a failed rotation is logged as. A memory failure carries the size of the
-// allocation that found no room, and on GOST the key and the secrets of its
-// pair check differ in size, so the error itself would give one cause several
-// lines
+// what a failed rotation is logged as. The error itself carries the allocation
+// size and the errno, which say nothing the class does not, and would split one
+// cause into several lines as soon as any allocation on the path changed size
 var rotationFailures = []error{secmem.ErrNotLocked, secmem.ErrNotMapped, errOnionUnlocked, relay.ErrOnionKey}
 
 func rotationClass(err error) string {

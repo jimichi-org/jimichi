@@ -892,7 +892,7 @@ type tightProvider struct {
 
 func (p *tightProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	if !p.room() {
-		return nil, nil, noRoom(32)
+		return nil, nil, noRoom()
 	}
 	return p.CryptoProvider.GenerateEphemeral()
 }
@@ -998,10 +998,9 @@ type shortProvider struct {
 	step string
 }
 
-// what secmem returns when a page cannot be locked: the size is the one of the
-// allocation that found no room
-func noRoom(size int) error {
-	return fmt.Errorf("%w: mlock %d bytes (check RLIMIT_MEMLOCK): %w", secmem.ErrNotLocked, size, syscall.ENOMEM)
+// what secmem returns when the page of a 32 byte key or secret cannot be locked
+func noRoom() error {
+	return fmt.Errorf("%w: mlock 32 bytes (check RLIMIT_MEMLOCK): %w", secmem.ErrNotLocked, syscall.ENOMEM)
 }
 
 func (p *shortProvider) failAt(step string) {
@@ -1018,20 +1017,20 @@ func (p *shortProvider) fails(step string) bool {
 
 func (p *shortProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	if p.fails("generate") {
-		return nil, nil, noRoom(64)
+		return nil, nil, noRoom()
 	}
 	return p.CryptoProvider.GenerateEphemeral()
 }
 
 func (p *shortProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	if p.fails("agree") {
-		return nil, noRoom(32)
+		return nil, noRoom()
 	}
 	return p.CryptoProvider.Agree(priv, peerPub, ctx)
 }
 
-// one cause is one line, whether the key or the secret of its pair check found
-// no room, though the two allocations differ in size
+// one cause is one line naming only its class, whether the key or the secret of
+// its pair check found no room
 func TestShortMemoryIsOneLineWhereverItStrikes(t *testing.T) {
 	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
 		t.Run(s.String(), func(t *testing.T) {
@@ -1134,8 +1133,7 @@ func TestRotationClass(t *testing.T) {
 		err  error
 		want string
 	}{
-		{noRoom(32), secmem.ErrNotLocked.Error()},
-		{noRoom(64), secmem.ErrNotLocked.Error()},
+		{noRoom(), secmem.ErrNotLocked.Error()},
 		{fmt.Errorf("%w: mmap 4096 bytes: %w", secmem.ErrNotMapped, syscall.ENOMEM), secmem.ErrNotMapped.Error()},
 		{fmt.Errorf("%w: %v", relay.ErrOnionKey, jcrypto.ErrBadPublicKey), relay.ErrOnionKey.Error()},
 		{errOnionUnlocked, errOnionUnlocked.Error()},
