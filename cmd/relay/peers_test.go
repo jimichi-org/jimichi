@@ -662,7 +662,10 @@ func (c *cluster) rawPeer(t *testing.T, answer func(n int) []byte) string {
 // the cause is one of a fixed set, and a peer that fails the same way in other
 // words is still one line
 func TestPeerFailureIsLoggedAsABoundedClass(t *testing.T) {
-	c := three(t, jcrypto.SuiteC25519)
+	// the one peer is the raw one, so no refresh dials a socket: a third node
+	// reached over one could fail its fetch under load and add a line
+	c := newCluster(t, jcrypto.SuiteC25519, "relay-1", "relay-2")
+	c.enroll(t, t0.Add(72*time.Hour))
 	n1, n2 := c.nodes[0], c.nodes[1]
 	cache := n1.takeRoster(t, c.roster())
 	base := len(n1.log.String())
