@@ -264,7 +264,7 @@ func TestFailedSendLeavesNoMessageUnanswered(t *testing.T) {
 		t.Fatalf("circuit still open after its relay closed: %v", err)
 	}
 	cfg := Config{Duration: 100 * time.Millisecond, SendEvery: time.Millisecond}.withDefaults()
-	if sent := runFlows(cfg, clients, latency); sent != 0 {
+	if sent := runFlows(cfg, clients, latency, time.Now().Add(cfg.Duration)); sent != 0 {
 		t.Fatalf("%d messages sent on an ended circuit", sent)
 	}
 	if p := latency.pending(); p != 0 {
