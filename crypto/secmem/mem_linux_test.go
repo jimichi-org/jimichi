@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -112,5 +113,21 @@ func TestLockFailureNamesItsCause(t *testing.T) {
 		if !errors.Is(err, secmem.ErrNotLocked) || errors.Is(err, secmem.ErrNotMapped) {
 			t.Fatalf("New(%d) under a zero limit: %v, want %v", size, err, secmem.ErrNotLocked)
 		}
+	}
+}
+
+// half the largest int is past the user address space of a 64-bit process, so
+// mmap itself refuses it, before any page is locked
+func TestMapFailureNamesItsCause(t *testing.T) {
+	if err := secmem.SetPolicy(secmem.Protected); err != nil {
+		t.Fatal(err)
+	}
+	b, err := secmem.New(math.MaxInt / 2)
+	if err == nil {
+		b.Release()
+		t.Skip("the mapping was granted here")
+	}
+	if !errors.Is(err, secmem.ErrNotMapped) || errors.Is(err, secmem.ErrNotLocked) {
+		t.Fatalf("New(MaxInt/2): %v, want %v", err, secmem.ErrNotMapped)
 	}
 }

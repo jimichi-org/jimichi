@@ -10,8 +10,8 @@ import (
 
 var created atomic.Uint64
 
-// an allocation that fails wraps ErrNotMapped or ErrNotLocked together with its
-// size, so a caller that logs a failure can name the cause without the size
+// a failed mmap wraps ErrNotMapped and a failed mlock ErrNotLocked, each with
+// the size asked for, so a caller that logs one can name the cause without it
 var (
 	ErrReleased  = errors.New("secmem: buffer released")
 	ErrNotMapped = errors.New("secmem: pages not mapped")
