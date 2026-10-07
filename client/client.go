@@ -274,7 +274,8 @@ var (
 	ErrReplyOutOfTurn   = fmt.Errorf("%w: out of turn", ErrReply)
 	ErrReplyUnsolicited = fmt.Errorf("%w: more replies than cells written", ErrReply)
 	// a frame on the link from the entry that did not open, whether it carried
-	// a reply or link padding
+	// a reply or link padding; anyone on that wire can make one, so it must
+	// not count against the entry
 	ErrReplyFrame = fmt.Errorf("%w: %w", ErrReply, link.ErrFrame)
 )
 
@@ -313,6 +314,12 @@ func (c *Client) Broken() bool { return c.Refused() != nil }
 
 func (c *Client) Send(payload []byte) error {
 	if c.cfg.Mode == ConstantRate && c.cfg.Rate > 0 {
+		c.mu.Lock()
+		err := c.usable()
+		c.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		// the schedule seals a message only at its tick, where no caller is left
 		// to take the error
 		if len(payload) > c.maxPayload {

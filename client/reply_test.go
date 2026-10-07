@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -616,53 +618,52 @@ func TestCloseWithoutARefusedReplyLeavesNoClass(t *testing.T) {
 }
 
 // the client's socket, which reports what the client had on record at its
-// first Close: no Send fails on the refusal before that moment
+// first Close: no Send fails on the close before that moment
 type closeWatch struct {
 	net.Conn
 	client  atomic.Pointer[Client]
 	once    sync.Once
-	atClose chan error
+	atClose chan atClose
+}
+
+type atClose struct {
+	refused error
+	send    error
 }
 
 func (w *closeWatch) Close() error {
 	w.once.Do(func() {
 		if cl := w.client.Load(); cl != nil {
-			w.atClose <- cl.Refused()
+			cl.mu.Lock()
+			w.atClose <- atClose{refused: cl.refused, send: cl.usable()}
+			cl.mu.Unlock()
 		}
 	})
 	return w.Conn.Close()
 }
 
 // the class is on record before the link closes, so a Send that fails on that
-// close already finds it
+// close already finds it; once the reply is refused nothing more is sealed
 func TestClassIsOnRecordWhenASendFailsOnTheRefusal(t *testing.T) {
-	watch := &closeWatch{atClose: make(chan error, 1)}
-	cl, s := dialScriptedThrough(t, replyProvider(t, jcrypto.SuiteC25519), func(ctx context.Context, network, addr string) (net.Conn, error) {
-		var d net.Dialer
-		raw, err := d.DialContext(ctx, network, addr)
-		if err != nil {
-			return nil, err
-		}
-		watch.Conn = raw
-		return watch, nil
-	})
-	watch.client.Store(cl)
+	cl, s, watch := dialWatched(t, Config{})
 	write(t, cl, s, 1)
 	s.send(t, 0, s.unsealed(t, 0))
 
-	select {
-	case got := <-watch.atClose:
-		if got != ErrReplyNotOpened {
-			t.Fatalf("Refused = %v as the client closed its link, want %v", got, ErrReplyNotOpened)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("the client kept its link open")
+	watch.expect(t, ErrReplyNotOpened)
+	if err := cl.Send([]byte("ping")); !errors.Is(err, ErrCircuitClosed) {
+		t.Fatalf("Send after a refused reply: %v, want %v", err, ErrCircuitClosed)
+	}
+	if err := cl.SendCover(); !errors.Is(err, ErrCircuitClosed) {
+		t.Fatalf("SendCover after a refused reply: %v, want %v", err, ErrCircuitClosed)
+	}
+	if got := cl.sent.Load(); got != 1 {
+		t.Fatalf("%d cells sealed, want 1", got)
 	}
 }
 
 func dialWatched(t *testing.T, cfg Config) (*Client, *scriptedChain, *closeWatch) {
 	t.Helper()
-	watch := &closeWatch{atClose: make(chan error, 1)}
+	watch := &closeWatch{atClose: make(chan atClose, 1)}
 	cfg.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
 		raw, err := d.DialContext(ctx, network, addr)
@@ -678,13 +679,16 @@ func dialWatched(t *testing.T, cfg Config) (*Client, *scriptedChain, *closeWatch
 }
 
 // the client closed its socket before anyone called Close, with this class on
-// record
+// record and sending already refused
 func (w *closeWatch) expect(t *testing.T, want error) {
 	t.Helper()
 	select {
 	case got := <-w.atClose:
-		if got != want {
-			t.Fatalf("Refused = %v as the client closed its link, want %v", got, want)
+		if got.refused != want {
+			t.Fatalf("Refused = %v as the client closed its link, want %v", got.refused, want)
+		}
+		if !errors.Is(got.send, ErrCircuitClosed) {
+			t.Fatalf("a Send as the client closed its link: %v, want %v", got.send, ErrCircuitClosed)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the client kept its link open")
@@ -718,7 +722,7 @@ func TestFarSideCloseEndsSending(t *testing.T) {
 		}
 	})
 
-	// Send only queues here, and the schedule is what must stop
+	// Send only queues here, so both it and the schedule must stop
 	t.Run("constant rate", func(t *testing.T) {
 		const rate = 5 * time.Millisecond
 		cl, s, watch := dialWatched(t, Config{Mode: ConstantRate, Rate: rate})
@@ -737,14 +741,92 @@ func TestFarSideCloseEndsSending(t *testing.T) {
 			return cl.sent.Load()
 		}
 		before := sealed()
-		if err := cl.Send([]byte("ping")); err != nil {
-			t.Fatalf("Send: %v", err)
+		if err := cl.Send([]byte("ping")); !errors.Is(err, ErrCircuitClosed) {
+			t.Fatalf("Send after the far side closed: %v, want %v", err, ErrCircuitClosed)
+		}
+		if n := len(cl.queue); n != 0 || cl.Dropped() != 0 {
+			t.Fatalf("%d messages queued and %d dropped after the far side closed", n, cl.Dropped())
 		}
 		time.Sleep(10 * rate)
 		if after := sealed(); after != before {
 			t.Fatalf("the schedule sealed %d cells after the far side closed", after-before)
 		}
 	})
+}
+
+// waits until a send has passed its first check and stands at the send lock,
+// which the caller holds
+func waitAtSendLock(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	buf := make([]byte, 1<<20)
+	for time.Now().Before(deadline) {
+		stacks := string(buf[:runtime.Stack(buf, true)])
+		for _, g := range strings.Split(stacks, "\n\n") {
+			if strings.Contains(g, "[sync.Mutex.Lock") && strings.Contains(g, "(*Client).send(") {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("no send reached the send lock")
+}
+
+// a send that passed the check before the end and waited for its turn seals
+// nothing once its turn comes after the end
+func TestSendWaitingAtTheEndSealsNothing(t *testing.T) {
+	cl, s, watch := dialWatched(t, Config{})
+	write(t, cl, s, 1)
+
+	cl.sendMu.Lock()
+	var once sync.Once
+	release := func() { once.Do(cl.sendMu.Unlock) }
+	t.Cleanup(release)
+	done := make(chan error, 1)
+	go func() { done <- cl.Send([]byte("ping")) }()
+	waitAtSendLock(t)
+	_ = s.conn.Close()
+	watch.expect(t, nil)
+	release()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrCircuitClosed) {
+			t.Fatalf("Send waiting at the end: %v, want %v", err, ErrCircuitClosed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Send still blocked")
+	}
+	if got := cl.sent.Load(); got != 1 {
+		t.Fatalf("%d cells sealed, want 1", got)
+	}
+}
+
+// the caller's own Close is not the end of the circuit by the far side, even
+// when the far side ended it first
+func TestOwnCloseIsReportedAsItself(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"immediate", Config{}},
+		{"constant rate", Config{Mode: ConstantRate, Rate: 5 * time.Millisecond}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, ended := range []bool{false, true} {
+				cl, s, watch := dialWatched(t, tc.cfg)
+				if ended {
+					_ = s.conn.Close()
+					watch.expect(t, nil)
+				}
+				_ = cl.Close()
+				err := cl.Send([]byte("ping"))
+				if err == nil || errors.Is(err, ErrCircuitClosed) {
+					t.Fatalf("Send after Close, far side ended first %v: %v, want the client's own close", ended, err)
+				}
+			}
+		})
+	}
 }
 
 // a frame from the entry that does not open is refused like a reply: the link
