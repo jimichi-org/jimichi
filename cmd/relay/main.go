@@ -18,6 +18,7 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/internal/fetch"
+	"github.com/jimichi-org/jimichi/mailbox"
 	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/relay"
 	"github.com/jimichi-org/jimichi/wire"
@@ -26,7 +27,8 @@ import (
 type config struct {
 	listen, info, stats string
 	logEvery            time.Duration
-	echo                bool
+	exit                string
+	mailbox             mailbox.Limits
 	period              time.Duration
 	queue, setupCache   int
 	auth                bool
@@ -55,7 +57,12 @@ func main() {
 	flag.BoolVar(&cfg.harden, "harden", true, "disable core dumps and ptrace access for the process")
 	suiteName := flag.String("suite", suite.Default.String(), "primitive suite: gost or c25519")
 	flag.StringVar(&cfg.keymem, "keymem", "all", "key memory measures: all, none, or a list of offheap, lock, dontdump, zero")
-	flag.BoolVar(&cfg.echo, "echo", true, "as an exit, send the payload back along the circuit")
+	flag.StringVar(&cfg.exit, "exit", exitEcho, "as an exit: echo sends the payload back along the circuit, mailbox keeps queues of end-to-end records and answers every request, none sends a cover reply")
+	cfg.mailbox = mailbox.DefaultLimits()
+	flag.DurationVar(&cfg.mailbox.TTL, "mailbox-ttl", cfg.mailbox.TTL, "with -exit mailbox: how long a record waits for its fetch, and how long a queue nobody fetches is held against eviction")
+	flag.IntVar(&cfg.mailbox.Depth, "mailbox-depth", cfg.mailbox.Depth, "with -exit mailbox: records one queue holds")
+	flag.IntVar(&cfg.mailbox.Queues, "mailbox-queues", cfg.mailbox.Queues, "with -exit mailbox: queues the node holds; a put for a new one evicts the queue fetched least recently only if nobody fetched it within -mailbox-ttl")
+	flag.IntVar(&cfg.mailbox.Records, "mailbox-records", cfg.mailbox.Records, fmt.Sprintf("with -exit mailbox: records the node holds in all, %d bytes each", mailbox.RecordSize))
 	flag.DurationVar(&cfg.period, "period", 0, "send one frame per circuit and direction every period, padding when idle; 0 forwards at once")
 	flag.IntVar(&cfg.queue, "queue", 64, "cells a circuit may queue per direction when -period is set")
 	flag.IntVar(&cfg.setupCache, "setup-cache", wire.DefaultSetupCache, fmt.Sprintf("setups remembered per onion key to refuse a replay, 0 for the default, at most %d; when full the node refuses new circuits under that key, until restart or, with -onion-rotate, until the next key is published", relay.MaxSetupCache))
@@ -95,6 +102,9 @@ func main() {
 		logger.Fatal(err)
 	}
 	if err := checkRotateFlags(cfg.onionRotate, cfg.descriptorTTL); err != nil {
+		logger.Fatal(err)
+	}
+	if err := checkExit(cfg.exit, cfg.mailbox); err != nil {
 		logger.Fatal(err)
 	}
 
@@ -206,7 +216,17 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		n.setPeers(cfg.peers, unverifiedPeer(provider))
 	}
 
-	r, err := relay.New(relayConfig(provider, staticPriv, staticPub, cfg, n))
+	var store *mailbox.Store
+	if cfg.exit == exitMailbox {
+		if store, err = mailbox.NewStore(provider, cfg.mailbox, cfg.now); err != nil {
+			return fmt.Errorf("mailbox: %w", err)
+		}
+		// deferred before the relay, so it runs after r.Close and no Deliver
+		// comes once the records are zeroed
+		defer store.Close()
+	}
+
+	r, err := relay.New(relayConfig(provider, staticPriv, staticPub, cfg, n, deliverFor(cfg.exit, store)))
 	if err != nil {
 		return fmt.Errorf("relay: %w", err)
 	}
@@ -234,7 +254,14 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 	go func() { served <- r.Serve(cells) }()
 	n.serving = r.Serving
 	go serve(infoLn, n.infoMux(), logger)
-	go serve(adminLn, n.adminMux(r.Stats().Snapshot), logger)
+	var mailboxStats func() mailbox.Counters
+	if store != nil {
+		mailboxStats = store.Stats
+		stopped := make(chan struct{})
+		defer close(stopped)
+		go store.Run(stopped)
+	}
+	go serve(adminLn, n.adminMux(r.Stats().Snapshot, mailboxStats), logger)
 	if n.id != nil {
 		go n.keepFresh()
 	}
@@ -248,8 +275,8 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		go logCounters(r, n, cfg.logEvery, logger)
 	}
 
-	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v, onion_rotate=%v",
-		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth, cfg.onionRotate)
+	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v, onion_rotate=%v, exit=%s",
+		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth, cfg.onionRotate, cfg.exit)
 	return untilStopped(stop, served, logger)
 }
 
@@ -265,19 +292,12 @@ func untilStopped(stop <-chan os.Signal, served <-chan error, logger *log.Logger
 	}
 }
 
-func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []byte, cfg config, n *node) relay.Config {
+func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []byte, cfg config, n *node, deliver relay.Deliver) relay.Config {
 	rc := relay.Config{
 		Provider:   provider,
 		StaticPriv: staticPriv,
 		StaticPub:  staticPub,
-		// the payload is never logged: that would hand out exactly the metadata
-		// the node exists to withhold
-		Deliver: func(_ uint64, payload []byte) []byte {
-			if cfg.echo {
-				return payload
-			}
-			return nil
-		},
+		Deliver:    deliver,
 		Period:     cfg.period,
 		QueueCells: cfg.queue,
 		SetupCache: cfg.setupCache,
@@ -308,6 +328,37 @@ func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, sta
 		rc.Onion = n.onion.ring
 	}
 	return rc
+}
+
+const (
+	exitEcho    = "echo"
+	exitMailbox = "mailbox"
+	exitNone    = "none"
+)
+
+func checkExit(exit string, lim mailbox.Limits) error {
+	switch exit {
+	case exitEcho, exitNone:
+		return nil
+	case exitMailbox:
+		if lim.TTL <= 0 || lim.Depth <= 0 || lim.Queues <= 0 || lim.Records <= 0 {
+			return errors.New("-mailbox-ttl, -mailbox-depth, -mailbox-queues and -mailbox-records must be positive")
+		}
+		return nil
+	}
+	return fmt.Errorf("-exit %q: want echo, mailbox or none", exit)
+}
+
+// the payload is never logged: that would hand out exactly the metadata the
+// node exists to withhold. A nil Deliver makes every reply a cover reply
+func deliverFor(exit string, store *mailbox.Store) relay.Deliver {
+	switch {
+	case exit == exitMailbox && store != nil:
+		return store.Deliver
+	case exit == exitEcho:
+		return func(_ uint64, payload []byte) []byte { return payload }
+	}
+	return nil
 }
 
 func splitList(s string) []string {

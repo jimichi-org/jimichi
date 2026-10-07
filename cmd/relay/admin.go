@@ -15,6 +15,7 @@ import (
 	"time"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/mailbox"
 	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/relay"
 	"github.com/jimichi-org/jimichi/wire"
@@ -246,13 +247,14 @@ func (n *node) infoMux() http.Handler {
 
 // counters polled every few milliseconds would show which ticks of a paced
 // circuit carried a real cell, so they stay off the network the clients use;
-// enrollment shares the loopback listener and is reached by port-forward
-func (n *node) adminMux(counters func() relay.Counters) http.Handler {
+// enrollment shares the loopback listener and is reached by port-forward.
+// mailboxStats is nil unless the node is a mailbox
+func (n *node) adminMux(counters func() relay.Counters, mailboxStats func() mailbox.Counters) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
 		s := counters()
 		roster, held := n.peerState()
-		writeJSON(w, map[string]any{
+		out := map[string]any{
 			"accepted":            s.Accepted,
 			"forwarded":           s.Forwarded,
 			"delivered":           s.Delivered,
@@ -276,7 +278,23 @@ func (n *node) adminMux(counters func() relay.Counters) http.Handler {
 			"mirror_requests":     n.mirrorRequests.Load(),
 			"onion_epoch":         n.onionEpoch(),
 			"onion_rotate_failed": n.onionFailures(),
-		})
+		}
+		if mailboxStats != nil {
+			m := mailboxStats()
+			out["mailbox_requests"] = m.Requests
+			out["mailbox_queues"] = m.Queues
+			out["mailbox_records"] = m.Records
+			out["mailbox_bindings"] = m.Bindings
+			out["mailbox_puts"] = m.Puts
+			out["mailbox_put_full"] = m.PutFull
+			out["mailbox_put_refused"] = m.PutRefused
+			out["mailbox_fetches"] = m.Fetches
+			out["mailbox_hits"] = m.Hits
+			out["mailbox_expired"] = m.Expired
+			out["mailbox_evicted"] = m.Evicted
+			out["mailbox_bad"] = m.Bad
+		}
+		writeJSON(w, out)
 	})
 	if n.id != nil {
 		mux.HandleFunc("POST /csr", n.handleRequest)
