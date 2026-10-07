@@ -84,40 +84,39 @@ func (c *cluster) judge(t *testing.T, f *fixture, raw []byte, ahead time.Duratio
 	return listed, nil
 }
 
-func TestMirrorMarginKnownAnswers(t *testing.T) {
-	// min(Skew, ttl/8) with Skew = 120 s: 60/8 = 7.5 s, 480/8 = 60 s,
-	// 960/8 = 120 s, and Skew for every longer lifetime
-	for _, c := range []struct {
-		ttl  time.Duration
-		want time.Duration
-	}{
-		{time.Minute, 7500 * time.Millisecond},
-		{8 * time.Minute, time.Minute},
-		{16 * time.Minute, 2 * time.Minute},
-		{20 * time.Minute, 2 * time.Minute},
-		{time.Hour, 2 * time.Minute},
-		{24 * time.Hour, 2 * time.Minute},
-		{0, 0},
-		{-time.Hour, 0},
-	} {
-		if got := mirrorMargin(c.ttl); got != c.want {
-			t.Errorf("mirrorMargin(%v) = %v, want %v", c.ttl, got, c.want)
-		}
+// the margin is Skew, 120 s, and the shortest lifetime 8 x 120 = 960 s. A
+// peer signs again once the age of its descriptor reaches 960/2 = 480 s, found
+// by a timer every checkEvery(960) = min(240, 60) = 60 s, so by an age of
+// 540 s on its own clock. The held bundle leaves the mirror at an age of
+// 960 - 120 = 840 s on the node's clock. With the peer's clock up to 120 s
+// behind the node's, 840 - 540 - 120 = 180 s remain for the pass that brings
+// the new bundle; a peer ahead is taken at its published time and leaves
+// 840 - 540 = 300 s
+func TestShortestLifetimeLeavesTheMirrorSlack(t *testing.T) {
+	if mirrorMargin != 2*time.Minute || minDescriptorTTL != 16*time.Minute {
+		t.Fatalf("margin %v and shortest lifetime %v, want 2m and 16m", mirrorMargin, minDescriptorTTL)
+	}
+	signed := minDescriptorTTL/2 + checkEvery(minDescriptorTTL)
+	left := minDescriptorTTL - mirrorMargin
+	if behind := left - signed - pki.Skew; behind != 3*time.Minute {
+		t.Fatalf("slack with the peer behind = %v, want 3m", behind)
+	}
+	if ahead := left - signed; ahead != 5*time.Minute {
+		t.Fatalf("slack with the peer ahead = %v, want 5m", ahead)
 	}
 }
 
-// relay-4 holds a valid certificate and every descriptor it signs is close to
-// its expiry from the start. The cluster's clock reads T; relay-4 runs 55 s
-// behind and signs for 1 min, so each of its descriptors has
-// published = T - 55 and expires = T + 5. The other three sign for 1 h at t0,
-// and the margin of relay-1 is min(120, 3600/8) = 120 s.
+// The cluster's clock reads T. relay-4's clock is 55 s behind and its
+// descriptors live 1 min, so each one has published = T - 55 and
+// expires = T + 5, and its expires falls inside relay-1's margin of 120 s.
+// The other three sign for 1 h at t0.
 //
 // relay-1 at T: T >= published holds, T < expires - 120 = T - 115 does not, so
 // the bundle stays out of the mirror; T < expires, so relay-4 is still a peer,
 // and its bundle is due at once (published + 30 < T), one request per pass.
 //
-// A client 119 s ahead reads T + 119 >= T + 5, where relay-4's bundle fails;
-// the three listed ones pass, the latest T being t0 + 20: t0 + 139 < t0 + 3600.
+// A client 119 s ahead reads T + 119 >= T + 5, outside relay-4's bundle; the
+// three listed ones pass, the latest T being t0 + 20: t0 + 139 < t0 + 3600.
 // A client 119 s behind reads T - 119 and adds its allowance of 120:
 // T + 1 >= t0, the published time of the three. The mirror lacks 1 of 4
 // nodes; 3 hops and -missing 1 allow min(1, 4-3) = 1
@@ -158,6 +157,79 @@ func TestMirrorLeavesOutABundleCloseToItsExpiry(t *testing.T) {
 				t.Fatalf("round %d: a client %v ahead got %v, %v, want the mirror of the three other nodes taken", round, ahead, listed, err)
 			}
 		}
+	}
+}
+
+// relay-4 runs on the cluster's clock and its descriptors live 10 s: signed
+// at t0, published = t0 and expires = t0 + 10. relay-1's margin stays 120 s
+// whatever lifetime the peer chose: t0 < t0 + 10 - 120 does not hold, so the
+// bundle stays out of the mirror from the first pass, while t0 < t0 + 10 keeps
+// relay-4 a peer. A client 119 s ahead reads t0 + 119 >= t0 + 10, outside
+// relay-4's bundle, and takes the mirror of the other three, whose descriptors
+// expire at t0 + 3600. At t0 + 9 the same holds, 9 + 119 = 128 >= 10, and
+// relay-4 is still a peer, 9 < 10
+func TestMirrorMarginDoesNotShrinkWithThePeersLifetime(t *testing.T) {
+	c := newCluster(t, jcrypto.SuiteC25519, "relay-1", "relay-2", "relay-3")
+	n4 := c.add(t, "relay-4", c.clock, 10*time.Second)
+	c.enroll(t, t0.Add(72*time.Hour))
+	n1 := c.nodes[0]
+	cache := n1.takeRoster(t, c.roster())
+	rest := []string{addrOf("relay-1"), addrOf("relay-2"), addrOf("relay-3")}
+	for _, at := range []time.Duration{0, 9 * time.Second} {
+		c.clock.advance(at - c.clock.Now().Sub(t0))
+		cache.refresh()
+		if _, ok := n1.n.peerKey(n4.n.addr); !ok {
+			t.Fatalf("t0 + %v: relay-4 is no peer while its descriptor is valid: %s", at, n1.log.String())
+		}
+		listed, err := c.clientTakes(t, n1, 119*time.Second)
+		if err != nil || !slices.Equal(listed, rest) {
+			t.Fatalf("t0 + %v: a client 119 s ahead got %v, %v, want the mirror of the three other nodes taken", at, listed, err)
+		}
+	}
+}
+
+// relay-4's certificate starts 60 s after its first descriptor: a node takes a
+// certificate whose not_before is up to Skew ahead of its own clock, and signs
+// at once. All clocks read t0, so published = t0 and not_before = t0 + 60.
+// relay-1 verifies the bundle at t0, since t0 + 120 >= t0 + 60, and holds it
+// as a peer, but the mirror takes it from max(t0, t0 + 60) = t0 + 60: at t0 a
+// client 119 s behind would read t0 - 119 + 120 = t0 + 1 < not_before. At
+// t0 + 60 the first request takes the bundle in with no fetch, and the client
+// 119 s behind reads t0 + 61 >= t0 + 60
+func TestMirrorWaitsForTheCertificatesStart(t *testing.T) {
+	c := newCluster(t, jcrypto.SuiteC25519, "relay-1", "relay-2", "relay-3", "relay-4")
+	for _, f := range c.nodes[:3] {
+		f.enroll(t, t0.Add(72*time.Hour))
+	}
+	n1, n4 := c.nodes[0], c.nodes[3]
+	cert := n4.issue(t, n4.request(t), t0.Add(60*time.Second), t0.Add(72*time.Hour))
+	if code, body := n4.put(t, cert); code != http.StatusNoContent {
+		t.Fatalf("PUT /cert with not_before 60 s ahead = %d %s, want 204", code, body)
+	}
+	cache := n1.takeRoster(t, c.roster())
+	if !cache.refresh() {
+		t.Fatalf("refresh: %s", n1.log.String())
+	}
+	rest := []string{addrOf("relay-1"), addrOf("relay-2"), addrOf("relay-3")}
+	clients := []time.Duration{-119 * time.Second, 0, 119 * time.Second}
+	for _, ahead := range clients {
+		if listed, err := c.clientTakes(t, n1, ahead); err != nil || !slices.Equal(listed, rest) {
+			t.Fatalf("before not_before a client %v ahead got %v, %v, want the three other nodes", ahead, listed, err)
+		}
+	}
+	c.clock.advance(59 * time.Second)
+	if listed := n1.mirrored(t); slices.Contains(listed, n4.n.addr) {
+		t.Fatalf("the mirror lists %v one second before relay-4's certificate starts", listed)
+	}
+	c.clock.advance(time.Second)
+	asked := n4.n.descriptorRequests.Load()
+	for _, ahead := range clients {
+		if listed, err := c.clientTakes(t, n1, ahead); err != nil || len(listed) != 4 {
+			t.Fatalf("at not_before a client %v ahead got %v, %v, want all four nodes", ahead, listed, err)
+		}
+	}
+	if n4.n.descriptorRequests.Load() != asked {
+		t.Fatal("the bundle joined the mirror by a fetch; the node held it already")
 	}
 }
 
@@ -363,51 +435,65 @@ func TestPeerLeavesTheMirrorAMarginBeforeItsCertificateEnds(t *testing.T) {
 }
 
 // every node signs for ttl and its timer looks every checkEvery(ttl); a pass of
-// relay-1 follows its own wait, as keepPeers does. Times are seconds after t0,
-// in steps of 1 s.
+// relay-1 follows its own wait, as keepPeers does. relay-2's clock is off ahead
+// of relay-1's and relay-3's off behind; every node enrolls on its own clock.
+// Times are seconds after t0 on relay-1's clock, in steps of 1 s; the age of a
+// descriptor is the same on every clock. The margin is 120 s.
 //
-// ttl = 60: checkEvery = 15, margin = 60/8 = 7. relay-2's timer fires at 14,
-// 29, 44: at 29 its descriptor of t0 (expires 60) is 29 s old, under the half
-// of 30, so it signs again at 44, the latest its timer allows (published 44,
-// expires 104). Passes of relay-1: the first entries are due at 30, so 30,
-// then every 5 while relay-2 is due: 35, 40, 45, and 45 brings the bundle of
-// 44. The bundle of t0 may stay in the mirror while now < 60 - 7 = 53, so the
-// new one comes 8 s early. A client 6 s ahead reads at most 44 + 6 = 50 < 60
-// on the old bundle. relay-1's own timer fires at 7, 22, 37 and signs at 37,
-// 23 s before its descriptor expires.
+// ttl = 960, off = 119: checkEvery = 60. All three sign at 0. The timers of
+// relay-2 and relay-3 fire at 59 + 60k: at 479 the age is under 480, so both
+// sign again at 539, the latest the timer allows, then at 1019, 1499, 1979,
+// 2459. relay-1's timer fires at 30 + 60k and signs at 510.
+// relay-3's first bundle has published = t0 - 119 and expires = t0 + 841, so
+// it is in relay-1's mirror while now < 841 - 120 = 721 and is due at
+// -119 + 480 = 361; relay-1 asks every 5 s from then, gets the same bundle
+// until 539 and the new one by 544, 177 s before 721. A client 119 s ahead
+// reads at most 720 + 119 = 839 < 841 on the old bundle.
+// relay-2's first bundle has published = t0 + 119 and expires = t0 + 1079: in
+// the mirror from 119 to 959, absent before 119, which -missing 1 allows. It
+// is due at 599 and the fetch brings the bundle signed at 539, published
+// 539 + 119 = 658, ahead of relay-1's clock: the held one stays and relay-1
+// asks every 5 s, taking the new one by 663, 296 s before 959. A client 119 s
+// behind reads 119 - 119 + 120 = 120 >= 119 on the first bundle, the same edge
+// as relay-2's not_before. The later periods sign on time at 480 and leave
+// more.
 //
-// ttl = 1200: checkEvery = 60, margin = min(120, 150) = 120. relay-2's timer
-// fires at 59 + 60k: at 599 the descriptor is 599 s old, under 600, so it
-// signs at 659. Passes of relay-1: 600, then every 5, and 660 brings the bundle
-// of 659. The bundle of t0 may stay while now < 1200 - 120 = 1080, so the new
-// one comes 420 s early, and a client 119 s ahead reads at most
-// 659 + 119 = 778 < 1200 on the old bundle.
+// ttl = 1200, off = 0: checkEvery = 60. The timers of relay-2 and relay-3 fire
+// at 59 + 60k: at 599 the descriptor is 599 s old, under 600, so they sign at
+// 659. Passes of relay-1: 600, then every 5, and 660 brings the bundles of 659.
+// The bundles of t0 may stay while now < 1200 - 120 = 1080, so the new ones
+// come 420 s early, and a client 119 s ahead reads at most 659 + 119 = 778 <
+// 1200 on the old bundles.
 //
 // The later periods repeat the first with the same offsets
 func TestHonestPeersStayInTheMirrorAcrossReSigning(t *testing.T) {
 	for _, tc := range []struct {
-		ttl   time.Duration
-		ahead time.Duration
+		ttl time.Duration
+		off time.Duration
 	}{
-		{time.Minute, 6 * time.Second},
-		{20 * time.Minute, 119 * time.Second},
+		{minDescriptorTTL, 119 * time.Second},
+		{20 * time.Minute, 0},
 	} {
 		t.Run(tc.ttl.String(), func(t *testing.T) {
-			c := newCluster(t, jcrypto.SuiteC25519, "relay-1", "relay-2", "relay-3")
-			for _, f := range c.nodes {
-				f.setTTL(tc.ttl)
-			}
+			c := newCluster(t, jcrypto.SuiteC25519, "relay-1")
+			c.nodes[0].setTTL(tc.ttl)
+			ahead := &clock{now: t0.Add(tc.off)}
+			behind := &clock{now: t0.Add(-tc.off)}
+			c.add(t, "relay-2", ahead, tc.ttl)
+			c.add(t, "relay-3", behind, tc.ttl)
+			clocks := []*clock{c.clock, ahead, behind}
 			c.enroll(t, t0.Add(72*time.Hour))
 			n1 := c.nodes[0]
 			cache := n1.takeRoster(t, c.roster())
-			if !cache.refresh() {
-				t.Fatalf("refresh: %s", n1.log.String())
-			}
+			cache.refresh()
 			every := int(checkEvery(tc.ttl) / time.Second)
-			phase := []int{every / 2, every - 1, 0}
+			phase := []int{every / 2, every - 1, every - 1}
+			joined := int(tc.off / time.Second)
 			pass := c.clock.Now().Add(cache.wait())
 			for s := 1; s <= int(3*tc.ttl/time.Second); s++ {
-				c.clock.advance(time.Second)
+				for _, k := range clocks {
+					k.advance(time.Second)
+				}
 				for i, f := range c.nodes {
 					if s%every == phase[i] {
 						f.n.refreshIfDue()
@@ -421,9 +507,9 @@ func TestHonestPeersStayInTheMirrorAcrossReSigning(t *testing.T) {
 				if !ok {
 					t.Fatalf("%d s: relay-1 serves no mirror", s)
 				}
-				for _, ahead := range []time.Duration{tc.ahead, -119 * time.Second} {
-					if listed, err := c.judge(t, n1, raw, ahead); err != nil || len(listed) != 3 {
-						t.Fatalf("%d s: a client %v ahead got %v, %v, want all three nodes", s, ahead, listed, err)
+				for _, ahead := range []time.Duration{119 * time.Second, -119 * time.Second} {
+					if listed, err := c.judge(t, n1, raw, ahead); err != nil || s >= joined && len(listed) != 3 {
+						t.Fatalf("%d s: a client %v ahead got %v, %v, want all three nodes from %d s", s, ahead, listed, err, joined)
 					}
 				}
 			}

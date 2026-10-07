@@ -116,9 +116,9 @@ func main() {
 		addrs: addrs, hops: *hops, fixed: *fixed, missing: *missing, infoPort: *infoPort,
 		auth: *auth, trust: trust,
 		web: fetch.NewClient(), attempts: fetchAttempts, pause: fetchPause,
-		rnd: rand.Reader,
+		rnd: rand.Reader, now: time.Now,
 	}
-	chain, err := sel.chain(provider, logger, time.Now())
+	chain, err := sel.chain(provider, logger)
 	if err != nil {
 		logger.Fatalf("refusing to build the circuit: %v", err)
 	}
@@ -279,13 +279,14 @@ type selection struct {
 	attempts int
 	pause    time.Duration
 	rnd      io.Reader
+	now      func() time.Time
 }
 
 // the entry is drawn first and asked for the bundles of every listed node, so
 // the request is the same whatever path follows; the other hops are drawn only
 // once all of them have passed the check. Nothing here logs the entry or any
 // other node of the path: the lines are the same for every draw
-func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger, now time.Time) ([]client.Node, error) {
+func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger) ([]client.Node, error) {
 	entry := 0
 	if !s.fixed {
 		var err error
@@ -297,6 +298,9 @@ func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger, now time.
 	if err != nil {
 		return nil, s.named(err)
 	}
+	// the entry lists a bundle from the moment its own clock reaches the bundle's
+	// start, so the time is read once the mirror is here, after any retries
+	now := s.now()
 	// position in the list of present nodes for every listed node, or -1
 	at := make([]int, len(s.addrs))
 	var addrs []string

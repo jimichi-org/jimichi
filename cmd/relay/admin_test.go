@@ -611,6 +611,8 @@ func TestAuthFlags(t *testing.T) {
 		{"advertised address over the field", "127.0.0.1:9101", testName, strings.Repeat("a", 60) + ":9000", time.Hour, false},
 		{"advertised address without a port", "127.0.0.1:9101", testName, "relay-1", time.Hour, false},
 		{"descriptor ttl too short", "127.0.0.1:9101", testName, testAddr, time.Second, false},
+		{"descriptor ttl of 15 min", "127.0.0.1:9101", testName, testAddr, 15 * time.Minute, false},
+		{"the shortest descriptor ttl", "127.0.0.1:9101", testName, testAddr, 16 * time.Minute, true},
 		{"descriptor ttl over a day", "127.0.0.1:9101", testName, testAddr, 25 * time.Hour, false},
 	} {
 		err := checkAuthFlags(c.stats, c.node, c.advertise, c.ttl)

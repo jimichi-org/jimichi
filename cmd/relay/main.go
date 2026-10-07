@@ -62,7 +62,7 @@ func main() {
 	flag.BoolVar(&cfg.auth, "auth", true, "serve a descriptor signed under a certificate from jimichi enroll and extend only to the roster nodes it names, over authenticated links; false serves it unsigned and extends to any address over anonymous links")
 	flag.StringVar(&cfg.name, "name", "", "node name for its certificate, required with -auth")
 	flag.StringVar(&cfg.advertise, "advertise", "", fmt.Sprintf("host:port clients dial, bound into the certificate, at most %d bytes, required with -auth; without -auth the address this node lists itself under in /descriptors", wire.AddrSize))
-	flag.DurationVar(&cfg.descriptorTTL, "descriptor-ttl", time.Hour, "lifetime of a signed descriptor, re-signed once half of it has passed")
+	flag.DurationVar(&cfg.descriptorTTL, "descriptor-ttl", time.Hour, fmt.Sprintf("lifetime of a signed descriptor, re-signed once half of it has passed; from %v to %v", minDescriptorTTL, pki.MaxDescriptorLife))
 	flag.DurationVar(&cfg.onionRotate, "onion-rotate", time.Hour, fmt.Sprintf("replace the onion key this often and release the replaced one -descriptor-ttl plus %v later, once no valid descriptor names it; a setup cell recorded before that no longer opens with what the node holds; the next rotation waits for that release; not shorter than -descriptor-ttl; 0 is the baseline for measurements: the link key is the onion key for the life of the process and recorded setups never stop opening", pki.Skew))
 	flag.StringVar(&cfg.peerInfoPort, "peer-info-port", "9100", "port where the other nodes publish their descriptors")
 	peers := flag.String("peers", "", "without -auth only: comma separated host:port of the other nodes, whose unsigned descriptors this node serves in /descriptors; with -auth they come from the roster")

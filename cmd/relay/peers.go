@@ -67,11 +67,12 @@ var (
 type peerEntry struct {
 	bundle  []byte
 	linkPub []byte
-	// unix seconds: when the descriptor was signed, when the bundle is fetched
-	// again and when it is dropped
-	published int64
-	due       int64
-	expires   int64
+	// unix seconds: when a client may take the bundle, the later of the
+	// descriptor's published time and the certificate's not_before, when the
+	// bundle is fetched again and when it is dropped
+	from    int64
+	due     int64
+	expires int64
 }
 
 // what the info port serves as /descriptors, with the moment the next bundle
@@ -87,13 +88,11 @@ type peerCache struct {
 	self  string
 	addrs []string
 	// the bundle this node serves itself and when it runs out
-	own   func() ([]byte, int64, bool)
-	fetch func(addr string) ([]byte, error)
-	read  func(addr string, bundle []byte, now time.Time) (*peerEntry, error)
-	now   func() time.Time
-	retry time.Duration
-	// seconds before its expiry at which a peer's bundle leaves the mirror
-	margin int64
+	own    func() ([]byte, int64, bool)
+	fetch  func(addr string) ([]byte, error)
+	read   func(addr string, bundle []byte, now time.Time) (*peerEntry, error)
+	now    func() time.Time
+	retry  time.Duration
 	logger *log.Logger
 
 	mu      sync.Mutex
@@ -118,7 +117,6 @@ func newPeerCache(n *node, addrs []string, read func(string, []byte, time.Time) 
 		read:    read,
 		now:     n.now,
 		retry:   retry,
-		margin:  int64(mirrorMargin(n.ttl) / time.Second),
 		logger:  n.logger,
 		entries: make(map[string]*peerEntry, len(addrs)),
 		failed:  make(map[string]string),
@@ -126,18 +124,14 @@ func newPeerCache(n *node, addrs []string, read func(string, []byte, time.Time) 
 }
 
 // a client checks a bundle on its own clock, so the mirror holds a peer's
-// bundle only while a clock up to Skew ahead of this node's finds it valid. An
-// eighth of this node's own descriptor lifetime bounds the margin: a peer signs
-// again between a half and three quarters of a short lifetime, and its next
-// descriptor has to arrive before the held one leaves the mirror
-func mirrorMargin(ttl time.Duration) time.Duration {
-	return max(min(pki.Skew, ttl/8), 0)
-}
+// bundle only while a clock up to Skew ahead of this node's finds it valid,
+// whatever lifetime the peer signed it for
+const mirrorMargin = pki.Skew
 
-// the verifier's allowance covers a clock behind the signer's on the published
-// edge, so there the node's own clock decides and no margin is needed
+// on the from edge a clock up to Skew behind this node's is covered by the
+// verifier's allowance, so the node's own clock decides there
 func (c *peerCache) mirrored(e *peerEntry, now int64) bool {
-	return now >= e.published && now < e.expires-c.margin
+	return now >= e.from && now < e.expires-int64(mirrorMargin/time.Second)
 }
 
 // Verify bounds the descriptor by its certificate, so expires alone ends the entry
@@ -152,7 +146,7 @@ func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []by
 		if err != nil {
 			return nil, err
 		}
-		return &peerEntry{bundle: bundle, linkPub: v.LinkPub, published: s.published, due: s.published + (s.expires-s.published)/2, expires: s.expires}, nil
+		return &peerEntry{bundle: bundle, linkPub: v.LinkPub, from: max(s.published, s.notBefore), due: s.published + (s.expires-s.published)/2, expires: s.expires}, nil
 	}
 }
 
@@ -227,11 +221,11 @@ func (c *peerCache) publish() {
 		e := c.entries[addr]
 		switch {
 		case e == nil:
-		case now < e.published:
-			until = min(until, e.published)
+		case now < e.from:
+			until = min(until, e.from)
 		case c.mirrored(e, now):
 			entries = append(entries, pki.MirrorEntry{Addr: addr, Bundle: e.bundle})
-			until = min(until, e.expires-c.margin)
+			until = min(until, e.expires-int64(mirrorMargin/time.Second))
 		}
 	}
 	body, err := pki.MarshalMirror(entries)

@@ -543,7 +543,7 @@ func TestRotateFlags(t *testing.T) {
 		{"off, the default of the binary", 0, time.Hour, true},
 		{"the testbed manifests", time.Hour, time.Hour, true},
 		{"longer than the descriptor lifetime", 6 * time.Hour, time.Hour, true},
-		{"the shortest of both", time.Minute, time.Minute, true},
+		{"the shortest of both", 16 * time.Minute, 16 * time.Minute, true},
 		{"shorter than the descriptor lifetime", 59 * time.Minute, time.Hour, false},
 		{"a second under", time.Hour - time.Second, time.Hour, false},
 		{"negative", -time.Hour, time.Hour, false},

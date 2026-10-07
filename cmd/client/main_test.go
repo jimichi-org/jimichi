@@ -317,7 +317,7 @@ func (tb *testbed) requests() []int32 {
 func (tb *testbed) selection(hops int, rnd io.Reader) selection {
 	return selection{
 		addrs: tb.addrs, hops: hops, infoPort: "9100", auth: true, trust: tb.trust,
-		web: tb.web, attempts: 1, rnd: rnd,
+		web: tb.web, attempts: 1, rnd: rnd, now: func() time.Time { return t0 },
 	}
 }
 
@@ -333,7 +333,7 @@ func words(values ...uint64) *bytes.Reader {
 // the chain a selection builds and the lines it logs on the way
 func build(s selection, p jcrypto.CryptoProvider) ([]client.Node, string, error) {
 	var out bytes.Buffer
-	chain, err := s.chain(p, log.New(&out, "", 0), t0)
+	chain, err := s.chain(p, log.New(&out, "", 0))
 	return chain, out.String(), err
 }
 
@@ -454,6 +454,40 @@ func TestEntryWithoutDescriptorsRefusesTheChain(t *testing.T) {
 	}
 	if _, err := nodeBundles(tb.web, []string{"relay-1"}, 0, "9100", 1, 0); !errors.As(err, &failed) {
 		t.Fatalf("nodeBundles with an entry address without a port = %v, want a failure of the entry", err)
+	}
+}
+
+// every bundle has published = not_before = t0. The client's clock reads
+// t0 - 179 before the first request and every connection takes 30 s of it:
+// the entry answers 503 once, so the mirror arrives after two connections, at
+// t0 - 179 + 60 = t0 - 119. With the allowance of 120 s that reads
+// t0 + 1 >= t0 and every bundle verifies; the time before the first request
+// would read t0 - 179 + 120 = t0 - 59 < t0 and refuse the chain
+func TestBundlesAreCheckedAtTheTimeTheMirrorArrives(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 3)
+	tb.publish(t, tb.bundles)
+	tb.info[0].unready.Store(1)
+	var clock atomic.Int64
+	clock.Store(t0.Add(-179 * time.Second).Unix())
+	transport := tb.web.Transport.(*http.Transport)
+	dial := transport.DialContext
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		clock.Add(30)
+		return dial(ctx, network, addr)
+	}
+	s := tb.selection(3, nil)
+	s.fixed = true
+	s.attempts = 2
+	s.now = func() time.Time { return time.Unix(clock.Load(), 0) }
+	chain, _, err := build(s, tb.p)
+	if err != nil || len(chain) != 3 {
+		t.Fatalf("chain = %v, %v, want three hops checked at t0 - 119", chain, err)
+	}
+	if got := tb.requests(); !slices.Equal(got, []int32{2, 0, 0}) {
+		t.Fatalf("requests per node %v, want the 503 and the answer at the entry", got)
+	}
+	if got := time.Unix(clock.Load(), 0); !got.Equal(t0.Add(-119 * time.Second)) {
+		t.Fatalf("the client's clock reads %v after the mirror, want t0 - 119 s", got)
 	}
 }
 

@@ -25,6 +25,10 @@ const (
 	maxAdminBody  = pki.MaxRoster
 	maxCheckEvery = time.Minute
 	minCheckEvery = time.Second
+	// a peer signs again by half its lifetime plus a timer period, and the new
+	// bundle has to reach a mirror whose clock is up to Skew off before the held
+	// one leaves it a margin before expiry: ttl/2 - 1 min - 2 Skew is 3 min here
+	minDescriptorTTL = 8 * mirrorMargin
 )
 
 const (
@@ -43,6 +47,7 @@ var (
 // the bundle clients get, with the times that end it
 type served struct {
 	bundle    []byte
+	notBefore int64
 	notAfter  int64
 	published int64
 	expires   int64
@@ -114,8 +119,8 @@ func checkAuthFlags(stats, name, advertise string, ttl time.Duration) error {
 }
 
 func checkTTL(ttl time.Duration) error {
-	if ttl < time.Minute || ttl > pki.MaxDescriptorLife {
-		return fmt.Errorf("-descriptor-ttl %v: want between 1m and %v", ttl, pki.MaxDescriptorLife)
+	if ttl < minDescriptorTTL || ttl > pki.MaxDescriptorLife {
+		return fmt.Errorf("-descriptor-ttl %v: want between %v and %v", ttl, minDescriptorTTL, pki.MaxDescriptorLife)
 	}
 	return nil
 }
@@ -404,7 +409,7 @@ func servedFrom(b []byte) (*served, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &served{bundle: b, notAfter: c.NotAfter, published: d.Published, expires: d.Expires}, nil
+	return &served{bundle: b, notBefore: c.NotBefore, notAfter: c.NotAfter, published: d.Published, expires: d.Expires}, nil
 }
 
 // a signature on GOST costs math/big work and leaves heap copies of the key,
@@ -420,8 +425,8 @@ func (n *node) keepFresh() {
 }
 
 // a quarter of the lifetime keeps a re-signing due at half of it from
-// slipping past the expiry, even for the shortest lifetime of a minute; the
-// lower bound keeps a ticker valid whatever lifetime it is given
+// slipping past the expiry; the lower bound keeps a ticker valid whatever
+// lifetime it is given
 func checkEvery(ttl time.Duration) time.Duration {
 	return max(min(ttl/4, maxCheckEvery), minCheckEvery)
 }
