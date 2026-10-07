@@ -80,6 +80,17 @@ func TestCardIsCanonical(t *testing.T) {
 			}
 		}
 
+		// bytes 0xff spell '/' in the standard alphabet and '_' in the URL one,
+		// so the two texts of this card always differ
+		slashes := Card{Suite: c.Suite, Mailbox: c.Mailbox, Static: bytes.Repeat([]byte{0xff}, len(c.Static))}
+		for i := range slashes.Queue {
+			slashes.Queue[i] = 0xff
+		}
+		urlText := p.Suite().String() + ":" + base64.URLEncoding.EncodeToString(slashes.Bytes())
+		if _, err := ParseCard(slashes.String()); err != nil || urlText == slashes.String() {
+			t.Fatalf("the card for the URL alphabet: %v", err)
+		}
+
 		text := c.String()
 		enc := strings.TrimPrefix(text, p.Suite().String()+":")
 		for _, tc := range []struct{ name, s string }{
@@ -87,7 +98,7 @@ func TestCardIsCanonical(t *testing.T) {
 			{"other prefix", other.String() + ":" + enc},
 			{"unknown prefix", "x25519:" + enc},
 			{"no padding", strings.TrimRight(text, "=")},
-			{"url alphabet", p.Suite().String() + ":" + base64.URLEncoding.EncodeToString(raw)},
+			{"url alphabet", urlText},
 			{"a line break", text[:20] + "\n" + text[20:]},
 			{"a space", text + " "},
 			{"empty", ""},
@@ -118,6 +129,14 @@ func TestCardHash(t *testing.T) {
 		bad.Queue = [QueueSize]byte{}
 		if _, err := CardHash(p, bad); !errors.Is(err, ErrCard) {
 			t.Fatalf("CardHash of an invalid card: %v", err)
+		}
+		for _, size := range []int{len(c.Static) - 1, len(c.Static) + 1} {
+			odd := c
+			odd.Static = make([]byte, size)
+			copy(odd.Static, c.Static)
+			if _, err := CardHash(p, odd); !errors.Is(err, ErrCard) {
+				t.Fatalf("CardHash of a card with a %d-byte key: %v", size, err)
+			}
 		}
 		other, _ := suite.New(otherSuiteOf(p))
 		if _, err := CardHash(other, c); !errors.Is(err, ErrCard) {
