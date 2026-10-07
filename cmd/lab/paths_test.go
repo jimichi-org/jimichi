@@ -507,6 +507,7 @@ func TestPathsRowIsPrintedAndEncodedWithItsConfiguration(t *testing.T) {
 		"chains: the attempts whose chain came up; the last two columns are shares of those chains",
 		"in brackets what the model gives and the standard error of a share of that many draws at that value",
 		"where that value is 0 or 1 every draw gives the same answer: the share is exact by construction, not sampled",
+		"a value four decimals would round to 0 or 1 is printed with more, so 0.0000 and 1.0000 are exact",
 		"full mirrors, a uniform choice: 0.1000 and 0.9000, k(k-1)/(N(N-1)) and 1 - C(N-k,h)/C(N,h)",
 	} {
 		if !strings.Contains(out.String(), said+"\n") {
@@ -553,6 +554,52 @@ func TestPathsRowIsPrintedAndEncodedWithItsConfiguration(t *testing.T) {
 		if _, err := json.Marshal(row); err != nil {
 			t.Errorf("the row of %+v does not encode: %v", c, err)
 		}
+	}
+}
+
+// a share four decimals would round to 0 or 1 is printed to its first digit
+// that tells it from them: 0.00003 of a million draws at 0.00002 has the
+// standard error sqrt(0.00002*0.99998/1e6) = 0.0000044721, and 0.99997 at
+// 0.99996 has sqrt(0.99996*0.00004/1e6) = 0.0000063244, 0.00001 at its first
+// digit. Shares exact by construction keep 0.0000 and 1.0000, so a row of
+// every node rogue and a sampled row near it no longer read alike
+func TestPathsSampledSharesNearTheEdgesAreToldFromExactOnes(t *testing.T) {
+	for _, c := range []struct {
+		v    float64
+		want string
+	}{
+		{0, "0.0000"},
+		{1, "1.0000"},
+		{0.1, "0.1000"},
+		{0.12345, "0.1235"},
+		{0.00004, "0.00004"},
+		{0.0000044721, "0.000004"},
+		{0.99997, "0.99997"},
+		{0.9999999, "0.9999999"},
+		{1e-20, "1e-20"},
+	} {
+		if got := fraction(c.v); got != c.want {
+			t.Errorf("fraction(%v) = %q, want %q", c.v, got, c.want)
+		}
+	}
+
+	exact := pathsResult{Nodes: 5, Hops: 3, Rogue: 5, Samples: 1000000, Chains: 1000000,
+		Ends: 1, EndsExpected: 1, Touched: 1, TouchedExpected: 1}
+	sampled := pathsResult{Nodes: 5, Hops: 3, Rogue: 0, Samples: 1000000, Chains: 1000000,
+		Ends: 0.00003, EndsExpected: 0.00002, EndsStdErr: 0.0000044721,
+		Touched: 0.99997, TouchedExpected: 0.99996, TouchedStdErr: 0.0000063244}
+	row := func(r pathsResult) string {
+		var out bytes.Buffer
+		printPaths(&out, r)
+		return strings.Join(strings.Fields(strings.Split(out.String(), "\n")[1]), " ")
+	}
+	wantExact := "5 3 5 0 0 0 1000000 1000000 0.0000 [0.0000 +- 0.0000] 0.0000 [0.0000 +- 0.0000] 1.0000 [1.0000 +- 0.0000] 1.0000 [1.0000 +- 0.0000]"
+	wantSampled := "5 3 0 0 0 0 1000000 1000000 0.0000 [0.0000 +- 0.0000] 0.0000 [0.0000 +- 0.0000] 0.00003 [0.00002 +- 0.000004] 0.99997 [0.99996 +- 0.00001]"
+	if got := row(exact); got != wantExact {
+		t.Errorf("exact row:\n%s\nwant\n%s", got, wantExact)
+	}
+	if got := row(sampled); got != wantSampled {
+		t.Errorf("sampled row:\n%s\nwant\n%s", got, wantSampled)
 	}
 }
 

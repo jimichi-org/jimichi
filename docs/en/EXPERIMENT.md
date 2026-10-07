@@ -230,6 +230,9 @@ samples, the standard error is 0, and the row says nothing about the choice. The
 | no mirror lacks more than the bound | refused attempts, 0 |
 | no node withholds, or chains of one or two nodes | attempts failed at setup, 0 |
 
+The printed row gives four decimals. A value they would round to 0 or 1 gets as many more as it
+takes to tell it from them, so a printed 0.0000 or 1.0000 is exactly 0 or 1.
+
 For N = 5, k = 2 and h = 3 there are 5 * 4 * 3 = 60 ordered chains. Six have rogue nodes at both
 ends (2 choices of the entry, the other rogue node as the exit, any of the 3 honest nodes
 between them): 6/60 = 0.1 = k(k-1)/(N(N-1)). Six hold no rogue node (the three honest nodes in

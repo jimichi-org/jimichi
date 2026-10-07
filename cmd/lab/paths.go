@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jimichi-org/jimichi/lab"
@@ -162,7 +164,7 @@ func printPaths(w io.Writer, r pathsResult) {
 	if r.Hops == 1 {
 		ends = "k/N"
 	}
-	fmt.Fprintf(w, "full mirrors, a uniform choice: %.4f and %.4f, %s and 1 - C(N-k,h)/C(N,h)\n", r.EndsUniform, r.TouchedUniform, ends)
+	fmt.Fprintf(w, "full mirrors, a uniform choice: %s and %s, %s and 1 - C(N-k,h)/C(N,h)\n", fraction(r.EndsUniform), fraction(r.TouchedUniform), ends)
 }
 
 var pathsLegend = []string{
@@ -171,8 +173,22 @@ var pathsLegend = []string{
 	"chains: the attempts whose chain came up; the last two columns are shares of those chains",
 	"in brackets what the model gives and the standard error of a share of that many draws at that value",
 	"where that value is 0 or 1 every draw gives the same answer: the share is exact by construction, not sampled",
+	"a value four decimals would round to 0 or 1 is printed with more, so 0.0000 and 1.0000 are exact",
 }
 
 func share(sampled, expected, stderr float64) string {
-	return fmt.Sprintf("%6.4f [%.4f +- %.4f]", sampled, expected, stderr)
+	return fmt.Sprintf("%6s [%s +- %s]", fraction(sampled), fraction(expected), fraction(stderr))
+}
+
+// four decimals, and more for a value they would round to 0 or 1, so that
+// 0.0000 and 1.0000 are left to the shares that are exact by construction
+func fraction(v float64) string {
+	for digits := 4; digits < 17; digits++ {
+		s := strconv.FormatFloat(v, 'f', digits, 64)
+		zeros := strings.Repeat("0", digits)
+		if (s != "0."+zeros || v == 0) && (s != "1."+zeros || v == 1) {
+			return s
+		}
+	}
+	return strconv.FormatFloat(v, 'g', -1, 64)
 }
