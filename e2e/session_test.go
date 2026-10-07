@@ -420,8 +420,11 @@ func TestKCIResetsNoLiveSession(t *testing.T) {
 
 		mustReceive(t, pr.resp, kci, EventSession)
 		kk2 := mustHandshake(t, pr.resp)
-		_, err := holder.Receive(kk2)
-		wantErr(t, "kk2 at the impersonator", err, ErrBad)
+		// se needs s_I: the impersonator's own key fails it, which is no fault
+		// of the record
+		if _, err := holder.Receive(kk2); err == nil || errors.Is(err, ErrBad) || holder.State() != StateHandshaking {
+			t.Fatalf("kk2 at the impersonator: %v, state %v", err, holder.State())
+		}
 		if pr.resp.State() != StateEstablished {
 			t.Fatal("the impersonated session got further than unconfirmed")
 		}
@@ -442,7 +445,7 @@ func TestKCIResetsNoLiveSession(t *testing.T) {
 		pr.handshake(t)
 		pr.confirm(t)
 		again := kciInitiator(t, p, pr)
-		_, err = pr.resp.Receive(mustHandshake(t, again))
+		_, err := pr.resp.Receive(mustHandshake(t, again))
 		wantErr(t, "an impersonated kk1 to a confirmed session", err, ErrRefusedHandshake)
 		mustReceive(t, pr.resp, mustSeal(t, pr.ini, "live"), EventMessage)
 	})

@@ -57,7 +57,8 @@ var (
 	ErrStale     = errors.New("e2e: session stale")
 	ErrExhausted = errors.New("e2e: record numbers exhausted")
 
-	// Receive leaves the state as it was on any of these
+	// Receive leaves the session as it was on any of these; a refused kk1 that
+	// opened enters the ring of seen handshakes all the same
 	ErrCopy              = errors.New("e2e: copy of a record already taken")
 	ErrLate              = errors.New("e2e: record behind one taken later")
 	ErrWindow            = errors.New("e2e: record too far ahead")
@@ -575,11 +576,13 @@ func (s *Session) count(err error) {
 	}
 }
 
+// a failure of the own provider or of key memory is not the record's fault and
+// is not counted as one
 func notOpened(err error) error {
 	if errors.Is(err, noise.ErrMessage) || errors.Is(err, noise.ErrState) {
 		return ErrBad
 	}
-	return fmt.Errorf("%w: %v", ErrBad, err)
+	return err
 }
 
 // a fresh kk1 replaces a session only while that one is absent, unconfirmed or
