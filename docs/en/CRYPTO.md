@@ -117,6 +117,10 @@ A label holds no 0x00 byte and is at most 50 bytes long.
 | `setup/replay` | 30 / 28 | wire, the control cell replay tag | 16 |
 | `counter/fwd`, `counter/bwd` | 29 / 27 | wire, the counter offsets | 8 |
 | `link/i2r`, `link/r2i` | 26 / 24 | link, the frame keys | 32 |
+| `noise/key` | 27 / 25 | noise, the key of a handshake message | 32 |
+| `noise/split/i2r`, `noise/split/r2i` | 33 / 31 | noise, the direction keys after the handshake | 32 |
+| `e2e/step/key` | 30 / 28 | e2e, the record key | 32 |
+| `e2e/step/next` | 31 / 29 | e2e, the next key of the ratchet chain | 32 |
 
 - A purpose and an exchange name: `[a-z0-9]+(/[a-z0-9]+)*`, 1 to 32 bytes.
 - `agree`, `mix` and anything that starts with `transcript/` are reserved to the provider:
@@ -191,6 +195,8 @@ Node identity:
   fails.
 - A setup layer and an authenticated link open only at the node that holds the private half of
   the key and binds the same identity.
+
+The exchanges of the end-to-end layer are listed under "End-to-end layer".
 
 ### Formulas
 
@@ -270,14 +276,19 @@ not a bad pair.
 - The golden vectors pin the composition: the hashes of five transcripts (the setup and both
   link modes without an identity, the setup and the authenticated link with an identity key),
   every derived key, MixKey and Agree on fixed keys, for both suites. The comment next to them
-  says how to recompute the values without this code. The VKO examples of RFC 7836 (appendix B,
+  says how to recompute the values without this code. Both VKO examples of RFC 7836 (appendix B,
   examples 7 and 8) are on the 512-bit paramSetA, so the GOST primitives are checked against the
-  examples of the standards in the tests of crypto/gost, and the composition on the 256-bit
-  paramSetA is pinned by the
-  vectors of the scheme with the intermediate values (the transcript hash, the UKM, the KEK)
-  written down in crypto/providertest. They were computed by an independent implementation that
-  is not part of the repository; everything but the KEK is a hash or an HMAC and can be
-  recomputed with any Streebog implementation.
+  examples of the standards in the tests of crypto/gost (VKO_GOSTR3410_2012_256 against example
+  7, KDF_GOSTR3411_2012_256 against example 9), and the composition on the 256-bit paramSetA is
+  pinned by the vectors of the scheme with the intermediate values (the transcript hash, the UKM,
+  the KEK) written down in crypto/providertest. They were computed by an independent
+  implementation that is not part of the repository; everything but the KEK is a hash or an HMAC
+  and can be recomputed with any Streebog implementation.
+- The end-to-end layer is pinned by vectors of the whole KK handshake and the first records on
+  both suites (e2e/vectors_test.go, noise/vector_test.go), with the intermediate values and the
+  way to recompute them in the comment. The c25519 values come from a separate Python
+  implementation, the GOST values from a composition harness over the providers that matched the
+  Python one byte for byte on c25519; every GOST primitive is held by a standard example as well.
 
 The provider checks are the same in both suites and run in this order: sizes of the secrets, the
 context, the label, the public key.
@@ -316,6 +327,11 @@ and has no primitives of its own.
 - A rule for callers: in GOST the signing key comes from the same generator on the same curve as
   the ephemeral pair, so a signing key must never be used for key agreement, nor an agreement key
   for signing. The interface does not check this.
+- Identity signatures never authenticate client messages. A client has no signing key: its
+  identity key is an agreement key and never goes into Sign. A sender's signature over a message
+  or a transcript would prove to a third party who sent it. The packages of the end-to-end layer
+  (noise, e2e) do not call GenerateSigning, Sign or Verify; their tests check this with a provider
+  on which such a call fails the test. Only the CA and the nodes sign.
 - The CA key and the node signing key are held in secmem buffers, and pki hands out only the
   public keys. The copies libraries make during generation and signing are listed under
   "Known gaps".
@@ -337,6 +353,205 @@ and has no primitives of its own.
   within it, which is two VKO on the GOST suite.
 - Releasing an onion key wipes its secmem buffer only. The copies of the scalar that the
   libraries made during agreements stay on the heap until that memory is reused ("Known gaps").
+
+## End-to-end layer
+
+Two clients run a layer of their own on top of the circuit: the contact card, a handshake on the
+KK pattern and a hash ratchet per direction (packages noise and e2e). Nodes do not open it: to
+them a record of the layer is part of the cell payload. Delivery of records through a mailbox at
+the exit and the recipient client are planned
+([#18](https://github.com/jimichi-org/jimichi/issues/18)).
+
+Every operation of the layer goes through the provider's Agree, MixKey, DeriveKey, Hash and AEAD,
+so the formulas of the suites are those under "Formulas". The suites differ only in the suite
+byte of the card, the public key length P, the nonce length and the length L of the zero
+handshake payload.
+
+| | c25519 | GOST |
+|---|---|---|
+| P / nonce / tag | 32 / 24 / 16 | 64 / 16 / 16 |
+| record | 392 | 392 |
+| L, zeroes in kk1 and kk2 | 343 | 311 |
+| inner of a data record / largest body | 371 / 368 | 371 / 368 |
+| card with a 38-byte address, text | 89 bytes, 127 characters | 121 bytes, 169 characters |
+
+### Exchanges
+
+| Exchange | Parts | T length, c25519 / GOST |
+|---|---|---|
+| `noise/e2e/kk` | 0x01, the initiator's card, the responder's card | 228 / 290 |
+| `noise/hash` | h, data d | 77 + len(d) / 75 + len(d) |
+| `noise/dh` | h, the token byte | 76 / 74 |
+| `noise/key` | h | 74 / 72 |
+| `noise/split` | h | 76 / 74 |
+| `e2e/step` | SID, direction, u32be(n) | 82 / 80 |
+| `e2e/card` | the card | 130 / 160 |
+| `e2e/check` | a one-time public key, the peer's key | 108 / 170 |
+| `mailbox/queue` | the fetch capability F, 16 bytes | 62 / 60 |
+
+The lengths for cards and for the exchange `e2e/card` assume a 38-byte mailbox address.
+
+### Contact card
+
+```
+u8 version = 1 | u8 suite (1 GOST, 2 c25519) | u8 address length | mailbox address | queue, 16 bytes | identity key, P bytes
+```
+
+- The canonical form: decoding and encoding give the same bytes, and no trailing bytes are
+  allowed. The address passes the pki rules for node addresses, the queue is not all zeroes, and
+  the key is exactly P bytes.
+- The queue is the first 16 bytes of the hash of the `mailbox/queue` transcript of the fetch
+  capability F.
+- The text is `<suite>:<base64 with padding>`; the prefix equals the suite inside the card, and a
+  round trip proves the one spelling, as for the trust anchor.
+- `card_hash` is the hash of the `e2e/card` transcript of the card, 32 bytes. There is no short
+  fingerprint.
+
+### The noise machine
+
+State: h (32 bytes, public), ck (secmem, empty until the first agreement), the own static key
+(only through the Static interface: the public key and Agree), the peer's static key, the own
+ephemeral key (secmem), the peer's ephemeral key, the message number.
+
+| Operation | Definition |
+|---|---|
+| start | `h = Hash(T("noise/"+name, prologue...))`; then MixHash of the pre-message keys, the initiator's first |
+| MixHash(d) | `h = Hash(T(noise/hash, h, d))`, d not empty |
+| token e, writing | `(e, E) = GenerateEphemeral()`; E into the message; MixHash(E) |
+| token e, reading | the next P bytes as the peer's ephemeral key RE; MixHash(RE) |
+| DH token t | `ctx = NewContext(noise/dh, h, [t])`; `sec = Agree(own, theirs, ctx)`; the first: `ck = sec`, then `ck = MixKey(ck, sec, ctx)`, the old ck and sec released |
+| EncryptAndHash(pt) | `k = DeriveKey(ck, noise/key, NewContext(noise/key, h), 32)`; `c = AEAD(k).Seal(nonce 0, pt, ad = h)`; k released; MixHash(c). Without ck an error |
+| DecryptAndHash(c) | the same k, Open, MixHash(c) |
+| Split | `ctx = NewContext(noise/split, h)`; `i2r`, `r2i` = DeriveKey(ck, noise/split/i2r and noise/split/r2i, ctx, 32); SID = h; ck and e released |
+
+The order within one message: MixHash of the record kind (done by e2e), token e, the DH tokens in
+the order of the pattern (h does not change between them, the token byte in the context tells
+them apart), then EncryptAndHash of the payload.
+
+Tokens: e = 1, s = 2, ee = 3, es = 4, se = 5, ss = 6. The first letter of a DH token names the
+initiator's key, the second the responder's:
+
+| Token | Initiator (own, theirs) | Responder (own, theirs) |
+|---|---|---|
+| ee | e, re | e, re |
+| es | e, rs | s, re |
+| se | s, re | e, rs |
+| ss | s, rs | s, rs |
+
+- The zero nonce is safe: every key from EncryptAndHash serves one Seal, h changes after every
+  ciphertext, and the ephemeral key is fresh. The top bit of the zero nonce is 0, as MGM needs.
+- Reading a message changes nothing on an error: the values are computed in temporary buffers and
+  applied only after a successful Open and the payload check, otherwise released, and h goes back
+  to the end of the previous message, the MixHash of the kind included. A forged message does not
+  break a handshake that waits for the real one.
+- Token s inside a message (sending a static key) is not supported yet.
+- Only the provider gives an ephemeral key; the API cannot set one. Only the vectors and the
+  deniability check need a given ephemeral key, and a wrapper around the CryptoProvider is
+  enough for them.
+
+This is Noise-shaped, not an instance of the Noise Protocol Framework: Agree returns a KDF output,
+not a raw DH result; h and ck go through the provider's Context; no initial ck comes from the
+protocol name. Noise vectors (cacophony) do not apply, and the GOST variant is non-standard. The
+properties of the KK pattern are claimed by analogy; there is no formal model.
+
+### KK handshake
+
+- The initiator is the side whose identity key is smaller in a byte-wise comparison. Equal keys,
+  or the own queue in the peer's card, are refused. There are no simultaneous initiations.
+- Before a session the peer's key is checked by a trial agreement of a one-time pair with it under
+  the context `e2e/check` (the one-time public key, the peer's key). The output and the one-time
+  key are released at once, and the identity key takes no part; a key the agreement refuses
+  means the card is refused.
+- Name `e2e/kk` (exchange `noise/e2e/kk`), prologue `[0x01, the initiator's card, the responder's
+  card]`, pre-messages: the initiator's key S_I, then the responder's key S_R.
+- Before every handshake message MixHash([record kind]): the kind enters h, the ad and every key
+  after it.
+- kk1: `01 | E_I | c1`, kk2: `02 | E_R | c2`; c is EncryptAndHash of L zero bytes. On reading the
+  payload must be all zeroes.
+- A side spends 4 Agree, 3 MixKey, 4 DeriveKey (2 message keys and 2 in Split), 16 transcript
+  hashes and 1 GenerateEphemeral on the handshake; the check of the peer's key adds one more
+  GenerateEphemeral and Agree per session.
+
+| Formula | c25519 | GOST |
+|---|---|---|
+| output of a DH token, th = the hash of the `noise/dh` context | `HMAC(HMAC(th, X25519(a, B)), label(agree) \|\| 0x00 \|\| th \|\| 0x01)` | `KDF(VKO(a, B, UKM = th[0:8]), label(agree), th)` |
+| ck from the second token on | `HMAC(HMAC(ck, sec), label(mix) \|\| 0x00 \|\| th \|\| 0x01)` | `KDF(ck, label(mix), th \|\| sec)` |
+| message key, Split, ratchet step | `HMAC(key, label(purpose) \|\| 0x00 \|\| th \|\| 0x01)` | `KDF(key, label(purpose), th)` |
+| record cipher, nonce 0 | XChaCha20-Poly1305: subkey HChaCha20(k, 0^16), ChaCha20-Poly1305 with nonce 0^12 | Kuznyechik-MGM, nonce 0^16 |
+
+Session states: handshaking, established, confirmed (the responder after the initiator's first
+data record), stale. The epoch grows with every change of session.
+
+| Rule | Initiator | Responder |
+|---|---|---|
+| handshake record | kk1 is offered until the mailbox has stored it | kk2 is offered until the mailbox has stored it or the initiator's first record has arrived |
+| waiting | kk2 is awaited for 60 s from the moment kk1 was stored, otherwise a new handshake with a fresh e_I | none |
+| copies | a kk2 equal byte for byte to the accepted one is a copy; any other kk2 is refused without a change of state | a kk1 equal byte for byte to the accepted one is a copy; a kk1 whose E_I is in the ring of the last 64 seen (filled after a successful Open, the oldest pushed out) is a replay |
+| new handshake | after going stale, or when the record numbers ran out | a fresh kk1 that opens replaces the session if there is none, it is unconfirmed or it is stale; otherwise it is refused |
+| first records | right after kk2 a data record (real or dummy): the confirmation for the responder | real messages only after the confirmation, dummies at any time |
+| going stale | 450 answered fetches (90 s at a 200 ms period) without an opened record of the responder | the same without a record of the initiator; a stale responder seals nothing, so the initiator goes stale too and starts a handshake the responder will accept |
+
+An opened record clears staleness. A session in which each side puts a record more often than
+once in 90 s does not go stale; the schedule of records is set by the conversation driver
+(planned, #18).
+
+The payload security levels from the Noise table for the KK pattern, and what the rules do with
+them:
+
+| Message | Authentication | Confidentiality | Rule |
+|---|---|---|---|
+| kk1 | 1: key-compromise impersonation (KCI), whoever holds the responder's key forges a kk1 in the initiator's name; replayable | 2 | no data; the ring catches a replay; KCI and a replay of an old kk1 outside the ring reset only a session that is absent, unconfirmed or stale: the data keys need se = DH(s_I, e_R), without them no confirmation comes, and a live session cannot be reset |
+| kk2 | 2 | 4 | no data |
+| data | 2 | 5 | the ratchet on top |
+
+- Unknown key share and identity misbinding: both cards are in the prologue, both static keys in
+  the pre-messages.
+- Reflection: the directions have different Split keys and a direction byte in the context of
+  every ratchet step, and the record kind enters h.
+- Identity hiding: KK sends no static keys.
+
+### Hash ratchet
+
+Each direction has a chain ck_n (secmem) and a number n; ck_0 is i2r or r2i from Split.
+
+```
+ctx_n   = NewContext(e2e/step, SID, [d], u32be(n))      d: 0x01 i2r, 0x02 r2i
+mk_n    = DeriveKey(ck_n, e2e/step/key,  ctx_n, 32)
+ck_n+1  = DeriveKey(ck_n, e2e/step/next, ctx_n, 32)     ck_n released at once
+record  = 03 | u32be(n) | AEAD(mk_n).Seal(nonce 0, inner, ad = 03 | u32be(n))
+inner   = flags (bit 0: dummy, the rest 0) | u16be(length) | body | zeroes, 371 bytes in all
+```
+
+- The sender assigns n when it seals and never uses it twice; a repeated record is a copy of the
+  same bytes. At number 2^32 - 1 the session ends and the initiator starts a new handshake.
+- The receiver keeps the next expected number and a bitmap of the 64 numbers below it:
+  - a number below the expected one with its bit set: a copy;
+  - a number below the expected one without its bit, or below the bitmap: a late record;
+  - a number more than 64 past the expected one: outside the window;
+  - otherwise a temporary copy of the chain steps to n, the record is opened, and only on success
+    does the state change (the skipped numbers count as lost). A forged number costs at most 64
+    steps. Skipped keys are not stored.
+- A dummy record is empty. Non-zero padding, extra flag bits, a length above 368 and a dummy
+  with a body are refused. A real record and a dummy one cost the same provider calls.
+- Forward secrecy per record. There is no post-compromise recovery (no DH ratchet); a new
+  handshake after going stale gives it as a side effect, not on a schedule.
+
+### Client keys
+
+| Key | Made by | Where | Lives |
+|---|---|---|---|
+| client identity key (static agreement key) | GenerateEphemeral at start | secmem | until the process ends |
+| fetch capability F | crypto/rand | secmem; a copy in every request on the client heap and in the clear at the mailbox | until the process ends (delivery through a mailbox is planned, #18) |
+| one-time key of the card check | GenerateEphemeral | secmem | one agreement when a session is made |
+| e_I | GenerateEphemeral | secmem | until kk2 or a new handshake: the wait for kk1 to be stored plus 60 s |
+| e_R | GenerateEphemeral | secmem | the writing of kk2 only |
+| Agree outputs, ck, handshake message keys | Agree, MixKey, DeriveKey | secmem | one step |
+| ratchet chains | Split, DeriveKey | secmem | until the next record in that direction |
+| mk_n | DeriveKey | secmem; on c25519 a copy in the AEAD struct | one Seal or Open, then Destroy |
+
+An established session holds the identity key and two ratchet chains; the initiator also holds
+e_I and ck until kk2; a record that skips numbers adds a temporary chain and a record key while
+it is taken.
 
 ## Memory (crypto/secmem)
 
@@ -406,14 +621,16 @@ some of them live long:
 
 | Where | What | How long |
 |---|---|---|
-| x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct | the whole life of the circuit or link, never wiped; building the AEAD state per call from the secmem key is planned ([#39](https://github.com/jimichi-org/jimichi/issues/39)) |
-| crypto/ecdh | the X25519 scalar, the node's link and onion keys included, and the shared secret | until the freed heap memory is reused, which can be after the onion key itself was released |
-| x/crypto hkdf, crypto/hmac | the HMAC pads (key XOR a constant) holding the PRK, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key; the SHA-256 state holding the X25519 shared secret and the second secret of MixKey; the last derived block | until the heap memory is reused; the provider zeroes its own copy of the PRK unless zeroing is off (-keymem none or a list without zero) |
+| x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct; in the end-to-end layer the key of a handshake message and the key mk_n of every record | for a circuit or link its whole life, never wiped; in the end-to-end layer the struct serves one Seal or Open, and the copy stays until the heap memory is reused; building the AEAD state per call from the secmem key is planned ([#39](https://github.com/jimichi-org/jimichi/issues/39)) |
+| crypto/ecdh | the X25519 scalar, the node's link and onion keys and the client identity key included, and the shared secret, the static-static one (ss) included, which is the same for every session of a pair of clients before the KDF | until the freed heap memory is reused, which can be after the key itself was released |
+| x/crypto hkdf, crypto/hmac | the HMAC pads (key XOR a constant) holding the PRK, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys; the SHA-256 state holding the X25519 shared secret and the second secret of MixKey; the last derived block, mk_n included | until the heap memory is reused; the provider zeroes its own copy of the PRK unless zeroing is off (-keymem none or a list without zero) |
 | Ed25519 generation and signing | the SHA-512 state with the seed or the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; generation and signing always wipe their own scalars and digests, -keymem none included |
 | gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link; Destroy wipes them unless zeroing is off (-keymem none or a list without zero) |
-| gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key; the Streebog message buffer holding the second secret of MixKey; the last block Streebog computed, kept in the working buffer of the hash and in a temporary block after Sum, half of which is the output: a copy of the KEK and of every Agree, MixKey and DeriveKey output | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer and, unless zeroing is off (-keymem none or a list without zero), zeroes the slices the library returns, not the buffers inside it |
-| gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys included | until the heap memory is reused, which can be after the onion key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
+| gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys; the Streebog message buffer holding the second secret of MixKey; the last block Streebog computed, kept in the working buffer of the hash and in a temporary block after Sum, half of which is the output: a copy of the KEK and of every Agree, MixKey and DeriveKey output | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer and, unless zeroing is off (-keymem none or a list without zero), zeroes the slices the library returns, not the buffers inside it |
+| gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys and the client identity key included | until the heap memory is reused, which can be after the key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
 | gogost, GOST R 34.10 signing | the CA or node signing scalar and the one-time number k as math/big, intermediate points; k and the signature give back the key | until the heap memory is reused; the copies reappear at every signature: the request, the certificate, every descriptor refresh |
+| end-to-end layer | plaintexts: the body passed to Seal and the body Receive returns (e2e zeroes its own record buffer) | with the caller, never wiped |
+| client and mailbox (planned, #18) | the outgoing queue, held records and request buffers with the fetch capability F; at the mailbox a copy of the request with F in the cell body and in the link buffer after it zeroes its own slice | until the heap memory is reused |
 
 gogost arithmetic on math/big is not constant time. The node's link and onion keys could leak
 through VKO timing to an adversary who times the node's responses; side-channel attacks are
