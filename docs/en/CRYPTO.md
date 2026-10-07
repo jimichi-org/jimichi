@@ -137,7 +137,11 @@ th = Hash(T)        SHA-256 or Streebog-256, 32 bytes
   of parts and the length of every part. The same bytes cut at other places give another hash.
 - NewContext takes the hash and the suite name from the provider it is given, so a context is as
   trustworthy as that provider: the type guarantees that a context is present, not that it is the
-  suite hash of a transcript. wire, link and relay pass the provider of the suite itself.
+  suite hash of a transcript. wire, link and relay pass the provider of the suite itself. The
+  hash is not picked by suite inside crypto: the GOST package imports crypto itself, so
+  Streebog would have to come into the interface package straight from a third-party library,
+  and the interface package imports no crypto library. Nor would it help: a wrapper that returns
+  bytes of its choosing from Hash returns them from Agree and DeriveKey just as well.
 - NewContext copies the parts into T and hashes it at once: a slice of a cell body cannot change
   between two derivations.
 - The transcript consists of public data and is not signed with the node signing key. Sum
