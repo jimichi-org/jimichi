@@ -852,6 +852,36 @@ func TestFixedChainNeedsItsOwnNodesOnly(t *testing.T) {
 	}
 }
 
+// with a fixed chain the first listed node is the entry, and its own bundle
+// must pass as well: one that fails or is missing refuses the mirror whatever
+// -missing allows, before anything is logged
+func TestFixedChainRefusesAnEntryItCannotVerify(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			tb := newTestbed(t, s, 5)
+			for _, c := range []struct {
+				name   string
+				mirror []byte
+				want   error
+			}{
+				{"altered", mirrorOf(t, tb.addrs, append([][]byte{altered(t, tb.bundles[0])}, tb.bundles[1:]...)), pki.ErrDescSignature},
+				{"missing", mirrorOf(t, tb.addrs[1:], tb.bundles[1:]), errNoBundle},
+			} {
+				tb.info[0].mirror.Store(&c.mirror)
+				sel := tb.selection(3, nil)
+				sel.fixed, sel.missing = true, 2
+				chain, logged, err := build(sel, tb.p)
+				if !errors.Is(err, c.want) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[0]+": ") || chain != nil {
+					t.Fatalf("%s bundle of the entry: chain = %v, %v, want node %s: %v", c.name, chain, err, tb.addrs[0], c.want)
+				}
+				if logged != "" {
+					t.Fatalf("%s bundle of the entry: logged %q before the refusal", c.name, logged)
+				}
+			}
+		})
+	}
+}
+
 func TestFixedChainKeepsTheListedOrder(t *testing.T) {
 	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
 	tb.publish(t, tb.bundles)

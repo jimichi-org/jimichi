@@ -577,6 +577,11 @@ func TestUnsignedNodeMirrorsItsPeersUnverified(t *testing.T) {
 	if !cache.refresh() {
 		t.Fatalf("refresh: %s", n1.log.String())
 	}
+	// an unsigned bundle certifies nothing, so the link to the peer binds no
+	// identity, as without node authentication on both sides
+	if peer, ok := cache.peer(n2.n.addr); !ok || !bytes.Equal(peer.LinkPub, n2.pub) || len(peer.Identity) != 0 {
+		t.Fatalf("peer relay-2 = %+v, %v, want its link key and no identity", peer, ok)
+	}
 	code, raw = n1.descriptors(t)
 	entries, err := pki.ParseMirror(raw)
 	if code != http.StatusOK || err != nil || len(entries) != 3 {

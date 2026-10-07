@@ -583,13 +583,19 @@ func TestHandshakeIsBoundToTheIdentity(t *testing.T) {
 func TestDialRefusesAnIdentityWithoutALinkKey(t *testing.T) {
 	p := c25519.New()
 	a, b := net.Pipe()
+	defer a.Close()
 	defer b.Close()
+	// a dial that went ahead would write its hello into the drain and then
+	// wait for an answer that never comes until the deadline
+	go func() { _, _ = io.Copy(io.Discard, b) }()
+	_ = a.SetDeadline(time.Now().Add(time.Second))
 	m := &meter{Conn: a}
-	if conn, err := link.Dial(m, p, nil, identityKey(t, p)); err == nil || conn != nil {
-		t.Fatalf("Dial = %v, want a refusal", err)
-	}
+	conn, err := link.Dial(m, p, nil, identityKey(t, p))
 	if read, written := m.totals(); read != 0 || written != 0 {
-		t.Fatalf("the refused dial read %d and wrote %d bytes", read, written)
+		t.Fatalf("the dial read %d and wrote %d bytes, want a refusal before the hello", read, written)
+	}
+	if err == nil || conn != nil {
+		t.Fatalf("Dial = %v, want a refusal", err)
 	}
 }
 
