@@ -4,6 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jimichi-org/jimichi/client"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/relay"
 )
 
@@ -232,5 +235,39 @@ func TestRelayLimitsReachTheRun(t *testing.T) {
 	if run.RelayDropped != 2 || run.RelayBroken != 8 || run.RelayTimedOut != 4 || run.RelayExpired != 6 || run.RelayRefused != 10 {
 		t.Fatalf("dropped %d, closed %d, timed out %d, expired %d, refused %d; want 2, 8, 4, 6, 10",
 			run.RelayDropped, run.RelayBroken, run.RelayTimedOut, run.RelayExpired, run.RelayRefused)
+	}
+}
+
+// a one-hop chain whose relay is gone ends the circuit before the flow starts:
+// the first send fails, so the flow counts no message and leaves none
+// unanswered
+func TestFailedSendLeavesNoMessageUnanswered(t *testing.T) {
+	provider, err := suite.New(jcrypto.SuiteC25519)
+	if err != nil {
+		t.Fatalf("suite: %v", err)
+	}
+	n, err := startNode(provider, 0, false, nil)
+	if err != nil {
+		t.Fatalf("startNode: %v", err)
+	}
+	defer n.priv.Release()
+	c, err := client.Dial(client.Config{Provider: provider, Chain: []client.Node{{Addr: n.addr, StaticPub: n.pub}}})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	clients := []*client.Client{c}
+	latency := newLatency(clients, time.Now())
+	n.relay.Close()
+	_ = n.ln.Close()
+	if err := waitFor(func() bool { return latency.closures()[0].Closed }, 5*time.Second); err != nil {
+		t.Fatalf("circuit still open after its relay closed: %v", err)
+	}
+	cfg := Config{Duration: 100 * time.Millisecond, SendEvery: time.Millisecond}.withDefaults()
+	if sent := runFlows(cfg, clients, latency, time.Now().Add(cfg.Duration)); sent != 0 {
+		t.Fatalf("%d messages sent on an ended circuit", sent)
+	}
+	if p := latency.pending(); p != 0 {
+		t.Fatalf("%d messages left unanswered, want 0", p)
 	}
 }

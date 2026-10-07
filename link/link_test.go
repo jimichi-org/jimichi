@@ -258,10 +258,74 @@ func TestCopiedOrAlteredFrameDoesNotOpen(t *testing.T) {
 					t.Fatalf("the genuine frame did not open as sent: %v", err)
 				}
 			}
-			if err := read(); err == nil {
-				t.Fatal("the frame opened")
+			if err := read(); !errors.Is(err, link.ErrFrame) {
+				t.Fatalf("the frame read as %v, want %v", err, link.ErrFrame)
 			}
 		})
+	}
+}
+
+// a frame put on the wire ahead of a genuine one takes no frame number, so the
+// genuine frame would still open under its own: after the first frame that
+// does not open the link takes nothing more
+func TestNothingOpensAfterAFrameThatDidNot(t *testing.T) {
+	client, server, rec := pair(t, true)
+	junk := bytes.Repeat([]byte{0xA5}, client.FrameSize())
+	rec.rewrite = func(frame []byte) []byte { return append(bytes.Clone(junk), frame...) }
+	go func() { _ = client.WriteCell(sample(7)) }()
+
+	var got wire.Cell
+	if err := server.ReadCell(&got); !errors.Is(err, link.ErrFrame) {
+		t.Fatalf("the frame put ahead read as %v, want %v", err, link.ErrFrame)
+	}
+	for i := 0; i < 2; i++ {
+		if err := server.ReadCell(&got); !errors.Is(err, link.ErrFrame) {
+			t.Fatalf("read %d after it: %v, cell %x, want %v", i, err, got[:8], link.ErrFrame)
+		}
+	}
+}
+
+// a read cut short mid-frame leaves the stream out of step, so the link reads
+// nothing more, even once the socket would give it a whole genuine frame
+func TestNothingIsReadAfterAReadCutShort(t *testing.T) {
+	p := c25519.New()
+	priv, pub := keyPair(t, p)
+	a, b := net.Pipe()
+	m := &meter{Conn: a}
+	accepted := make(chan *link.Conn, 1)
+	go func() {
+		srv, err := link.Accept(b, p, priv, pub)
+		if err != nil {
+			t.Errorf("Accept: %v", err)
+		}
+		accepted <- srv
+	}()
+	client, err := link.Dial(m, p, pub)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	server := <-accepted
+	if server == nil {
+		t.FailNow()
+	}
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+
+	half := bytes.Repeat([]byte{0xA5}, client.FrameSize()/2)
+	go func() { _, _ = b.Write(half) }()
+	_ = a.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	var got wire.Cell
+	if err := client.ReadCell(&got); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the read cut short returned %v, want a deadline error", err)
+	}
+	_ = a.SetReadDeadline(time.Time{})
+	before, _ := m.totals()
+
+	go func() { _ = server.WriteCell(sample(7)) }()
+	if err := client.ReadCell(&got); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the read after it returned %v, cell %x, want the same deadline error", err, got[:8])
+	}
+	if after, _ := m.totals(); after != before {
+		t.Fatalf("the link read %d more bytes after a read cut short", after-before)
 	}
 }
 

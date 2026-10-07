@@ -71,7 +71,8 @@ Threat modelling follows the FSTEC methodology of 2021-02-05; scenarios are name
 
 Preliminary series on revision 71e1ad8: ten flows, three relays, c25519 suite, five 30 s runs per
 configuration, each client starting its schedule at a random phase. Every number is the median
-across the five runs. Rows with the client alone come from the series over client rates, rows with
+across the five runs. The rows with no protection and with cover on top come from the main series
+over cover strategies, rows with the client alone from the series over client rates, rows with
 relay clocks from the series over relay periods, whose own client-only runs agree (AUC 0.951 at
 70 ms and at 35 ms). With five runs per point no difference is claimed as significant; the full
 series of thirty runs per point is still to come

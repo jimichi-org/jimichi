@@ -74,8 +74,9 @@ type Run struct {
 	// circuits the relays closed, for any cause in relay.Counters.Broken; such a
 	// flow stops before the run ends
 	RelayBroken uint64
-	// clients that closed their circuit over a reply out of turn, one that did
-	// not open or one beyond the cells written
+	// clients that refused a reply or a link frame from the entry
+	// (Client.Refused non-nil); a circuit ended by a relay or by the far side
+	// shows only in Closures
 	BrokenFlows int
 	// per flow, as its client saw it, whatever closed the circuit; the relay
 	// counters above sum what each relay noticed and may count one circuit
@@ -402,6 +403,12 @@ func (l *latencyCollector) mark(flow int, seq uint64) {
 	l.mu.Unlock()
 }
 
+func (l *latencyCollector) unmark(flow int, seq uint64) {
+	l.mu.Lock()
+	delete(l.sent[flow], seq)
+	l.mu.Unlock()
+}
+
 func (l *latencyCollector) pending() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -452,6 +459,7 @@ func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector, d
 				binary.BigEndian.PutUint64(payload[flowField:flowField+seqField], seq)
 				latency.mark(flow, seq)
 				if err := c.Send(payload); err != nil {
+					latency.unmark(flow, seq)
 					return
 				}
 				local++

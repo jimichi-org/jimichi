@@ -355,13 +355,18 @@ benchmark to compare with.
   goes back as cover under the same number), or a cell cannot be written to the next node or back
   towards the client. A write on a link the node closed itself while closing a circuit is not
   counted again. A client closes its circuit on a reply with a bad header, a reply that does not
-  open, a reply out of turn, or a reply beyond the number of cells it wrote. The flow then stops
-  before the run ends and its traces are shorter.
+  open, a reply out of turn, a reply beyond the number of cells it wrote, or a frame on the link
+  from the entry that does not open. Anyone on the wire between the client and the entry can
+  produce such a frame, so a refused frame does not implicate the entry. The flow then stops
+  before the run ends and its traces are shorter. A flow whose circuit ended hands no more
+  messages to its client, so messages, drop_rate and unanswered of a broken run count only up to
+  its closure.
 - A report row carries relay_broken_circuits (the sum of the closures each relay noticed, so one
-  circuit can be counted by several relays), broken_flows (clients that closed their circuit) and,
-  per flow, flow_closed and flow_closed_after: whether the circuit closed before the run was read,
-  as the client saw it and whatever the cause, and how long after the flows started ("" for one
-  that stayed open).
+  circuit can be counted by several relays), broken_flows (clients that refused a reply or a link
+  frame) and, per flow, flow_closed and flow_closed_after: whether the circuit closed before the
+  run was read, as the client saw it and whatever the cause, and how long after the flows started
+  ("" for one that stayed open). Of the client fields, a circuit ended by a relay or by the far
+  side shows in flow_closed and not in broken_flows.
 - A row also carries relay_timed_out (handshake, setup and write deadlines that ran out),
   relay_expired (circuits closed for idleness or age) and relay_refused (connections and setups
   the relays turned away), summed over the relays. A run is limited when any of them is non-zero:
