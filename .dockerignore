@@ -6,10 +6,12 @@
 !client
 !cmd
 !crypto
+!e2e
 !internal
 !lab
 !link
 !mailbox
+!noise
 !pki
 !relay
 !vault

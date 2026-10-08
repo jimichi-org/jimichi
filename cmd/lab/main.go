@@ -161,7 +161,7 @@ func command(args []string, stdout, stderr io.Writer) int {
 	binList := fs.String("bins", "100ms", "comma-separated observation windows, each scored on the same runs")
 	repeats := fs.Int("repeats", 1, "runs per configuration")
 	out := fs.String("out", "artifacts", "directory for the json report")
-	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic")
+	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic")
 	rev := fs.String("rev", "unknown", "code revision recorded in every row")
 	seed := fs.Int64("seed", 1, "base seed; every repeat derives its own from it")
 	suiteName := fs.String("suite", "c25519", "primitive suite for every node and client: gost or c25519")
@@ -198,6 +198,10 @@ func command(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	}
+
+	if *set == "deny" {
+		return deny(*suiteName, *rev, *out, stdout, stderr)
 	}
 
 	if *flows < 2 || *hops < 2 {
