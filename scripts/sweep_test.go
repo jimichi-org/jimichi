@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -75,8 +76,11 @@ func sweepRev(t *testing.T, change func(t *testing.T, env []string, root string)
 		"deploy/base/relay.yaml": "kind: x\n",
 		"lab/metrics/auc.go":     "package metrics\n",
 		"relay/relay.go":         "package relay\n",
-		// the patterns the repository once had: wide enough to hide sources
-		".gitignore": "artifacts/\n*.test\ncore.*\ncoverage.*\n",
+		// the patterns the repository once had, wide enough to hide sources,
+		// and the notes kept out of it
+		".gitignore": "artifacts/\n*.test\ncore.*\ncoverage.*\n.dev/\n",
+		// deploy and scripts stay out of the image
+		".dockerignore": "*\n!go.mod\n!go.sum\n!cmd\n!e2e\n!internal\n!lab\n!pki\n!relay\n**/*.md\n**/*_test.go\n",
 	} {
 		write(t, root, name, text)
 	}
@@ -115,8 +119,9 @@ func sweepRev(t *testing.T, change func(t *testing.T, env []string, root string)
 
 // any change in the tree makes the revision dirty, staged or not, tracked or
 // new, in a directory the script never heard of as well, and a Go file that
-// .gitignore hides; reports in artifacts, the documentation in docs and ignored
-// files that are not sources leave it clean
+// .gitignore hides inside a directory the image takes; reports in artifacts,
+// the documentation in docs, ignored files that are not sources and ignored Go
+// outside the image context leave it clean
 func TestSweepMarksAnyChangeOutsideArtifactsAndDocsDirty(t *testing.T) {
 	edit := func(name string) func(t *testing.T, env []string, root string) {
 		return func(t *testing.T, env []string, root string) { write(t, root, name, "changed\n") }
@@ -142,8 +147,18 @@ func TestSweepMarksAnyChangeOutsideArtifactsAndDocsDirty(t *testing.T) {
 		{"a relay file changed", edit("relay/relay.go"), true},
 		{"a Go file .gitignore hides", edit("lab/metrics/coverage.go"), true},
 		{"a Go file .gitignore hides in a new package", edit("relay/core/core.go"), true},
+		{"a Go file .gitignore hides in a directory named with a digit", edit("e2e/coverage.go"), true},
 		{"a test binary .gitignore hides", edit("relay/relay.test"), false},
 		{"a core dump .gitignore hides", edit("relay/core.1234"), false},
+		{"a Go file in an ignored .dev", edit(".dev/tools/e2eref/gocomp/main.go"), false},
+		{"an ignored .dev that is a repository of its own", func(t *testing.T, env []string, root string) {
+			dev := filepath.Join(root, ".dev")
+			write(t, dev, "tools/e2eref/gocomp/main.go", "package main\n")
+			git(t, env, dev, "init", "-q")
+			git(t, env, dev, "add", ".")
+			git(t, env, dev, "commit", "-q", "-m", "notes")
+		}, false},
+		{"a Go file .gitignore hides outside the image", edit("deploy/base/coverage.go"), false},
 		{"a change staged", func(t *testing.T, env []string, root string) {
 			write(t, root, "cmd/lab/main.go", "package main\n\nfunc main() {}\n")
 			git(t, env, root, "add", "cmd/lab/main.go")
@@ -202,5 +217,30 @@ func TestGitignoreHidesNoSource(t *testing.T) {
 		if !ignored(path) {
 			t.Errorf("%s is not ignored", path)
 		}
+	}
+}
+
+// sweep.sh reads the directories of the image from .dockerignore as whole lines
+// of lowercase letters and digits; any other entry let in would escape its
+// check for hidden sources
+func TestDockerignoreLetsInOnlyWhatSweepReads(t *testing.T) {
+	text, err := os.ReadFile(filepath.Join("..", ".dockerignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := regexp.MustCompile(`^[a-z0-9]+$`)
+	dirs := 0
+	for _, line := range strings.Split(string(text), "\n") {
+		name, ok := strings.CutPrefix(line, "!")
+		switch {
+		case !ok || name == "go.mod" || name == "go.sum":
+		case dir.MatchString(name):
+			dirs++
+		default:
+			t.Errorf("sweep.sh does not read %q", line)
+		}
+	}
+	if dirs == 0 {
+		t.Error("no directory let in")
 	}
 }
