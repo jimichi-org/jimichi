@@ -287,8 +287,9 @@ only when the delivery at the exit takes constant time or the nodes send on thei
 
 ## End-to-end layer and mailbox
 
-Status: the store at the exit is implemented (package mailbox, `cmd/relay -exit mailbox`); the
-client that uses it and the end-to-end layer are planned
+Status: the store at the exit (package mailbox, `cmd/relay -exit mailbox`), the end-to-end layer
+(packages noise and e2e, CRYPTO) and the conversation driver (package conversation, subsection
+"Conversation") are implemented; the client that uses them is planned
 ([#18](https://github.com/jimichi-org/jimichi/issues/18)); on the testbed the exit runs in echo mode.
 
 The -exit flag sets what the exit does with the payload of a data cell:
@@ -428,6 +429,134 @@ mailbox_puts, mailbox_put_full, mailbox_put_refused, mailbox_fetches, mailbox_hi
 mailbox_expired, mailbox_evicted, mailbox_bad. They appear only in /stats on loopback and only
 with -exit mailbox, never in the stdout line once a minute: stdout goes to the kubelet logs on
 the node's disk, and the number of queues and records would show pending messages.
+
+### Conversation
+
+Package conversation drives a client's conversation with one contact over a circuit that ends on
+a mailbox. Package e2e runs the session (the KK handshake, the ratchet, staleness; CRYPTO, section
+"End-to-end layer"), and conversation decides what to put and when. The binaries do not use it yet:
+the -peer client is planned ([#18](https://github.com/jimichi-org/jimichi/issues/18)).
+
+Tick:
+
+- Every rate exactly one request while there is a circuit; no cells while it is being rebuilt.
+- Every request fetches from the own queue, before the contact is pinned and after. The tag of a
+  request is its number on the circuit modulo 2^16; on a new circuit the count starts from zero
+  again.
+- The put into the peer's queue is chosen by the first row that applies:
+
+| Condition | Put |
+|---|---|
+| W requests with a put are already in flight | none |
+| there is a sticky record of the current epoch | a copy of it, the same bytes |
+| the session offers a handshake record (kk1 at the initiator, kk2 at the responder) | that record, which becomes sticky |
+| stall mode | a new record, which becomes sticky (the probe) |
+| otherwise | a new record |
+
+- A new record is real when there is a message and the session can seal it (the responder only
+  after confirmation). Otherwise it is a dummy when cover puts (CoverPuts) are on, when the
+  initiator has not yet sealed its first record after kk2, or when 30 s have passed since the
+  last sealed record (keepalive). Otherwise there is no put. A stale session and a session whose
+  handshake has not finished give no new record.
+
+Window and sticky record:
+
+- Puts are pipelined: up to W = 16 requests with a put unanswered, a new record on every tick. As
+  long as W x rate exceeds the round trip of the circuit, there is a put on every tick and the
+  pattern of puts does not depend on the delay.
+- A refused put (10 or 11) turns stall mode on: a real body goes back to its place in the outbox
+  by the order it was sent in, a dummy is forgotten.
+- In stall mode one record (the probe) is put as copies of the same bytes on every tick until
+  one of the copies gets 01; then stall mode is off and the pipeline resumes. The receiver drops
+  the copies by the record number.
+- A handshake record is also put as copies until 01; then the session learns that the mailbox
+  holds it, and from that moment the initiator waits for kk2. Copies of kk2 also stop once the
+  first record of the initiator has arrived.
+- The outcome of a copy of a sticky record already taken off changes nothing.
+
+Reply:
+
+- A reply belongs to the oldest unanswered request by position, and the tag is a check; parsing
+  is strict (subsection "Reply, 396 bytes").
+- 01: the sticky record is taken off; the real body of a record that is not sticky counts as
+  delivered to the mailbox.
+- 10 and 11: stall mode; the sticky record stays and goes on being put.
+- A bad reply: the outcome of the put is unknown, which is handled as 10 but without turning
+  stall mode on; the record in the reply is dropped; the circuit is not closed.
+- A record in a reply is held before pinning (up to 16, the oldest pushed out) and goes to the
+  session in order after pinning; after pinning it goes to the session at once.
+- After pinning, a parsed reply without a record that opened is an answered fetch for the
+  staleness rule; a bad reply is not.
+- A message that opened goes to the caller through a queue of 256; when the queue is full it is
+  dropped and counted.
+
+Epochs:
+
+- The epoch of the session grows with every new handshake: a restart of the initiator (no kk2
+  60 s after kk1 was stored, staleness, record numbers exhausted) and the responder replacing its
+  session on a fresh kk1.
+- On a change of epoch the sticky record of the previous epoch is dropped, the real bodies of the
+  pending requests of the previous epoch go back to the outbox at once, the outcomes of their
+  puts no longer affect anything, and the handshake record of the new epoch goes first.
+- A body with an unknown outcome is sent again, so a duplicate is possible; the order of messages
+  is not guaranteed across refusals.
+
+Staleness and a new handshake:
+
+- A session goes stale after 90 s of answered fetches without a record of the peer that opened;
+  the session gets it as 90 s / rate fetches, 450 at a rate of 200 ms (CRYPTO, subsection "KK
+  handshake").
+- An honest conversation does not go stale: with CoverPuts each side puts a record on every tick,
+  without them a keepalive every 30 s.
+- A gap of more than 64 records in one direction (a batch lost at the mailbox) is cleared by a new
+  handshake within 2 x 90 s plus 60 s of waiting for kk2.
+
+Rebuild:
+
+- The end of a circuit: the far side closed it, the client refused a reply, a send failed, or the
+  oldest request has waited for its reply longer than 10 s (then the driver closes the circuit
+  itself).
+- Unanswered requests get the outcome "unknown"; the sticky record stays.
+- The caller's Dial builds the new circuit: the same entry, a fresh mirror from it, new middle
+  hops, the same mailbox. The session, the identity, the fetch capability, the pin and the outbox
+  live for the whole conversation, and a rebuild leaves them alone.
+- A pause of 1 s before the first attempt, and the pause doubles after each failure, up to 60 s.
+  A circuit whose cell cannot carry a request is a failure.
+- The conversation ends when the rebuild fails for 10 min, when three circuits ended in a reply
+  refused by the client within 10 min, or when another card arrives after pinning. The circuit is
+  then closed and the session keys are zeroed.
+- The caller learns only the class of a circuit end: a reply refused by the client, the wait for
+  a reply ran out, a failed send, or a close by the far side. No node is named.
+
+Parameter rule:
+
+- The round trip of a circuit of h hops, when the nodes send on their own clocks, is at most
+  (2h - 1) node periods plus the network: on the testbed 5 x 190 ms = 0.95 s for 3 hops and
+  1.33 s for 4; on average 2.5-2.8 periods, about 0.5 s.
+- The window must cover the maximum: W x rate > (2h - 1) x node period. At W = 16 and a rate of
+  200 ms that is 3.2 s.
+- The reply timeout of 10 s is 7 times the maximum. Within it fewer than 256 requests are in
+  flight, and that many replies fit the queue in front of the driver, so no reply is lost before
+  it is matched.
+- The mailbox queue depth of 16 and the ratchet window of 64 are no smaller than the honest gap of
+  W + 16 = 32: refused records in flight plus records expired by the TTL.
+- Without node clocks the round trip is under a millisecond and the window never fills.
+
+| Parameter | Default |
+|---|---|
+| request period rate | set by the caller |
+| window W | 16 |
+| keepalive without CoverPuts | 30 s |
+| staleness | 90 s |
+| reply timeout | 10 s |
+| rebuild | 1 s pause, doubling up to 60 s, at most 10 min |
+| replies refused by the client | 3 within 10 min |
+| outbox, records before pinning, received messages | 256, 16, 256 |
+
+What the mailbox sees: with CoverPuts a put on every tick while fewer than W requests with a put
+are in flight; without them the moment and number of real messages, the initiator's first record
+after kk2 and the keepalives. The copies of a sticky record are identical bytes, so the mailbox
+sees a repeat.
 
 ## Circuit setup
 
@@ -1014,6 +1143,7 @@ prints the counters to the terminal.
 | relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
 | client | choice of the chain, send, receive, cover traffic | crypto, crypto/secmem, link, wire |
 | mailbox | queue store at the exit, request and reply format | crypto |
+| conversation | a client's conversation with its contact: a request per tick, the window of puts, the sticky record, matching replies, epochs, rebuilding the circuit | crypto, crypto/secmem, e2e, mailbox |
 | vault | planned: client container with two volumes ([#20](https://github.com/jimichi-org/jimichi/issues/20)); an empty package today | nothing yet |
 | lab | harness that runs one configuration in one process, the observer on two links, seeds, sampling of chains | client, relay, link, crypto, crypto/secmem, crypto/suite |
 | lab/metrics | correlation scores, AUC and its bootstrap interval, traffic multiplier and latency percentiles, share of compromised chains | standard library only |
