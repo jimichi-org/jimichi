@@ -430,4 +430,21 @@ func TestStartRefusesABadConfig(t *testing.T) {
 	if conv.Err() != nil {
 		t.Fatalf("Err after Close: %v", conv.Err())
 	}
+
+	// 10 s over 255 is 39 215 686.3 ns, so the shortest period is one more
+	// than its whole part
+	if got := MinRate(DefaultReplyTimeout); got != 39215687 {
+		t.Fatalf("MinRate(%v) = %d ns", DefaultReplyTimeout, got)
+	}
+	for _, rate := range []time.Duration{MinRate(DefaultReplyTimeout) - 1, MinRate(DefaultReplyTimeout)} {
+		cfg := good()
+		cfg.Rate = rate
+		conv, err := Start(cfg)
+		if ok := rate >= MinRate(DefaultReplyTimeout); (err == nil) != ok {
+			t.Fatalf("rate %d ns: %v", rate, err)
+		}
+		if err == nil {
+			conv.Close()
+		}
+	}
 }

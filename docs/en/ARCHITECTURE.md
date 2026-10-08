@@ -8,15 +8,21 @@ Messages travel through a chain of relay nodes under nested encryption. The clie
 chain, three nodes by default, at random from a list of nodes. In a chain of two or more nodes no
 single node sees both the client and the message: the entry knows the client's address, the exit
 opens the message. A node keeps key material in process memory and writes none of it to disk, and
-every cell is the same size. The exit is the end of the path: a recipient client and an
-end-to-end layer are planned ([#18](https://github.com/jimichi-org/jimichi/issues/18)).
+every cell is the same size. Two clients in -peer mode talk through a mailbox at the exit of their
+chains: a message is sealed under the end-to-end layer between the clients (CRYPTO, "End-to-end
+layer"), and the mailbox holds only records of a constant size that it cannot read. A client
+without -peer sends its messages to an exit that echoes them back: the measurements run on that
+topology.
 
 ## Components
 
 | Component | Purpose |
 |---|---|
-| client | draws the chain, builds the circuit, encrypts the layers, sends payload and cover cells, receives replies |
-| relay | strips its own layer and forwards; writes nothing to disk |
+| client | draws the chain, builds the circuit, encrypts the layers, sends payload and cover cells, receives replies; with -peer holds a conversation with one contact through a mailbox |
+| relay | strips its own layer and forwards; writes nothing to disk; as the exit answers with an echo or as a mailbox (-exit) |
+| noise, e2e | the end-to-end layer between clients: the contact card, the KK handshake, the hash ratchet |
+| mailbox | queues of end-to-end records at the exit, in memory only |
+| conversation | a client's conversation with its contact: a request on every tick, a window of puts, the rebuild of the circuit |
 | crypto | CryptoProvider: two primitive suites behind one interface |
 | crypto/secmem | key buffers outside the Go heap: mlock, no dumps, zeroed on release |
 | wire | cell format and nested route encryption |
@@ -27,16 +33,28 @@ end-to-end layer are planned ([#18](https://github.com/jimichi-org/jimichi/issue
 ## Message flow
 
 ```
-client-a -> entry -> middle -> exit
+client-a -> entry A -> middle A -> mailbox (exit) <- middle B <- entry B <- client-b
 ```
 
-The exit is the end of the path: it opens the message and, with -exit echo (the default), sends it
-back as the reply, while with -exit mailbox it answers as a mailbox (section "End-to-end layer and
-mailbox"). A recipient client (client-b) and an end-to-end layer are planned
-([#18](https://github.com/jimichi-org/jimichi/issues/18)).
+The conversation of two -peer clients:
+
+1. The clients are introduced: each has pinned the card of the other, which holds the mailbox
+   address, a queue and a static key (subsection "The -peer client").
+2. Each builds its own circuit whose exit is the mailbox (the steps below apply to each).
+3. On every tick each client sends one request: a fetch from its own queue and a put of a record
+   into the queue of its contact.
+4. A message is sealed under the end-to-end layer into a record of 392 bytes: the KK handshake
+   first, then the hash ratchet (CRYPTO, "End-to-end layer"). The mailbox keeps the record in the
+   recipient's queue.
+5. The recipient takes the record in the reply to one of its requests and opens it with its
+   session.
+
+A client without -peer sends its messages to the exit, and with -exit echo (the default) the exit
+sends each back as the reply: this is the topology the lab harness measures. Building one circuit:
 
 1. The client holds a list of N nodes and the length of the chain, three by default. It draws
-   its entry uniformly among the N nodes.
+   its entry uniformly among the N nodes, a -peer client among the N - 1 nodes other than the
+   mailbox.
 2. It obtains the signed bundles of the listed nodes from the entry, the only node it connects to.
    The entry may leave out up to -missing of them (1 by default). A bundle is the node's
    certificate from the CA and a descriptor with the node keys, signed by the node signing key.
@@ -45,8 +63,8 @@ mailbox"). A recipient client (client-b) and an end-to-end layer are planned
    left out, within -missing. The entry's own bundle must pass, or the client refuses to build
    the circuit.
 4. It draws the other nodes of the chain uniformly among the other nodes whose bundles passed the
-   check (section "Choice of the chain") and agrees an ephemeral session key with each node of
-   the chain separately.
+   check, for a -peer client the middle hops with the mailbox last (section "Choice of the
+   chain"), and agrees an ephemeral session key with each node of the chain separately.
 5. The client wraps the message in one layer per node: the outer one for the entry, the inner one
    for the exit.
 6. Each node strips exactly its own layer and learns only the next hop.
@@ -79,10 +97,11 @@ mailbox"). A recipient client (client-b) and an end-to-end layer are planned
   entry and needs a verified bundle of it. Bundles of different nodes are not compared with each
   other: the setup layer and the link of every node are bound to its identity (CRYPTO, section
   "Transcript").
-- Any failure ends the process: an entry that does not answer, a mirror that lacks a verified
-  bundle of the entry itself or more listed nodes than -missing allows, a setup that fails. The
-  orchestrator restarts the client, and the new process draws a new entry. Within one run the
-  client does not move on to another entry.
+- For a client without -peer any failure ends the process: an entry that does not answer, a
+  mirror that lacks a verified bundle of the entry itself or more listed nodes than -missing
+  allows, a setup that fails. The orchestrator restarts the client, and the new process draws a
+  new entry. Within one run the client does not move on to another entry, nor does a -peer
+  client.
 - With a drawn chain the client does not log which nodes form it. Its log holds the name, the
   fingerprint and the certificate validity of every verified node, in the listed order (with
   -fixed-chain the descriptor validity as well), one line with the number of verified and of
@@ -96,6 +115,40 @@ mailbox"). A recipient client (client-b) and an end-to-end layer are planned
   node in full. The flag is for measurements that need a known path; no measurement uses it: the lab
   harness builds its chain itself, in a fixed order.
 - With N equal to the length of the chain the chain is a random permutation of the list.
+
+The -peer client:
+
+- The exit is pinned to the mailbox (-mailbox, one of the listed nodes). The entry is drawn
+  uniformly among the other N - 1 nodes (ChooseEntryExcept), the middle hops uniformly and
+  without replacement among the nodes that are neither the entry nor the mailbox and whose bundles
+  passed the check, and the mailbox comes last (ChooseRestTo). With a full mirror every ordered
+  chain that ends on the mailbox is equally likely.
+- A mirror is taken by the same rule and must also hold a verified bundle of the mailbox, or the
+  client refuses with `the entry holds no bundle for the mailbox` (JudgeMirrorTo). So the mailbox
+  is never the entry.
+- -hops is at least 2: with one hop the mailbox would be the entry too. With -fixed-chain the node
+  at place -hops in the list must be the mailbox.
+- A -peer client logs no line per listed node; neither the path nor any node address reaches the
+  log, and refusals and failures are logged by class only.
+- The end of a circuit is not the end of the conversation. A rebuild always goes through the same
+  entry and a fresh mirror of that entry:
+  1. first the same chain: the same middle hops and the same mailbox, with keys from the new
+     mirror;
+  2. new middle hops are drawn only when that chain cannot be dialled: the mirror lacks one of its
+     nodes, the connection to the entry fails, or two circuits in a row through it ended before
+     the first reply (a setup that the entry or a middle hop did not carry on shows to the client
+     only that way); this happens at most 2 times per process;
+  3. after that the client dials its last drawn chain again and again. The entry, the mailbox or
+     the middle hop can always stall the conversation, but none can steer the middle hops any
+     further.
+- A close by the far side, a reply timeout, a refused reply and a failed send all fall under the
+  one rule, and none of them gives a draw beyond the bound. A mirror the client does not take
+  gives neither a draw nor a setup. The bound and the chance that a rogue entry or a rogue mailbox
+  gets its colluder as the middle hop are worked out in LIMITATIONS.
+- The pauses between attempts and the time limit come from the conversation driver: 1 s, doubling
+  up to 60 s, at most 10 min, then exit code 1; three refused replies within 10 min give code 3
+  (subsection "Conversation").
+- With -fixed-chain a rebuild always dials the same chain and draws nothing.
 
 ## Cell format
 
@@ -218,6 +271,12 @@ for its slot, so latency grows at a low schedule rate and shrinks at a high one.
 holds 256 messages: when messages come faster than the schedule sends them and the queue is full,
 a new message is dropped and counted, and the caller gets no error.
 
+A -peer client requires -mode fixed but keeps a schedule of its own: the conversation driver sends
+exactly one request on every tick of -rate through the immediate mode of the library while there
+is a circuit, and sends no cover cells on the wire. There is a request on every tick, message or
+not, so the pattern on the link does not depend on the conversation. -jitter delays each request
+within its tick and must be below -rate.
+
 A constant rate at the client is not enough: a node that forwards a cell at once carries the phase
 of the client's schedule onto the next link, and it reaches the exit. So a node can send on its own
 clock.
@@ -269,12 +328,13 @@ the number of every reply. The client checks every reply, cover and payload alik
 | the number is below the count of cells the client has written to the link | a reply to a cell the client did not write: the exit answers every cell once |
 
 Nothing is tolerated: the first reply that fails a check closes the circuit, and the client reads
-nothing after it. A reply out of turn cannot be taken without taking a gap or a replay, and a
-reply too many answers no cell of the client. A reply with a bad header or one that does not open
-takes no number, and forward a node drops such a cell and keeps the circuit; the client closes
-the circuit here as well: an honest chain produces no such reply, and the reply whose place such
-a cell took is already lost. Of a circuit it closed the client keeps only which of the four
-checks the reply failed, or that a frame on the link from the entry did not open. A reply that never arrives is not noticed by these checks.
+nothing after it. A reply out of turn cannot be taken without taking a gap or a replay, and a reply
+too many answers no cell of the client. A reply with a bad header or one that does not open takes no
+number, and forward a node drops such a cell and keeps the circuit; the client closes the circuit
+here as well: an honest chain produces no such reply, and the reply whose place such a cell took is
+already lost. Of a circuit it closed the client keeps only which of the four checks the reply
+failed, or that a frame on the link from the entry did not open. A reply that never arrives is not
+noticed by these checks.
 
 A reply too long for a cell is replaced by a cover reply under the same number. The length is
 checked before anything is sealed, so no nonce is used twice. Any other failure to seal a reply
@@ -285,12 +345,17 @@ cell with a cover reply. Replies to messages only would show every node on the w
 number and timing, which cells were real. The count is the same in every mode; the timing matches
 only when the delivery at the exit takes constant time or the nodes send on their own clocks.
 
+With -exit mailbox the answer to every data cell is a mailbox reply of a constant 396 bytes, and
+instead of the echo the exit does bounded work per request: one hash, operations on maps and
+lists, the copy of one record. That work is not constant (subsection "Store"): the difference of
+microseconds shows outside the exit only when the exit forwards at once.
+
 ## End-to-end layer and mailbox
 
-Status: the store at the exit (package mailbox, `cmd/relay -exit mailbox`), the end-to-end layer
-(packages noise and e2e, CRYPTO) and the conversation driver (package conversation, subsection
-"Conversation") are implemented; the client that uses them is planned
-([#18](https://github.com/jimichi-org/jimichi/issues/18)); on the testbed the exit runs in echo mode.
+The store at the exit (package mailbox, `cmd/relay -exit mailbox`), the end-to-end layer (packages
+noise and e2e, CRYPTO), the conversation driver (package conversation, subsection "Conversation")
+and the client that uses them (`cmd/client -peer`, subsection "The -peer client"). On the testbed
+every relay runs with -exit mailbox, and both clients keep their queues on relay-5.
 
 The -exit flag sets what the exit does with the payload of a data cell:
 
@@ -434,8 +499,8 @@ the node's disk, and the number of queues and records would show pending message
 
 Package conversation drives a client's conversation with one contact over a circuit that ends on
 a mailbox. Package e2e runs the session (the KK handshake, the ratchet, staleness; CRYPTO, section
-"End-to-end layer"), and conversation decides what to put and when. The binaries do not use it yet:
-the -peer client is planned ([#18](https://github.com/jimichi-org/jimichi/issues/18)).
+"End-to-end layer"), and conversation decides what to put and when. The -peer client uses it
+(subsection below).
 
 Tick:
 
@@ -532,9 +597,11 @@ Rebuild:
   new handshake, and without the confirming record the responder seals real messages only after
   the initiator's next record opens: with CoverPuts on the next tick, without them with the next
   message of the initiator or its keepalive 30 s after the confirming record.
-- The caller's Dial builds the new circuit: the same entry, a fresh mirror from it, new middle
-  hops, the same mailbox. The session, the identity, the fetch capability, the pin and the outbox
-  live for the whole conversation, and a rebuild leaves them alone.
+- The caller's Dial builds the new circuit. For the -peer client it is the same entry, a fresh
+  mirror from it, first the same chain, and new middle hops to the same mailbox only when that
+  chain cannot be dialled, at most 2 times per process (section "Choice of the chain"). The
+  session, the identity, the fetch capability, the pin and the outbox live for the whole
+  conversation, and a rebuild leaves them alone.
 - A pause of 1 s before the first attempt, and the pause doubles after each failure, up to 60 s.
   A circuit whose cell cannot carry a request is a failure.
 - The conversation ends when the rebuild fails for 10 min, when three circuits ended in a reply
@@ -575,6 +642,126 @@ first record after kk2 and the keepalives. The copies of a sticky record are ide
 the mailbox sees a repeat. Before pinning the requests only fetch, so the first put shows when
 the contact was pinned: at once at the initiator (kk1), at the responder with kk2 once kk1 has
 come.
+
+### The -peer client
+
+`cmd/client -peer` holds a conversation with one contact through the mailbox at the exit of its
+circuits. One contact, one circuit and one queue per process.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| -peer | off | the conversation mode |
+| -mailbox | none | the mailbox address, one of -nodes; the exit of every circuit |
+| -admin | 127.0.0.1:9201 | the admin port, a loopback IP literal and a port only |
+| -cover-puts | on | a put in every request, a dummy record when no message waits |
+| -respond | off | answer every message of the contact with its number and text |
+| -handshake-timeout | 60 s | how long the initiator waits for kk2 once the mailbox has stored kk1 |
+| -rate | 200 ms | the request period |
+| -interval, -count | 1 s, 1 | the period and the number of own messages; -interval 0 sends none, -count 0 without end |
+| -message | | the text of own messages, at most 363 bytes |
+
+Refused with code 2 before any network request and before the identity is made: no -mailbox or a
+mailbox not among -nodes; -hops below 2; -mode other than fixed; -cover above 0; -rate below
+39.22 ms (at most 255 requests, one fewer than the reply buffer of 256, may be in flight during the
+10 s wait for a reply); -jitter not below -rate; -admin not a loopback IP literal; -message longer
+than 363 bytes; with -fixed-chain a node at place -hops that is not the mailbox; any other error of
+the flags, the node list and the anchor.
+
+Start order:
+
+1. The key memory policy and the dump prevention. With locked memory (-keymem all, the default)
+   RLIMIT_MEMLOCK must be at least 96 KiB, or the client refuses with code 1 before any key: at its
+   peak it holds about 19 locked pages (the circuit and its link about 9, the identity and F 2, a
+   handshake up to 5, the ratchet up to 3). The client pods get IPC_LOCK.
+2. The suite, the check of the flags, the anchor.
+3. The fetch capability F, 16 random bytes drawn straight into secmem, not all zero, and the
+   identity: a static agreement key from GenerateEphemeral in secmem and a card with the mailbox
+   address and the queue QueueID(F).
+4. Exactly one line `card_hash=<64 hex>`, before any network request. The card itself never goes
+   to the log: stdout reaches the kubelet logs on the disk of the node, and whoever holds the card
+   can put into the owner's queue and push out the contact's puts.
+5. The first circuit to the mailbox. A refusal: the line `refusing to build the circuit: <class>`
+   and code 1. Success: the line `circuit of N hops among M listed nodes to the mailbox, request
+   period R`.
+6. The conversation, then the admin listener and the line `admin listening on <address>`.
+
+The contact card, binary form version 1:
+
+```
+u8 version = 1 | u8 suite | u8 address length | mailbox address | queue, 16 | static key, 32 or 64
+```
+
+- Only the canonical spelling is taken: parsing and building give the same bytes, with no tail.
+  The suite equals the provider's, the address passes pki.ValidAddr, the queue is not zero.
+- With the testbed address `relay-5.jimichi.svc.cluster.local:9000` a card is 89 bytes on c25519
+  and 121 on GOST. The text is `<suite>:<base64 with padding>`.
+- card_hash is the transcript hash of the exchange e2e/card over the card, 32 bytes, 64 hex in the
+  log. There is no short fingerprint.
+- `jimichi keygen-card -suite S -mailbox ADDR` prints the card of a key that is thrown away at
+  once, and `jimichi card-hash <text>` prints the card_hash of a card.
+
+The admin port (a body of at most 1 KiB, headers within 5 s):
+
+| Request | Answer |
+|---|---|
+| GET /card | the text of the own card and a newline |
+| PUT /contact | pins the contact's card, the body is its text |
+
+The order of the checks of PUT /contact:
+
+1. A body over 1 KiB: 413; not a canonical card: 400. Neither changes the state, before or after
+   pinning.
+2. A contact is pinned already: the same card 204; any other card that parses, including one of
+   another suite or with another address, 409 and the stopped state.
+3. No contact yet: the suite is the own one, the mailbox address equals the own -mailbox, the key
+   and the queue are not the own ones, and the contact's key passes a trial agreement with a
+   one-time pair (exchange e2e/check); otherwise 400. Then the pin in memory for the process, the
+   line `contact pinned card_hash=<hash of the contact's card> role=initiator|responder` and 204.
+
+The stopped state:
+
+- The 409 leaves before the conversation stops. Then the conversation and the circuit are closed,
+  the session keys, the identity key and F are released, and the line `contact card changed,
+  refusing: pinned card_hash=<hash of the pinned card>` is logged without a byte of the new card.
+- The process does not exit and answers 409 to every later request on the admin port; the
+  counters line carries state=stopped.
+- Only a restart by the operator ends it (scripts/introduce.sh). An exit would let the
+  orchestrator restart the client with a new identity and open a new window of trust on first
+  use.
+
+Own messages:
+
+- The body on the testbed: `u8 kind (1 message, 2 reply) | u32be number | text`.
+- Once the contact is pinned the client sends a message every -interval, at most -count of them.
+  After the last it goes on fetching and answering: an exit would take the identity with it.
+- The first reply with the same number gives the line `e2e round trip in <time>`; repeats of a
+  number are not logged. With -respond a message gets a reply of kind 2 with the same number and
+  text. Neither the text nor the number reaches the log.
+
+The log:
+
+| Line | When |
+|---|---|
+| `card_hash=<hash>` | once at start |
+| `circuit of N hops among M listed nodes to the mailbox, request period R` | the first circuit |
+| `admin listening on <address>` | the admin port is open |
+| `contact pinned card_hash=<hash> role=<role>` | the contact is pinned |
+| `e2e round trip in <time>` | the reply to an own message |
+| `circuit closed`, `circuit closed: <class>` | the end of a circuit: closed by the far side, a refused reply, no reply within 10 s, a failed send |
+| `circuit rebuilt through the same entry` | a rebuild succeeded |
+| `the chain could not be dialled again, new middle hops drawn, redraw i of 2` | new middle hops (section "Choice of the chain") |
+| `circuit rebuild failed: <class>` | an attempt to rebuild failed |
+| `e2e state=... requests= puts= ...` | every minute: the state (unpaired, handshaking, established, confirmed, stale, stopped) and the counters of the conversation and of the session |
+| `e2e peer not reachable for <time>, pinned card_hash=<hash>` | every minute while no record of the contact has opened for more than a minute: a contact with a new identity needs a new introduction |
+| `contact card changed, refusing: pinned card_hash=<hash>` | the stopped state |
+| `conversation ended: <cause>` | the end of the conversation before an exit |
+
+Card hashes appear only in the lines with card_hash. No line holds a key, a card, F, the text of a
+message or a node address.
+
+Exit codes: 0 on SIGTERM; 1 when the rebuild has failed for 10 min or on another failure; 2 when
+the flags do not pass the check; 3 when three circuits within 10 min ended in a refused reply. A
+changed card gives no exit.
 
 ## Circuit setup
 
@@ -914,6 +1101,8 @@ The first failure stops the check; every check after parsing has its own error:
   -fixed-chain the descriptor validity as well (with a drawn chain it stays out: the entry's own
   descriptor is the freshest in its mirror and would point at the entry), and one line with the
   number of verified and of listed nodes.
+- A -peer client differs: it logs no line per listed node, it logs refusals by class only, and a
+  failure on a rebuild does not stop it (section "Choice of the chain").
 - The onion key from the descriptor goes into circuit setup, the entry node's link key into
   link.Dial, and the identity key from the certificate of every node into both transcripts of
   that node. client.Dial refuses a node with an empty key or a key of the wrong size: an empty
@@ -1088,8 +1277,10 @@ finds by the label of their deployments (app=relay).
 - scripts/e2e.sh checks that a client asks its entry alone. It waits until two passes in a row
   show every relay with all its roster peers and unchanged counts of descriptor_requests, then
   runs the clients. Between two readings of the counters mirror_requests must have grown at one
-  relay per start of a client, first client-a and then the client with the foreign anchor, and
-  at no other relay; descriptor_requests of every relay must be what it was before the clients.
+  relay per start of a client, first client-a and client-b (their rebuilds go through the same
+  entry and add nothing, and at relay-5, their mailbox, it does not grow at all) and then the
+  client with the foreign anchor, and at no other relay; descriptor_requests of every relay must
+  be what it was before the clients.
 
 ### Key lifetime and revocation
 
@@ -1133,7 +1324,7 @@ those come from the nodes' agreement keys, which the CA never sees.
 
 | Source | Data |
 |---|---|
-| client | on the testbed (cmd/client), per message: the size of the reply and the round-trip time, or a line when no reply comes within 5 s; at the end of the circuit the line `circuit closed`, or `circuit closed: client: reply refused: <check>` with the class of the reply or frame the client refused, naming neither a node nor a cell number, or `send: <class>` with the class of a failed send (with -fixed-chain the error itself, which can name the entry address and the local port); at start the name, fingerprint and certificate validity of every listed node whose bundle it verified, in the listed order (with -fixed-chain the descriptor validity as well), how many of the listed nodes were verified, and the number of hops; with a drawn chain never which nodes form it. In the lab harness, per run: the round-trip time of every message whose echo came back, matched by flow and sequence number, the number of messages a constant-rate schedule dropped, the number left unanswered, the number of clients that refused a reply or a link frame, and per flow whether and when its circuit closed |
+| client | on the testbed the -peer clients: the lines of subsection "The -peer client", that is the round-trip time of every own message through the mailbox, every minute the state and the counters of the conversation, ends and rebuilds of the circuit by class only, the hashes of the own and of the pinned card, with no path, address, text or key. A client without -peer (cmd/client), per message: the size of the reply and the round-trip time, or a line when no reply comes within 5 s; at the end of the circuit the line `circuit closed`, or `circuit closed: client: reply refused: <check>` with the class of the reply or frame the client refused, naming neither a node nor a cell number, or `send: <class>` with the class of a failed send (with -fixed-chain the error itself, which can name the entry address and the local port); at start the name, fingerprint and certificate validity of every listed node whose bundle it verified, in the listed order (with -fixed-chain the descriptor validity as well), how many of the listed nodes were verified, and the number of hops; with a drawn chain never which nodes form it. In the lab harness, per run: the round-trip time of every message whose echo came back, matched by flow and sequence number, the number of messages a constant-rate schedule dropped, the number left unanswered, the number of clients that refused a reply or a link frame, and per flow whether and when its circuit closed |
 | relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests), the epoch of the onion key and the failed attempts to rotate it (onion_epoch, onion_rotate_failed). With -exit mailbox also the mailbox counters (section "End-to-end layer and mailbox"), on loopback on request only, not on stdout. No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, on every rotation of the onion key a line with the new epoch and no key material, on a failed rotation one line per kind of cause (pages not mapped, pages not locked, key not locked, key refused by the ring, other), a fixed class with no size and no text of the underlying error, with no new line while consecutive failures share the class and a line again for the first failure after a success, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified |
 | network | in the lab harness only, inside its process and without a packet capture: the moment every frame crosses the client-entry link and the last link between nodes, the one into the exit, in both directions. There is no link past the exit to observe yet ([#47](https://github.com/jimichi-org/jimichi/issues/47)) |
 | memory | planned: dumps of the relay process in the key extraction scenario ([#24](https://github.com/jimichi-org/jimichi/issues/24)); nothing takes a dump yet |
@@ -1161,6 +1352,8 @@ forged conversation with the assumption and the records in hex, without a byte o
 | internal/fetch | reading bundles and the mirror from an info port | pki |
 | relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
 | client | choice of the chain, send, receive, cover traffic | crypto, crypto/secmem, link, wire |
+| noise | the Noise-shaped handshake machine over CryptoProvider, only the KK pattern today | crypto, crypto/secmem |
+| e2e | the end-to-end layer: contact card, identity, KK session, hash ratchet, session recovery | crypto, crypto/secmem, noise, wire, pki |
 | mailbox | queue store at the exit, request and reply format | crypto |
 | conversation | a client's conversation with its contact: a request per tick, the window of puts, the sticky record, matching replies, epochs, rebuilding the circuit | crypto, crypto/secmem, e2e, mailbox |
 | vault | planned: client container with two volumes ([#20](https://github.com/jimichi-org/jimichi/issues/20)); an empty package today | nothing yet |
@@ -1169,14 +1362,14 @@ forged conversation with the assumption and the records in hex, without a byte o
 | lab/scenario | experiments that act on the system: a recipient forging a conversation of the end-to-end layer with the production session (Genuine, Forge, Verify, a recording and injecting provider wrapper), run by `cmd/lab -set deny` | crypto, crypto/secmem, e2e, noise |
 | lab/report | an empty package reserved for a report writer; today cmd/lab writes the reports | nothing yet |
 | web | planned: testbed dashboard ([#21](https://github.com/jimichi-org/jimichi/issues/21)); an empty package today | nothing yet |
-| cmd/relay, cmd/client, cmd/lab | entry points and configuration | the packages above |
-| cmd/jimichi | testbed CLI: certificate issuance | pki, crypto/suite, crypto/secmem |
+| cmd/relay, cmd/client, cmd/lab | entry points and configuration; cmd/client -peer with the admin port and the rebuild of the circuit | the packages above |
+| cmd/jimichi | testbed CLI: certificate issuance, the card of a key that is thrown away at once, and the hash of a card | pki, e2e, mailbox, crypto/suite, crypto/secmem |
 
 Rule: no package of the system knows about lab. The experiment harness depends on the system, not
-the other way round, and a test of lab reads the imports of every .go file of every other package
-of the module, tests included and whatever its build constraints (system, architecture, cgo,
-tags), and fails on an import of lab or cmd/lab. The seams lab/scenario uses
-are the ones production takes as well: a CryptoProvider and the noise.Static interface.
+the other way round, and a test of lab reads the imports of every .go file of every other package of
+the module, tests included and whatever its build constraints (system, architecture, cgo, tags), and
+fails on an import of lab or cmd/lab. The seams lab/scenario uses are the ones production takes as
+well: a CryptoProvider and the noise.Static interface.
 
 ## Client container
 
@@ -1199,9 +1392,24 @@ snapshots) are stated in LIMITATIONS.
 - deploy/kind: kind cluster configurations, cluster.yaml for the testbed (a control plane and two
   workers) and ci.yaml for CI (a single node).
 - deploy/base: the jimichi namespace, five relays (relay-1 to relay-5), each a Deployment with
-  its Service, and the client client-a, which lists all five and draws chains of three. There
-  are no volumes, the root filesystem is read-only, the user is 65532, seccomp is RuntimeDefault
-  and every capability is dropped; relays keep only IPC_LOCK for mlock.
+  its Service and with -exit mailbox, and two -peer clients, client-a and client-b, which list all
+  five, keep their queues on the mailbox of relay-5 and draw chains of three that end on it.
+  client-a sends a message every 2 s, client-b answers each (-respond). The mailbox counters of
+  the other relays stay at zero, which scripts/e2e.sh checks. There are no volumes, the root
+  filesystem is read-only, the user is 65532, seccomp is RuntimeDefault and every capability is
+  dropped; relays and clients keep only IPC_LOCK for mlock.
+- The clients are deployed with the Recreate strategy and the selector `{app: client, client:
+  a|b}`: every pod is a new identity, so there are never two pods of one client. The selector of a
+  Deployment cannot change, so `make deploy` deletes a client-a with the old selector `{app:
+  client}` before it applies the manifest, and scripts/e2e.sh deletes both clients first.
+- scripts/introduce.sh introduces the clients: with RESTART=yes (the default) it restarts both,
+  reads from the log of the current container of each exactly one card_hash= line, waits for the
+  admin listening line, takes the cards from GET /card through port-forwards to the local ports
+  19401 and 19402, checks the hash of each (`jimichi card-hash`) against the log line of the same
+  container, delivers each with PUT /contact to the other client, waits 10 s for the contact pinned
+  lines and checks that neither container restarted meanwhile. Any failure starts the attempt over
+  with a restart, and after three it exits 1. A restart of either client is a new identity, so
+  enroll, deploy, start and e2e.sh run the introduction themselves.
 - The manifests hold no Secret at all: node keys are created in process memory and a node stores
   them nowhere else, in no Secret, volume or file. Only the secmem buffers are locked: the copies
   the libraries keep on the heap are not, and whether those reach swap depends on the host
@@ -1222,7 +1430,8 @@ snapshots) are stated in LIMITATIONS.
   development host whose plugin does not enforce it, such as kindnet under WSL2.
 - The scripts (enroll, e2e, stats, redeploy) take the relays from the deployments labelled
   app=relay, so the manifest alone sets how many there are. The hop label only tells the relays
-  apart: any relay takes any place in a chain.
+  apart: any relay takes any place in a chain, and the clients of the testbed pin their exit to
+  relay-5.
 - Each relay Service exposes the cell port 9000 and the info port 9100. A client uses both ports
   of its entry only; nodes use the info port of every roster node for the peer descriptors and
   the cell port of the next node of a circuit.

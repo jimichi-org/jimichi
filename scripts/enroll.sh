@@ -31,24 +31,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# kubectl prints one line per local port once it listens; waiting for them
-# keeps enroll from racing the forward
-wait_forward() {
-  local pid="$1" log="$2"
-  shift 2
-  for _ in $(seq 1 150); do
-    kill -0 "$pid" 2>/dev/null || { echo "port-forward $(basename "$log" .log) exited" >&2; return 1; }
-    local ready=yes
-    for port in "$@"; do
-      grep -q "Forwarding from 127.0.0.1:$port " "$log" || ready=""
-    done
-    [ -n "$ready" ] && return 0
-    sleep 0.1
-  done
-  echo "port-forward $(basename "$log" .log) did not come up" >&2
-  return 1
-}
-
 # the pin comes from the relay's own log, read through the kube API, so a
 # request signed by any other key is refused however it reaches the forwarded
 # port; the relay prints the line once, before it serves, so anything but one
@@ -113,7 +95,18 @@ kubectl -n "$NAMESPACE" create configmap jimichi-ca --from-literal=anchor="$anch
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 echo "anchor $anchor"
 
-# a client keeps the anchor it started with, so it restarts onto the new one
-if kubectl -n "$NAMESPACE" get deployment client-a >/dev/null 2>&1; then
-  kubectl -n "$NAMESPACE" rollout restart deployment/client-a >/dev/null
+# a client keeps the anchor it started with, so it restarts onto the new one;
+# a restarted client is a new identity, so the two are introduced again
+clients=$(kubectl -n "$NAMESPACE" get deployment -l app=client -o name)
+if [ -n "$clients" ]; then
+  # the forwards to the relays go first: the introduction forwards the clients
+  for pid in "${forwards[@]}"; do kill "$pid" 2>/dev/null || true; done
+  forwards=()
+  kubectl -n "$NAMESPACE" rollout restart deployment -l app=client >/dev/null
+  for deploy in $clients; do
+    kubectl -n "$NAMESPACE" rollout status "$deploy" --timeout=180s >/dev/null
+  done
+  if peers_deployed; then
+    JIMICHI="$jimichi" RESTART=no bash "$(dirname "$0")/introduce.sh"
+  fi
 fi

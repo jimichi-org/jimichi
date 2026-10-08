@@ -5,6 +5,7 @@
 !go.sum
 !client
 !cmd
+!conversation
 !crypto
 !e2e
 !internal

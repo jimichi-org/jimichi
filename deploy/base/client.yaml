@@ -1,16 +1,22 @@
+# two clients in a conversation through the mailbox of relay-5: client-a sends
+# a message every 2 s, client-b answers each. Each pod is a new identity that
+# scripts/introduce.sh pins at the other, so a rollout never runs two pods of
+# one client, and the selector names the client: a selector cannot change, and
+# the deployment of client-a from before client-b goes first (Makefile, e2e.sh)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: client-a
   namespace: jimichi
-  labels: {app: client}
+  labels: {app: client, client: a}
 spec:
   replicas: 1
+  strategy: {type: Recreate}
   selector:
-    matchLabels: {app: client}
+    matchLabels: {app: client, client: a}
   template:
     metadata:
-      labels: {app: client}
+      labels: {app: client, client: a}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -26,6 +32,7 @@ spec:
             - name: JIMICHI_CA
               valueFrom:
                 configMapKeyRef: {name: jimichi-ca, key: anchor}
+          # the admin port 127.0.0.1:9201 is reached only through a port-forward
           args:
             - "-ca"
             - "$(JIMICHI_CA)"
@@ -33,19 +40,78 @@ spec:
             - "relay-1.jimichi.svc.cluster.local:9000,relay-2.jimichi.svc.cluster.local:9000,relay-3.jimichi.svc.cluster.local:9000,relay-4.jimichi.svc.cluster.local:9000,relay-5.jimichi.svc.cluster.local:9000"
             - "-hops"
             - "3"
-            - "-count"
-            - "0"
-            - "-interval"
-            - "2s"
             - "-mode"
             - "fixed"
             - "-rate"
             - "200ms"
+            - "-peer"
+            - "-mailbox"
+            - "relay-5.jimichi.svc.cluster.local:9000"
+            - "-count"
+            - "0"
+            - "-interval"
+            - "2s"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+              add: ["IPC_LOCK"]
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-b
+  namespace: jimichi
+  labels: {app: client, client: b}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: client, client: b}
+  template:
+    metadata:
+      labels: {app: client, client: b}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: client
+          image: jimichi/client:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JIMICHI_CA
+              valueFrom:
+                configMapKeyRef: {name: jimichi-ca, key: anchor}
+          args:
+            - "-ca"
+            - "$(JIMICHI_CA)"
+            - "-nodes"
+            - "relay-1.jimichi.svc.cluster.local:9000,relay-2.jimichi.svc.cluster.local:9000,relay-3.jimichi.svc.cluster.local:9000,relay-4.jimichi.svc.cluster.local:9000,relay-5.jimichi.svc.cluster.local:9000"
+            - "-hops"
+            - "3"
+            - "-mode"
+            - "fixed"
+            - "-rate"
+            - "200ms"
+            - "-peer"
+            - "-mailbox"
+            - "relay-5.jimichi.svc.cluster.local:9000"
+            - "-respond"
+            - "-interval"
+            - "0"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["IPC_LOCK"]
           resources:
             requests: {cpu: 50m, memory: 32Mi}
             limits: {cpu: 500m, memory: 128Mi}

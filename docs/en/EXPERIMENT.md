@@ -30,7 +30,7 @@ planned, see the status of each block; A2 has no block of its own yet.
 
 | Code | Adversary | What it sees and can do |
 |---|---|---|
-| A1 | Passive on both sides | timestamps and packet sizes on the client-to-entry and exit-to-recipient links. There is no recipient yet ([#18](https://github.com/jimichi-org/jimichi/issues/18), [#47](https://github.com/jimichi-org/jimichi/issues/47)): the lab observer takes the link into the last node as the far side, and the last node echoes the message back |
+| A1 | Passive on both sides | timestamps and packet sizes on the client-to-entry and exit-to-recipient links. A recipient client exists (the -peer client through a mailbox, ARCHITECTURE), but block 1 still measures the echo topology: the lab observer takes the link into the last node as the far side, and the last node echoes the message back. Measuring the topology of a conversation, two entries and the mailbox, is planned ([#47](https://github.com/jimichi-org/jimichi/issues/47)) |
 | A2 | Passive on one side | the same, but only at the entry |
 | A3 | Active network | delays, duplicates and drops cells, embeds a timing watermark in a flow |
 | A4 | Node compromise | full access to some of the nodes, including process memory: one or two of the three nodes of a chain, k of the N nodes a client draws its chains from |
@@ -260,6 +260,24 @@ and lose the exit. With -withhold 1 nothing is refused, 1/20 of the attempts fai
 of the chains that come up 1/19 have a rogue entry and exit and 15/19 a rogue node. The tests
 enumerate the chains of these cases as well.
 
+A -peer client draws its chain otherwise: the exit is pinned to the mailbox, the entry is drawn
+among the other N - 1 nodes and the middle hops among the rest (ARCHITECTURE, "Choice of the
+chain"). The paths set models a random exit, so for a pinned exit the values are worked out by
+hand, for N = 5, k = 2, h = 3 and full mirrors:
+
+| Mailbox | Both ends rogue | At least one rogue node |
+|---|---|---|
+| honest | 0: the exit is honest | 1 - 2/4 x 1/3 = 5/6: both the entry (2 of 4) and the middle hop (1 of 3) honest |
+| rogue | (k - 1)/(N - 1) = 1/4: the entry is the other rogue node | 1 |
+
+A rogue entry that leaves one honest middle hop out of its mirror and closes the circuits with an
+honest middle hop gets its colluder as the middle hop with probability 7/8 under an honest
+mailbox: a -peer client draws its middle hops at most three times per process (LIMITATIONS). A
+rogue mailbox that leaves the requests through an honest middle hop unanswered gets its colluder
+as the middle hop with probability 19/27 under an honest entry, and so learns the entry.
+Measuring these cases in the lab is planned
+([#117](https://github.com/jimichi-org/jimichi/issues/117)).
+
 The correlation series of block 1 run with as many nodes as hops, in an order the harness sets
 itself: the choice of the chain does not enter them. The harness starts the nodes and the clients
 inside one process and connects them over loopback, not in the cluster, so there is no network
@@ -271,8 +289,9 @@ message.
 
 Status: planned, not implemented ([#24](https://github.com/jimichi-org/jimichi/issues/24)). The
 measures are switched by the -keymem and -harden flags of the node and the client; the scenarios
-with memory dumps, the search on disk and the recording of setup cells do not exist yet. The
-client row waits for the container ([#20](https://github.com/jimichi-org/jimichi/issues/20)).
+with memory dumps, the search on disk and the recording of setup cells do not exist yet. The row
+of the client container waits for the container
+([#20](https://github.com/jimichi-org/jimichi/issues/20)).
 
 | Scenario | Metric |
 |---|---|
@@ -280,6 +299,8 @@ client row waits for the container ([#20](https://github.com/jimichi-org/jimichi
 | Dump after the session | key lifetime window in seconds |
 | Search on disk and in the image | found or not |
 | Node key theft at a given age of the recorded setup cells | fraction of recorded setups whose layer opens, against the time from the recording to the theft, with and without onion key rotation |
+| Memory dump of a -peer client during a conversation | extraction success rate of the identity key, the ratchet chains and the fetch capability F, with and without the measures |
+| Dump of a -peer client after the keys moved on | whether a record key is found after its record opened and a previous chain key after a ratchet step |
 | Client | whether the volume key is still in memory after the container is closed |
 
 ### Block 5. Client container, adversaries A5 and A6

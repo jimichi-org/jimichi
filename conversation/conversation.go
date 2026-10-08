@@ -276,7 +276,7 @@ func newConversation(cfg Config) (*Conversation, error) {
 	if cfg.Keepalive >= cfg.StaleAfter {
 		return nil, fmt.Errorf("conversation: keepalive %v not below the stale bound %v", cfg.Keepalive, cfg.StaleAfter)
 	}
-	if cfg.ReplyTimeout/cfg.Rate >= replyBuffer-1 {
+	if cfg.Rate < MinRate(cfg.ReplyTimeout) {
 		return nil, fmt.Errorf("conversation: a reply timeout of %v holds more than %d requests in flight", cfg.ReplyTimeout, replyBuffer-1)
 	}
 
@@ -299,6 +299,12 @@ func newConversation(cfg Config) (*Conversation, error) {
 		done:       make(chan struct{}),
 		messages:   make(chan []byte, cfg.Inbox),
 	}, nil
+}
+
+// MinRate is the shortest request period a reply timeout allows: the requests
+// sent while the oldest waits for its reply must fit the buffer of replies
+func MinRate(replyTimeout time.Duration) time.Duration {
+	return replyTimeout/(replyBuffer-1) + 1
 }
 
 func pick[T int | time.Duration](v, def T) T {

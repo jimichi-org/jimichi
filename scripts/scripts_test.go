@@ -15,12 +15,21 @@ import (
 )
 
 // answers the one request the scripts make before they check the number of
-// relays, the list of relay deployments, and records every call
+// relays, the list of relay deployments, and records every call; the client
+// deployments exist as CLIENT_A and CLIENT_B say, and client-a selects the
+// label client=CLIENT_A_SELECTOR
 const kubectlStandIn = `#!/usr/bin/env bash
 echo "$*" >>"$KUBECTL_CALLS"
 case "$*" in
   *"get deployment -l app=relay"*)
     for i in $(seq 1 "$RELAY_COUNT"); do echo "relay-$i"; done ;;
+  *"get deployment client-a -o jsonpath"*)
+    [ -n "${CLIENT_A:-}" ] || exit 1
+    printf '%s' "${CLIENT_A_SELECTOR:-}" ;;
+  *"get deployment client-a"*)
+    [ -n "${CLIENT_A:-}" ] || exit 1 ;;
+  *"get deployment client-b"*)
+    [ -n "${CLIENT_B:-}" ] || exit 1 ;;
 esac
 `
 
@@ -59,6 +68,11 @@ func script(t *testing.T, name string) string {
 // testbed holding the given number of relays
 func run(t *testing.T, relays int, args ...string) (status int, stderr, calls string) {
 	t.Helper()
+	return runEnv(t, relays, nil, args...)
+}
+
+func runEnv(t *testing.T, relays int, env []string, args ...string) (status int, stderr, calls string) {
+	t.Helper()
 	shell := bash(t)
 	bin, work := t.TempDir(), t.TempDir()
 	for name, text := range map[string]string{"kubectl": kubectlStandIn, "go": goStandIn} {
@@ -74,6 +88,7 @@ func run(t *testing.T, relays int, args ...string) (status int, stderr, calls st
 		"KUBECTL_CALLS="+filepath.ToSlash(log),
 		"RELAY_COUNT="+strconv.Itoa(relays),
 	)
+	cmd.Env = append(cmd.Env, env...)
 	var errOut bytes.Buffer
 	cmd.Stderr = &errOut
 	err := cmd.Run()
@@ -111,6 +126,36 @@ func TestPortsFitUpToNinetyNineRelays(t *testing.T) {
 		status, stderr, _ := run(t, c.relays, "-c", check, "bash", script(t, "lib.sh"))
 		if status != c.status || (c.status != 0) != strings.Contains(stderr, "more than 99 relays") {
 			t.Errorf("%d relays: status %d, stderr %q; want status %d", c.relays, status, stderr, c.status)
+		}
+	}
+}
+
+// the selector of a deployment cannot change: a client-a that selects only
+// app=client is deleted before the manifest of two clients is applied, one
+// that selects client=a stays, and the two count as deployed only together
+func TestOldClientGoesBeforeTheTwoClients(t *testing.T) {
+	check := `. "$1"; drop_old_client; if peers_deployed; then echo deployed >&2; fi`
+	for _, c := range []struct {
+		name     string
+		env      []string
+		deleted  bool
+		deployed bool
+	}{
+		{"no clients", nil, false, false},
+		{"the old client-a", []string{"CLIENT_A=yes"}, true, false},
+		{"the old client-a and a client-b", []string{"CLIENT_A=yes", "CLIENT_B=yes"}, true, false},
+		{"the new client-a alone", []string{"CLIENT_A=yes", "CLIENT_A_SELECTOR=a"}, false, false},
+		{"both new clients", []string{"CLIENT_A=yes", "CLIENT_A_SELECTOR=a", "CLIENT_B=yes"}, false, true},
+	} {
+		status, stderr, calls := runEnv(t, 5, c.env, "-c", check, "bash", script(t, "lib.sh"))
+		if status != 0 {
+			t.Fatalf("%s: status %d, stderr %q", c.name, status, stderr)
+		}
+		if deleted := strings.Contains(calls, "delete deployment client-a"); deleted != c.deleted {
+			t.Errorf("%s: deleted %v, want %v:\n%s", c.name, deleted, c.deleted, calls)
+		}
+		if deployed := strings.Contains(stderr, "deployed"); deployed != c.deployed {
+			t.Errorf("%s: deployed %v, want %v", c.name, deployed, c.deployed)
 		}
 	}
 }
