@@ -186,10 +186,12 @@ English | [Русский](../ru/LIMITATIONS.md)
   lost confirming record (the initiator's first record after kk2) the responder sends no real
   message until the initiator's next record opens, without cover puts until the initiator's next
   message or its keepalive, up to 30 s. The responder has no way to ask for that record.
-- There are no guard nodes: every circuit draws a fresh entry. One chain has a rogue entry and a
-  rogue exit with probability p = k(k-1)/(N(N-1)), 0.1 for two rogue nodes of five (EXPERIMENT,
-  block 3). Over c circuits with chains drawn independently the chance that at least one had
-  both is 1 - (1 - p)^c, which grows towards one with every restart of the client.
+- There are no guard nodes: a client without -peer draws a fresh entry for every circuit, a -peer
+  client one for every process (its rebuilds go through the same entry). One chain has a rogue
+  entry and a rogue exit with probability p = k(k-1)/(N(N-1)), 0.1 for two rogue nodes of five
+  (EXPERIMENT, block 3). Over c independent draws (circuits, or processes for a -peer client) the
+  chance that at least one had both is 1 - (1 - p)^c, which grows towards one with every restart
+  of the client.
 - A node keeps a peer's descriptor until it expires. After a peer restarts, the mirror serves its
   previous bundle for up to the descriptor lifetime (20 min), and circuits through that peer fail
   at setup: the new process holds another link key and does not pass the link handshake. A

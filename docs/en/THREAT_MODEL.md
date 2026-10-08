@@ -89,9 +89,12 @@ conversation, not measured:
   circuit together with the binding of a circuit to the sender's address (through the entry or a
   correlation attack) is a witnessed transcript, and the simulation does not cover it.
 - Nothing to surrender after the session: keys are ephemeral, their buffers are zeroed, and a node
-  writes no key to disk. The copies libraries leave on the heap are not locked and on a host with
-  swap can be paged out to disk before that memory is reused (LIMITATIONS). How long those copies
-  survive is to be measured, not assumed ([#24](https://github.com/jimichi-org/jimichi/issues/24));
+  writes no key to disk. A -peer client holds its identity key, F and the current chains until its
+  process ends; surrendering them opens only future handshakes and future records (the row on
+  coercion after the session). The copies libraries leave on the heap are not locked and on a
+  host with swap can be paged out to disk before that memory is reused (LIMITATIONS). How long
+  those copies survive is to be measured, not assumed
+  ([#24](https://github.com/jimichi-org/jimichi/issues/24));
   locking all process memory is planned ([#36](https://github.com/jimichi-org/jimichi/issues/36)).
 
 Not claimed for authentication: online deniability, that is against a judge acting together with
