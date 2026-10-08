@@ -170,6 +170,9 @@ func TestRosterEndpointRules(t *testing.T) {
 	other := pki.Roster{Anchor: c.ca.Anchor(), Nodes: []pki.RosterNode{
 		{Name: "relay-1", Addr: addrOf("relay-2")}, {Name: "relay-2", Addr: addrOf("relay-1")},
 	}}.Marshal()
+	ownHost := pki.Roster{Anchor: c.ca.Anchor(), Nodes: []pki.RosterNode{
+		{Name: "relay-1", Addr: addrOf("relay-1")}, {Name: "relay-2", Addr: "relay-1.jimichi.svc.cluster.local:9001"},
+	}}.Marshal()
 	for _, tc := range []struct {
 		name string
 		raw  []byte
@@ -183,6 +186,7 @@ func TestRosterEndpointRules(t *testing.T) {
 		{"anchor of another suite", rosterOf(newCA(t, gost).Anchor(), "relay-1", "relay-2", "relay-3"), http.StatusBadRequest, pki.ErrSuite.Error()},
 		{"this node missing", rosterOf(c.ca.Anchor(), "relay-2", "relay-3"), http.StatusBadRequest, errRosterSelf.Error()},
 		{"this node's name with another address", other, http.StatusBadRequest, errRosterSelf.Error()},
+		{"a peer on this node's host under another port", ownHost, http.StatusBadRequest, pki.ErrDuplicate.Error()},
 	} {
 		if code, body := f.putRoster(t, tc.raw); code != tc.code || !strings.Contains(body, tc.want) {
 			t.Errorf("%s: PUT /roster = %d %q, want %d with %q", tc.name, code, body, tc.code, tc.want)
@@ -639,6 +643,8 @@ func TestPeerFlags(t *testing.T) {
 		{"bad peer address", false, a1, "9100", []string{"relay-2"}, false},
 		{"peer repeated", false, a1, "9100", []string{a2, a2}, false},
 		{"itself among the peers", false, a1, "9100", []string{a2, a1}, false},
+		{"peer on its own host", false, a1, "9100", []string{a2, "relay-1.jimichi.svc.cluster.local:9001"}, false},
+		{"two peers on one host", false, a1, "9100", []string{a2, "relay-2.jimichi.svc.cluster.local:9001"}, false},
 	} {
 		err := checkPeerFlags(c.auth, c.advertise, c.port, c.peers)
 		if (err == nil) != c.ok {
