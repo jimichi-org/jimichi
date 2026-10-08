@@ -5,6 +5,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,7 +180,7 @@ func (r *relayNet) report() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "relay period %v, rate %v, round trip %v, build %v", r.period, r.rate, r.roundTrip, r.build)
 	for _, lp := range r.peers {
-		fmt.Fprintf(&b, "\n%s: %+v", lp.name, lp.c.Stats())
+		fmt.Fprintf(&b, "\n%s: %d requests in flight at most, %+v", lp.name, lp.peak.Load(), lp.c.Stats())
 	}
 	fmt.Fprintf(&b, "\nmailbox: %+v", r.store.Stats())
 	return b.String()
@@ -190,10 +191,56 @@ type livePeer struct {
 	party party
 	r     *relayNet
 	c     *Conversation
+	// the most requests sent on one circuit and not yet answered
+	peak atomic.Int64
 
 	mu     sync.Mutex
-	circs  []*client.Client
+	circs  []*countedCircuit
 	events []Event
+}
+
+// a circuit that counts its requests and the replies that came back
+type countedCircuit struct {
+	*client.Client
+	peak           *atomic.Int64
+	sent, answered atomic.Int64
+	replies        chan []byte
+	done           chan struct{}
+	closeOnce      sync.Once
+}
+
+func counted(cl *client.Client, peak *atomic.Int64) *countedCircuit {
+	cc := &countedCircuit{Client: cl, peak: peak, replies: make(chan []byte, cap(cl.Replies())), done: make(chan struct{})}
+	go cc.forward()
+	return cc
+}
+
+func (cc *countedCircuit) forward() {
+	defer close(cc.replies)
+	for b := range cc.Client.Replies() {
+		cc.answered.Add(1)
+		select {
+		case cc.replies <- b:
+		case <-cc.done:
+		}
+	}
+}
+
+func (cc *countedCircuit) Send(b []byte) error {
+	n := cc.sent.Add(1) - cc.answered.Load()
+	for p := cc.peak.Load(); n > p; p = cc.peak.Load() {
+		if cc.peak.CompareAndSwap(p, n) {
+			break
+		}
+	}
+	return cc.Client.Send(b)
+}
+
+func (cc *countedCircuit) Replies() <-chan []byte { return cc.replies }
+
+func (cc *countedCircuit) Close() error {
+	cc.closeOnce.Do(func() { close(cc.done) })
+	return cc.Client.Close()
 }
 
 func (r *relayNet) join(t *testing.T, name string, pt party, change func(*Config)) *livePeer {
@@ -240,13 +287,14 @@ func (lp *livePeer) dial() (Circuit, error) {
 	if err != nil {
 		return nil, err
 	}
+	cc := counted(cl, &lp.peak)
 	lp.mu.Lock()
-	lp.circs = append(lp.circs, cl)
+	lp.circs = append(lp.circs, cc)
 	lp.mu.Unlock()
-	return cl, nil
+	return cc, nil
 }
 
-func (lp *livePeer) current() *client.Client {
+func (lp *livePeer) current() *countedCircuit {
 	lp.mu.Lock()
 	defer lp.mu.Unlock()
 	return lp.circs[len(lp.circs)-1]
@@ -282,8 +330,8 @@ func (lp *livePeer) send(t *testing.T, body string) {
 // and without: the round trip needs the initiator's first record after kk2.
 // Then the circuit of the initiator is closed under it, and the conversation
 // goes on over a rebuilt one with the same session. X25519 runs over paced
-// relays with several requests in flight, GOST over relays that forward at
-// once at a rate of several round trips
+// relays and must have kept two requests or more in flight on each side, GOST
+// over relays that forward at once at a rate of several round trips
 func TestConversationOverRelays(t *testing.T) {
 	for _, s := range []struct {
 		suite  jcrypto.Suite
@@ -343,6 +391,13 @@ func conversationOverRelays(t *testing.T, p jcrypto.CryptoProvider, period time.
 	ini.expect(t, "after", r.legs(1)+rebuilt)
 	ini.send(t, "again")
 	resp.expect(t, "again", r.legs(1))
+	if period > 0 {
+		for _, lp := range []*livePeer{ini, resp} {
+			if lp.peak.Load() < 2 {
+				t.Fatalf("%s kept no two requests in flight over paced relays\n%s", lp.name, r.report())
+			}
+		}
+	}
 
 	st := ini.c.Stats()
 	ini.mu.Lock()
