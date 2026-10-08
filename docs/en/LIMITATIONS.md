@@ -42,11 +42,18 @@ English | [Русский](../ru/LIMITATIONS.md)
   often, the node's queue fills up and the circuit closes, since the node cannot lose a cell of a
   circuit. With equal or longer periods a missed tick can never be caught up, and the queue fills
   up sooner or later. The testbed gives nodes a period 5% shorter than the client's.
-- Delivery is not guaranteed. At a constant rate the client queues at most 256 messages and drops
-  a new one without an error when the queue is full, counting it only; a message in the queue or
-  on the way is lost when its circuit closes. Nothing acknowledges or resends a message, and a
-  reply is dropped when the application has 64 of them unread. A reply the exit did not send
-  cannot be told from a delayed one by the client.
+- Delivery is not guaranteed. At a constant rate a client without -peer queues at most 256 messages
+  and drops a new one without an error when the queue is full, counting it only; a message in the
+  queue or on the way is lost when its circuit closes. Nothing acknowledges or resends a message,
+  and a reply is dropped when the application has 64 of them unread. A reply the exit did not send
+  cannot be told from a delayed one by the client. A -peer client gives no reliable delivery either:
+  a refused put (10 or 11) only delays a real message: its body goes back to the outbox and is
+  sealed again, and a sticky record is put again as it is, but a record the mailbox has stored is
+  not put again, so a real message is lost with it when its lifetime at the mailbox runs out, its
+  queue is evicted, it is lost in a fetch reply or it falls outside the window after a gap, and it
+  is dropped when the queue of received messages is full; a body whose put has an unknown outcome is
+  sent again, so a duplicate is possible, and the order of messages is not kept across refusals.
+  Delivery acknowledgements are planned ([#84](https://github.com/jimichi-org/jimichi/issues/84)).
 - Any break in the counter order closes the circuit. A neighbouring node can cause one with a
   single cell. One reply that fails a check at the client does the same, and any node of the
   chain can cause it: the client tolerates no such reply and keeps no count across restarts. A
@@ -91,16 +98,17 @@ English | [Русский](../ru/LIMITATIONS.md)
   with the authenticated configuration. The lab harness works without certificates as well: its
   nodes have no roster, the links between them are anonymous, and its clients get the node keys
   from the harness.
-- The entry serves the bundles of the listed nodes it holds. It cannot alter them, since an
-  altered bundle fails the check and counts as left out, but it can withhold the mirror: the
-  client then exits and draws another entry at its next start. It can also leave out up to
-  -missing listed nodes (one by default), and the chain is then drawn among the rest; a listed
-  bundle that fails the check counts against the same bound. On the testbed (five nodes, chains
-  of three, two rogue nodes) both ends of a chain are rogue with probability 2/5 x 1/4 = 0.1 when
-  no node is left out, and 2/5 x 1/3 = 2/15 when a rogue entry leaves out one honest node: the
-  exit is then drawn among three nodes, one of them rogue. Both values are computed and sampled
-  (EXPERIMENT, block 3). The entry also sees when a client prepares a circuit: the request for
-  the descriptors precedes the setup.
+- The entry serves the bundles of the listed nodes it holds. It cannot alter them, since an altered
+  bundle fails the check and counts as left out, but it can withhold the mirror: the client then
+  exits and draws another entry at its next start; a -peer client does so only before its first
+  circuit, and on a rebuild it asks the same entry again until it exits after 10 min (ARCHITECTURE,
+  "Choice of the chain"). It can also leave out up to -missing listed nodes (one by default), and
+  the chain is then drawn among the rest; a listed bundle that fails the check counts against the
+  same bound. On the testbed (five nodes, chains of three, two rogue nodes) both ends of a chain are
+  rogue with probability 2/5 x 1/4 = 0.1 when no node is left out, and 2/5 x 1/3 = 2/15 when a rogue
+  entry leaves out one honest node: the exit is then drawn among three nodes, one of them rogue.
+  Both values are computed and sampled (EXPERIMENT, block 3). The entry also sees when a client
+  prepares a circuit: the request for the descriptors precedes the setup.
 - A node that withholds its descriptor from the others removes itself from their mirrors, and
   they extend no circuit to it. When more nodes do so than -missing allows, the mirrors of honest
   nodes no longer satisfy a client and only the mirrors of the withholding nodes do: with two
@@ -116,18 +124,52 @@ English | [Русский](../ru/LIMITATIONS.md)
 - The node list of a client is static: there is no node discovery and no directory. The setup
   cell bounds a chain at four hops on c25519 and three on GOST. The roster a node accepts bounds
   the network: 4 KiB hold 58 nodes of the testbed address form on c25519 and 57 on GOST.
-- A node that refuses or breaks the circuits it does not like decides which chains survive: the
-  client exits on a failure, draws a new chain at its next start and keeps no account of
-  failures, so rogue nodes can raise the share of surviving chains that run through them. This
-  selective denial of service is neither prevented nor measured.
-- The conversation driver (ARCHITECTURE, subsection "Conversation"), which the -peer client is to
-  use ([#18](https://github.com/jimichi-org/jimichi/issues/18)), does not exit when a circuit
-  ends: it builds a new one through the same entry, from a fresh mirror of that entry, with new
-  middle hops to the same mailbox, and bounds only the replies the client refuses. A rogue entry
-  can close, as the far side, every circuit whose middle hops are honest, and leave different
-  honest nodes out of each mirror within -missing: over the rebuilds the middle hops come to be
-  rogue, and with them the entry learns which mailbox the client uses. Closes by the far side and
-  reply timeouts count toward no bound.
+- A node that refuses or breaks the circuits it does not like decides which chains survive: a
+  client without -peer exits on a failure, draws a new chain at its next start and keeps no
+  account of failures, so rogue nodes can raise the share of surviving chains that run through
+  them. This selective denial of service is neither prevented nor measured.
+- A -peer client does not exit when a circuit ends but rebuilds it through the same entry from a
+  fresh mirror of that entry (ARCHITECTURE, "Choice of the chain"): first the same chain, and new
+  middle hops only when that chain cannot be dialled (the mirror lacks one of its nodes, the
+  connection to the entry fails, or two circuits in a row through it ended before the first
+  reply), at most 2 times per process; after that it dials its last chain again and again. A
+  close by the far side, a reply timeout, a refused reply and a failed setup all fall under the
+  one rule. So a rogue entry that closes every circuit with an honest middle hop before the first
+  reply, or refuses it at setup, gets at most 3 draws of the middle hop per process: the first
+  and two more.
+  Past that it can only stall the conversation, which it can do anyway. The bound on the testbed
+  (five nodes, chains of three, the mailbox on relay-5, two rogue nodes among the other four,
+  -missing 1), with an honest mailbox:
+  - the entry is rogue with probability 2/4 = 1/2;
+  - such an entry leaves one of the three possible middle hops, an honest one, out of its mirror,
+    so every draw is between its colluder and one honest middle hop, 1/2 each;
+  - the colluder ends up as the middle hop with probability 1 - (1/2)^3 = 7/8 under a rogue entry
+    and 1/2 x 7/8 = 7/16, about 0.44, overall;
+  - for comparison: a single draw without a rebuild gives 1/2 and 1/4, a full mirror 1/3 and 1/6,
+    and without the bound on rebuilds the entry would get its colluder with probability 1 and
+    1/2.
+
+  The value 7/8 is checked by enumerating every outcome of the draws (a cmd/client test). With the
+  middle hop the entry learns which mailbox the client uses.
+
+  The far side drives the redraws as well: a rogue mailbox, or an active attacker on the links of
+  the chain, leaves every request through an honest middle hop unanswered, and two silent circuits
+  in a row count as a chain that cannot be dialled. With a rogue mailbox and an honest entry (the
+  mailbox and one other node rogue, k = 2; 3/4 on the testbed) every draw is among the three other
+  nodes of a full mirror, the colluder one of them, so the colluder becomes the middle hop with
+  probability 1 - (2/3)^3 = 19/27 per process instead of 1/3, and 3/4 x 19/27 = 19/36, about 0.53,
+  instead of 1/4 overall. The middle hop sees the entry, so the rogue mailbox learns the entry node
+  of its client. The value 19/27 is checked by enumeration as well. With a rogue mailbox and a rogue
+  entry the middle hop is always honest.
+
+  A process that cannot build a circuit for 10 min exits with code 1, and the new process draws a
+  new entry, but also a new identity that has to be introduced again. The bound holds per
+  process: a long-lived client changes its middle hops at most 2 times, even when an honest
+  middle hop has gone for good. Across processes it bounds nothing: a rogue node that stalls the
+  conversation for 10 min makes the client exit, the restarted client draws with a fresh budget,
+  and every introduction after such a restart keeps the pairs whose chains survived. Which
+  processes survive is the same unmeasured selective denial of service as for a client without
+  -peer.
 - With cover puts (CoverPuts) each side of a conversation puts one record into the peer's queue
   and fetches one from its own on every tick, so nothing works off a backlog: every tick on which
   a side does not fetch (a rebuild of its circuit, a pause or a missed tick of its process) leaves
@@ -144,10 +186,12 @@ English | [Русский](../ru/LIMITATIONS.md)
   lost confirming record (the initiator's first record after kk2) the responder sends no real
   message until the initiator's next record opens, without cover puts until the initiator's next
   message or its keepalive, up to 30 s. The responder has no way to ask for that record.
-- There are no guard nodes: every circuit draws a fresh entry. One chain has a rogue entry and a
-  rogue exit with probability p = k(k-1)/(N(N-1)), 0.1 for two rogue nodes of five (EXPERIMENT,
-  block 3). Over c circuits with chains drawn independently the chance that at least one had
-  both is 1 - (1 - p)^c, which grows towards one with every restart of the client.
+- There are no guard nodes: a client without -peer draws a fresh entry for every circuit, a -peer
+  client one for every process (its rebuilds go through the same entry). One chain has a rogue
+  entry and a rogue exit with probability p = k(k-1)/(N(N-1)), 0.1 for two rogue nodes of five
+  (EXPERIMENT, block 3). Over c independent draws (circuits, or processes for a -peer client) the
+  chance that at least one had both is 1 - (1 - p)^c, which grows towards one with every restart
+  of the client.
 - A node keeps a peer's descriptor until it expires. After a peer restarts, the mirror serves its
   previous bundle for up to the descriptor lifetime (20 min), and circuits through that peer fail
   at setup: the new process holds another link key and does not pass the link handshake. A
@@ -176,18 +220,64 @@ English | [Русский](../ru/LIMITATIONS.md)
 - Every circuit runs over a connection of its own, and a second setup on a link that already
   carries a circuit is dropped. Otherwise a second timer on the same link would double its frame
   rate and give away the number of circuits.
-- There is no isolation per contact. A client holds one circuit, one send queue and one schedule,
-  and everything it sends goes through them; the code has no notion of a contact. With several
-  contacts all of them would share one chain and one exit. Circuits and queues per contact are
-  planned ([#96](https://github.com/jimichi-org/jimichi/issues/96)).
-- Without own-clock sending the exit's reply leaves after the message is delivered, and at once for
-  a cover cell. The delivery time enters the moment of the reply; on the testbed delivery is an
-  echo taking microseconds, a real recipient would make it noticeable.
-- There is no recipient client yet: on the testbed the innermost layer ends at the exit, which
-  reads the payload in clear and echoes it back. Whoever runs the exit reads the messages of the
-  testbed, and nothing is delivered beyond it. The end-to-end layer between clients (the noise
-  and e2e packages) and the mailbox at the exit (the mailbox package) exist in the code; the
-  client that uses them is planned ([#18](https://github.com/jimichi-org/jimichi/issues/18)).
+- There is no isolation per contact. A -peer client has one contact per process, one circuit and
+  one queue; a second contact needs a second process. Circuits and queues per contact are planned
+  ([#96](https://github.com/jimichi-org/jimichi/issues/96)).
+- Without own-clock sending the exit's reply leaves once the request is handled, and at once for a
+  cover cell. A mailbox reply has a constant length, but the work per request is only bounded,
+  not constant (ARCHITECTURE, "Store"): the difference of microseconds enters the moment of the
+  reply when the exit forwards at once. On the testbed the exit sends on its own clock.
+- The mailbox sees both circuits of a conversation and links them through the queues: per
+  circuit the fetch capability F in clear, the put queue, the time of every request, the outcome
+  of a put, the kind of a record (kk1, kk2, data), its number and the copies of one record.
+  Together with the entries it gets the graph of the pair, and together with an observer of the
+  links of both entries it may link client-a and client-b by a correlation attack. How well such
+  an attack does is not measured: the README numbers describe the echo topology, and measuring
+  the topology of a conversation is planned
+  ([#47](https://github.com/jimichi-org/jimichi/issues/47)). Queues without a lasting identifier
+  and circuits per contact are planned
+  ([#84](https://github.com/jimichi-org/jimichi/issues/84),
+  [#96](https://github.com/jimichi-org/jimichi/issues/96)).
+- The exit of a -peer client is pinned to the mailbox: a rogue mailbox is in every conversation of
+  its clients, and with a rogue entry it holds both ends of the chain with probability
+  (k - 1)/(N - 1), 1/4 on the testbed (EXPERIMENT, block 3). What such a mailbox learns is not
+  measured ([#117](https://github.com/jimichi-org/jimichi/issues/117)).
+- Before the session the puts carry handshake records only, so the mailbox sees the moment of the
+  handshake. Without -cover-puts the mailbox also sees the moment and number of real messages,
+  the initiator's first record after kk2 and a keepalive every 30 s; with a round trip longer than
+  W x rate the ticks without a put show. A refused put shows the contact and the mailbox that the
+  other side does not fetch.
+- There is no post-compromise recovery: a hash ratchet without a DH ratchet, and a new handshake
+  after staleness gives it only on the side. Whoever holds the recipient's private identity key
+  (KCI), or a mailbox that replays an old kk1, can only reset a session that is absent,
+  unconfirmed or stale (CRYPTO, "End-to-end layer").
+- Denial of service: any node of either circuit or the mailbox stops the conversation while it
+  keeps at it. Once it stops, the conversation recovers by a rebuild and a new handshake within
+  about 5 min: up to 60 s until the next attempt to rebuild, then at most 2 x 90 s plus 60 s
+  once the circuit is back. Three refused replies within 10 min or 10 min without a circuit end
+  the client (codes 3 and 1).
+- Exhaustion of the mailbox: N queues that cannot be evicted cost about N/2 setups of short
+  circuits per TTL or N open circuits with one request per TTL, for up to 24 h (ARCHITECTURE,
+  "Store"); such queues stand in the way of new pairs. Quotas are planned
+  ([#84](https://github.com/jimichi-org/jimichi/issues/84)).
+- The identity and the pin of a -peer client live only in process memory: a restart of either
+  client gives a new identity and needs a new introduction (scripts/introduce.sh). Lasting storage
+  is planned with the container ([#20](https://github.com/jimichi-org/jimichi/issues/20)). The
+  stopped state after a foreign card is ended only by the operator.
+- The introduction trusts the kube API: whoever has pods/log and pods/portforward on the client
+  pods can pin any card before the first pin or after a restart of the client. This is the same
+  root of trust as certificate issuance. A script, not people, compares the card hashes
+  ([#90](https://github.com/jimichi-org/jimichi/issues/90)).
+- The body of a record is at most 368 bytes, the text of a testbed message at most 363; there is
+  no fragmentation ([#68](https://github.com/jimichi-org/jimichi/issues/68)). There are no groups
+  and no multiple devices ([#98](https://github.com/jimichi-org/jimichi/issues/98),
+  [#93](https://github.com/jimichi-org/jimichi/issues/93)).
+- The logs of the testbed clients reach the disk of the node through kubelet: the round trip line
+  per message and the counters line every minute give the time and number of messages, and the
+  hash of the pinned card in the contact pinned line links the logs of the two clients of a pair.
+- The end-to-end layer is a Noise-shaped machine, not an instance of Noise; there is no formal
+  model of the KK handshake over CryptoProvider, and the GOST composition is checked by a harness
+  matched on c25519 (CRYPTO).
 - Deniable authentication between clients is offline only (THREAT_MODEL, "Deniability"). Not
   claimed: online deniability, against a judge acting together with the recipient during the
   session; deniability of metadata: the mailbox sees which circuit puts a record into which queue
@@ -263,9 +353,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   carried that circuit.
 - The node counters are exact sums, printed to stdout once a minute by default and served on the
   loopback admin port. They carry no circuit identifiers, but with few circuits a sum describes
-  single ones: on the testbed, with one client, the nodes whose cell counters grow are the nodes
-  of its chain, the entry shown by mirror_requests and the exit by delivered. Whoever reads the
-  node output learns that. Protection of the counters is planned
+  single ones: on the testbed, with two clients, the nodes whose cell counters grow are the nodes
+  of their chains, the entries shown by mirror_requests and the mailbox by delivered. Whoever
+  reads the node output learns that; the mailbox counters are on loopback only. Protection of the
+  counters is planned
   ([#64](https://github.com/jimichi-org/jimichi/issues/64)).
 - Trust in certificate issuance rests on the operator's kubeconfig and the path from the kube API
   through the kubelet into the pod: both the port-forward that carries the request and the
@@ -320,37 +411,41 @@ English | [Русский](../ru/LIMITATIONS.md)
   middle or exit node every circuit that came through one relay arrives from that relay's one
   address, and those circuits share one address's allowance: 32 links and 0.2 setups per second
   with bursts of 10. One client can use it up for every other client whose chain crosses the
-  same two nodes in the same order. The testbed runs one client, so the allowance does not bind
-  there.
+  same two nodes in the same order. The testbed runs two clients with one circuit each, so the
+  allowance does not bind there.
 - One address can keep several such ordered pairs of nodes busy at once. Its own allowance is
-  counted at every node separately, so it has the whole of it at each node it enters through.
-  The length of its chains is its own choice, not -hops of the clients: a node checks only that
-  its own place in a chain is below 8, and the setup cell holds four hops on c25519 and three on
-  GOST, so one chain crosses up to three ordered pairs on c25519 and two on GOST. Its 32
-  circuits held open through the same nodes in the same order fill the link allowance of every
-  pair on that path; or one setup every 5 s along the same path spends the setup allowance of
-  those pairs as fast as it refills. On an otherwise idle network that is, through N entries, up
-  to 3N of the N(N - 1) ordered pairs on c25519 and 2N on GOST: 15 and 10 of 20 with five nodes.
-  Where the circuits of other clients already take part of a pair's allowance, the address only
-  tops it up and can split its own allowance at one entry over several paths, so it keeps more
-  pairs busy than that. A chain that crosses a busy pair fails at setup, and the client exits
-  and draws another, so the address influences which chains survive. A holder of the CA key with
-  rogue nodes in the roster can keep the pairs between honest nodes busy and leave the pairs
-  through its own nodes free. What that costs in addresses and circuits, and how far it raises
-  the share of surviving chains the rogue nodes hold, is not measured: the measurement is
-  planned (EXPERIMENT, block 3, [#125](https://github.com/jimichi-org/jimichi/issues/125)).
-- A circuit is torn down after the idle timeout and after its lifetime. The client does not
-  rebuild it: the client process exits and builds a new circuit at its next start, on the testbed
-  when the orchestrator restarts the pod. The moment depends only on the node parameters and the
-  last cell: with constant-rate sending a circuit is never idle, and the lifetime shows only the
-  age of a circuit, which the connection open time already shows.
+  counted at every node separately, so it has the whole of it at each node it enters through. The
+  length of its chains is its own choice, not -hops of the clients: a node checks only that its own
+  place in a chain is below 8, and the setup cell holds four hops on c25519 and three on GOST, so
+  one chain crosses up to three ordered pairs on c25519 and two on GOST. Its 32 circuits held open
+  through the same nodes in the same order fill the link allowance of every pair on that path; or
+  one setup every 5 s along the same path spends the setup allowance of those pairs as fast as it
+  refills. On an otherwise idle network that is, through N entries, up to 3N of the N(N - 1) ordered
+  pairs on c25519 and 2N on GOST: 15 and 10 of 20 with five nodes. Where the circuits of other
+  clients already take part of a pair's allowance, the address only tops it up and can split its own
+  allowance at one entry over several paths, so it keeps more pairs busy than that. A chain that
+  crosses a busy pair fails at setup. A client without -peer then exits and draws another; a -peer
+  client sees only a circuit that ends before its first reply, its first circuit included, and two
+  such circuits in a row give one of its two redraws (the bullet on the bounded rebuild above). So
+  the address influences which chains survive. A holder of the CA key with rogue nodes in the roster
+  can keep the pairs between honest nodes busy and leave the pairs through its own nodes free. What
+  that costs in addresses and circuits, and how far it raises the share of surviving chains the
+  rogue nodes hold, is not measured: the measurement is planned (EXPERIMENT, block 3,
+  [#125](https://github.com/jimichi-org/jimichi/issues/125)).
+- A circuit is torn down after the idle timeout and after its lifetime. A client without -peer does
+  not rebuild it: the client process exits and builds a new circuit at its next start, on the
+  testbed when the orchestrator restarts the pod. A -peer client rebuilds it through the same entry.
+  The moment depends only on the node parameters and the last cell: with constant-rate sending a
+  circuit is never idle, and the lifetime shows only the age of a circuit, which the connection open
+  time already shows.
 - The cell format uses constant size and replay protection but is not full Sphinx: beyond the
   constant size there is no processing that hides the position of a node in the chain.
 - A message has to fit into one cell: at most 444 bytes over three hops on either suite and 428
   over four on c25519. A longer one is refused with an error and not sent, there is no
   fragmentation and there are no size classes. The wire length says nothing about a message only
   because a message never spans cells; fragmentation with size classes is planned
-  ([#68](https://github.com/jimichi-org/jimichi/issues/68)).
+  ([#68](https://github.com/jimichi-org/jimichi/issues/68)). For a -peer client a request is
+  always 427 bytes, and the body of a message is at most the 368 bytes of a record.
 - Each circuit opens its own TCP connections between nodes and closes them in a cascade when it
   breaks. Connection open and close times match along the chain and are visible to a global
   observer. The correlation attack in this work uses cells only, this signal is not measured;

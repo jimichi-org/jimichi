@@ -18,6 +18,10 @@ const usage = `usage:
       nothing and exit 1
   jimichi keygen-ca -suite c25519
       print the anchor of a CA key that is thrown away at once
+  jimichi keygen-card -suite c25519 -mailbox host:port
+      print the contact card of a client key that is thrown away at once
+  jimichi card-hash <suite>:<base64>
+      print the hash of a contact card, as a client prints it in card_hash=
 `
 
 func main() {
@@ -35,6 +39,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = runEnroll(args[1:], stdout, stderr)
 	case "keygen-ca":
 		err = runKeygenCA(args[1:], stdout, stderr)
+	case "keygen-card":
+		err = runKeygenCard(args[1:], stdout, stderr)
+	case "card-hash":
+		err = runCardHash(args[1:], stdout, stderr)
 	case "help", "-h", "-help", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0

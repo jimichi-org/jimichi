@@ -22,9 +22,12 @@ that protection is worth.
 
 Messages travel through a chain of three relay nodes under nested encryption: the client draws
 the chain at random from the nodes it lists, every hop strips exactly one layer and learns only
-its neighbours. The recipient client and the end-to-end encryption layer are planned
-([#18](https://github.com/jimichi-org/jimichi/issues/18)): today the last node of the chain reads
-the message and echoes it back.
+its neighbours. Two clients in `-peer` mode talk through a mailbox on the last node of their
+chains: their messages are sealed under an end-to-end layer (a KK handshake and a hash ratchet over
+the same CryptoProvider), and the mailbox holds only records of a constant size that it cannot
+read. The measurements below are taken on the echo topology, where the last node sends each
+message back; measuring the topology of a conversation is planned
+([#47](https://github.com/jimichi-org/jimichi/issues/47)).
 
 Session keys are ephemeral, the buffers that hold them sit in mlocked memory outside the Go heap
 and are zeroed after use, and a node writes nothing to disk itself. Only these buffers are locked
@@ -79,7 +82,9 @@ series of thirty runs per point is still to come
 ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
 The lab harness starts the relays and the clients in one process on loopback, not on the kind
 testbed described below, so there is no network delay; network emulation is planned
-([#46](https://github.com/jimichi-org/jimichi/issues/46)).
+([#46](https://github.com/jimichi-org/jimichi/issues/46)). The last relay echoes every message:
+the conversation of two clients through a mailbox does not enter these numbers
+([#47](https://github.com/jimichi-org/jimichi/issues/47)).
 
 A passive observer sees only when frames cross the entry link and the last link between relays. It
 counts frames per time window for every flow and correlates every entry flow with every exit flow.
@@ -155,6 +160,10 @@ link/         link encryption between neighbours, frames of one size
 pki/          node certificates, descriptors and requests, issuing and checking
 relay/        relay node
 client/       choice of the chain, sending, replies from the exit, cover traffic
+noise/        Noise-shaped handshake machine over CryptoProvider
+e2e/          end-to-end layer: contact card, KK handshake, hash ratchet
+mailbox/      queues of end-to-end records at the exit, in memory only
+conversation/ a client's conversation with its contact: requests, window of puts, rebuild
 vault/        client container with two volumes, planned (#20), a placeholder package today
 lab/          run harness and observer, metrics/, scenario/ (a recipient forging a
               conversation); report/ is a placeholder
@@ -182,9 +191,10 @@ kubectl apply -f deploy/base/relay.yaml -f deploy/base/network.yaml
 kubectl -n jimichi wait --for=condition=Available deployment -l app=relay --timeout=180s
 bash scripts/enroll.sh
 kubectl apply -f deploy/base/client.yaml
+bash scripts/introduce.sh
 ```
 
-`make deploy` runs the last four steps. Five relays and a client appear in the `jimichi`
+`make deploy` runs the last five steps. Five relays and two clients appear in the `jimichi`
 namespace. A relay creates its signing key in memory at start and waits for enrollment:
 `scripts/enroll.sh` builds `cmd/jimichi` and runs `jimichi enroll` on the host, which certifies
 every relay through a port-forward under a CA that exists only for that run, gives each relay the
@@ -195,14 +205,26 @@ restarts, every relay has to be restarted and enrolled again, since a process ta
 certificate and one roster: `kubectl -n jimichi rollout restart deployment -l app=relay`, then
 `make enroll`.
 
-The client lists all five relays and builds a chain of three (`-hops`). At every start it draws
-its entry at random, asks that entry for the signed bundles of every listed node, verifies each
-bundle it gets against the anchor and only then draws the other two hops among the verified nodes.
-The entry may leave out one listed node, and a bundle that does not verify counts as left out
-(`-missing`, 1 by default; the entry's own bundle must verify), which lets a rogue entry narrow the choice
-([LIMITATIONS](docs/en/LIMITATIONS.md)). The client does not log the chain, and after any
-failure it exits and draws a new one at its next start. `-fixed-chain` keeps the listed order
-for measurements that need a known path.
+The clients `client-a` and `client-b` run with `-peer` and keep their queues on the mailbox of
+`relay-5`: `client-a` sends a message every 2 s, `client-b` answers each. A client lists all five
+relays and builds a chain of three (`-hops`) that ends on the mailbox. At start it draws its entry
+at random among the other four, asks that entry for the signed bundles of every listed node,
+verifies each bundle it gets against the anchor and only then draws the middle hop among the
+verified nodes. The entry may leave out one listed node, and a bundle that does not verify counts
+as left out (`-missing`, 1 by default; the bundles of the entry and of the mailbox must verify),
+which lets a rogue entry narrow the choice ([LIMITATIONS](docs/en/LIMITATIONS.md)). The client
+does not log the chain. When a circuit ends it dials the same chain again through the same entry,
+and draws new middle hops only when that chain cannot be dialled, at most twice per process. A
+client without `-peer` exits after any failure and draws a new chain at its next start;
+`-fixed-chain` keeps the listed order for measurements that need a known path.
+
+Each client prints only the hash of its contact card at start; the card itself is served on a
+loopback admin port. `scripts/introduce.sh` restarts both clients, takes each card through a
+port-forward, checks it against the hash in the log of the same container and hands it to the
+other client, which pins it for the life of the process. A restarted client is a new identity, so
+`make enroll`, `make deploy` and `make start` introduce the clients again; `make introduce` does
+it alone. A client that is offered another card after pinning answers 409 and stops until the
+operator restarts it.
 
 Aggregated counters go to stdout once a minute and to port 9101 on loopback only, read through a
 port-forward:

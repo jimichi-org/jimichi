@@ -1,7 +1,7 @@
 CLUSTER ?= jimichi
 NAMESPACE ?= jimichi
 
-.PHONY: check test lint images kind-up kind-load deploy enroll up redeploy start stop down logs stats sweep
+.PHONY: check test lint images kind-up kind-load deploy enroll introduce up redeploy start stop down logs stats sweep
 
 check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
@@ -27,14 +27,23 @@ kind-load: images
 	kind load docker-image jimichi/relay:dev --name $(CLUSTER)
 	kind load docker-image jimichi/client:dev --name $(CLUSTER)
 
+# a client restarted by enroll or by a changed manifest is a new identity, so
+# the clients are introduced again; a client-a whose selector predates client-b
+# goes before the apply, which cannot change a selector
 deploy:
 	kubectl apply -f deploy/base/relay.yaml -f deploy/base/network.yaml
 	kubectl rollout status -n $(NAMESPACE) deployment -l app=relay
 	bash scripts/enroll.sh
+	bash -c '. scripts/lib.sh && drop_old_client'
 	kubectl apply -f deploy/base/client.yaml
+	kubectl rollout status -n $(NAMESPACE) deployment -l app=client --timeout=180s
+	RESTART=no bash scripts/introduce.sh
 
 enroll:
 	bash scripts/enroll.sh
+
+introduce:
+	bash scripts/introduce.sh
 
 up: kind-up kind-load deploy
 
@@ -46,7 +55,6 @@ start:
 	kubectl wait --for=condition=Ready nodes --all --timeout=180s
 	kubectl -n $(NAMESPACE) rollout status deployment -l app=relay --timeout=180s
 	bash scripts/enroll.sh
-	kubectl -n $(NAMESPACE) rollout status deployment/client-a --timeout=180s
 
 stop:
 	docker stop $(CLUSTER)-worker2 $(CLUSTER)-worker $(CLUSTER)-control-plane

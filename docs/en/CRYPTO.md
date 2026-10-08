@@ -362,7 +362,7 @@ Two clients run a layer of their own on top of the circuit: the contact card, a 
 KK pattern and a hash ratchet per direction (packages noise and e2e). Nodes do not open it: to
 them a record of the layer is part of the cell payload. Records travel through a mailbox at the
 exit (package mailbox, `-exit mailbox`) and the conversation driver (package conversation); the
-recipient client is planned ([#18](https://github.com/jimichi-org/jimichi/issues/18)).
+client `cmd/client -peer` uses them (ARCHITECTURE, "The -peer client").
 
 Every operation of the layer goes through the provider's Agree, MixKey, DeriveKey, Hash and AEAD,
 so the formulas of the suites are those under "Formulas". The suites differ only in the suite
@@ -550,7 +550,7 @@ inner   = flags (bit 0: dummy, the rest 0) | u16be(length) | body | zeroes, 371 
 | Key | Made by | Where | Lives |
 |---|---|---|---|
 | client identity key (static agreement key) | GenerateEphemeral at start | secmem | until the process ends |
-| fetch capability F | crypto/rand | secmem; a copy in every request on the client heap and in the clear at the mailbox | until the process ends (the -peer client that uses it is planned, #18) |
+| fetch capability F | crypto/rand | secmem; a copy in every request on the client heap and in the clear at the mailbox | until the -peer client process ends |
 | one-time key of the card check | GenerateEphemeral | secmem | one agreement when a session is made |
 | e_I | GenerateEphemeral | secmem | until kk2 or a new handshake: the wait for kk1 to be stored plus 60 s |
 | e_R | GenerateEphemeral | secmem | the writing of kk2 only |
@@ -713,7 +713,7 @@ some of them live long:
 | gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys and the client identity key included | until the heap memory is reused, which can be after the key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
 | gogost, GOST R 34.10 signing | the CA or node signing scalar and the one-time number k as math/big, intermediate points; k and the signature give back the key | until the heap memory is reused; the copies reappear at every signature: the request, the certificate, every descriptor refresh |
 | end-to-end layer | plaintexts: the body passed to Seal and the body Receive returns (e2e zeroes its own record buffer) | with the caller, never wiped |
-| client and mailbox (the -peer client planned, #18) | message bodies and the records held before pinning, which the conversation driver zeroes only once the mailbox has stored a record or the conversation ends; the copies of a request with the fetch capability F that the circuit keeps after Send, while the driver zeroes its own: in client.Client the queue of the fixed schedule and the plaintext buffer wire.Circuit.Seal wraps in the layers; at the mailbox a copy of the request with F in the cell body and in the link buffer after it zeroes its own slice | until the heap memory is reused |
+| -peer client and mailbox | message bodies and the records held before pinning, which the conversation driver zeroes only once the mailbox has stored a record or the conversation ends; the copies of a request with the fetch capability F that the circuit keeps after Send, while the driver zeroes its own: in client.Client the queue of the fixed schedule and the plaintext buffer wire.Circuit.Seal wraps in the layers; at the mailbox a copy of the request with F in the cell body and in the link buffer after it zeroes its own slice | until the heap memory is reused |
 
 gogost arithmetic on math/big is not constant time. The node's link and onion keys could leak
 through VKO timing to an adversary who times the node's responses; side-channel attacks are

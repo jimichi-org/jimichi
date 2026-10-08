@@ -57,3 +57,42 @@ current_pod() {
 started_at() {
   kubectl -n "$NAMESPACE" get pod "$1" -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}'
 }
+
+# kubectl prints one line per local port once it listens; waiting for them
+# keeps the caller from racing the forward
+wait_forward() {
+  local pid="$1" log="$2"
+  shift 2
+  for _ in $(seq 1 150); do
+    kill -0 "$pid" 2>/dev/null || { echo "port-forward $(basename "$log" .log) exited" >&2; return 1; }
+    local ready=yes
+    for port in "$@"; do
+      grep -q "Forwarding from 127.0.0.1:$port " "$log" || ready=""
+    done
+    [ -n "$ready" ] && return 0
+    sleep 0.1
+  done
+  echo "port-forward $(basename "$log" .log) did not come up" >&2
+  return 1
+}
+
+# how many times the running container of a pod has been restarted
+restarts_of() {
+  kubectl -n "$NAMESPACE" get pod "$1" -o jsonpath='{.status.containerStatuses[0].restartCount}'
+}
+
+# the selector of a deployment cannot change, and client-a once selected only
+# app=client; such a deployment goes before the manifest of the two clients
+drop_old_client() {
+  kubectl -n "$NAMESPACE" get deployment client-a >/dev/null 2>&1 || return 0
+  if [ -z "$(kubectl -n "$NAMESPACE" get deployment client-a -o jsonpath='{.spec.selector.matchLabels.client}')" ]; then
+    kubectl -n "$NAMESPACE" delete deployment client-a --wait=true >/dev/null
+  fi
+}
+
+# both clients of the conversation run: client-b exists only with the manifest
+# that selects each client by its own label
+peers_deployed() {
+  kubectl -n "$NAMESPACE" get deployment client-b >/dev/null 2>&1 &&
+    [ -n "$(kubectl -n "$NAMESPACE" get deployment client-a -o jsonpath='{.spec.selector.matchLabels.client}' 2>/dev/null)" ]
+}

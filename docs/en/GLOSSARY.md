@@ -9,7 +9,7 @@ English | [Русский](../ru/GLOSSARY.md)
 | Hop | a step between neighbouring nodes of the chain |
 | Circuit | the nodes a message travels through, three by default, drawn by the client from its node list; also called the chain |
 | Node list | the static list of nodes a client draws its chains from; before a chain is built every listed node whose bundle the entry serves is verified; for a random chain the entry may leave out at most -missing nodes (one by default, never more than the list holds beyond -hops), and those are not used |
-| Entry, middle, exit | the places of a node in a chain: the entry is the first node and the only one the client connects to, the middle is between the entry and the exit, the exit is the last node: it opens the innermost layer and on the testbed echoes the message back along the circuit; delivery to a recipient client is planned ([#18](https://github.com/jimichi-org/jimichi/issues/18)) |
+| Entry, middle, exit | the places of a node in a chain: the entry is the first node and the only one the client connects to, the middle is between the entry and the exit, the exit is the last node: it opens the innermost layer and answers with an echo or as a mailbox; a -peer client pins its exit to the mailbox |
 | Rogue node | a node the adversary holds: a compromised one or one inserted with a valid certificate |
 | Fixed chain | the first nodes of the list in the listed order instead of a random choice, for measurements that need a known path |
 | Ephemeral key | a key that lives for one session; its buffer is zeroed afterwards, while the copies the libraries made stay on the heap until that memory is reused (CRYPTO, "Known gaps") |
@@ -28,6 +28,15 @@ English | [Русский](../ru/GLOSSARY.md)
 | Hash ratchet | the key chain of one direction: every step derives a record key and the next chain key and wipes the previous one, so compromise of the current key does not expose past records; it gives no post-compromise recovery |
 | KCI | key compromise impersonation: whoever knows a side's private key poses as someone else to that side; in KK this forges kk1, and the session rules reduce it to resetting a session that is absent, unconfirmed or stale |
 | Offline deniability | a property of a transcript: the recipient can build one distributed like the genuine one without the sender's key, so a transcript together with the recipient's keys does not prove the sender's participation to a third party. It does not hold for a witnessed transcript, where the judge also holds an independent record of who transmitted the ciphertexts, such as a mailbox log tied to the sender's address; online deniability, against a judge acting with the recipient during the session, is not claimed (THREAT_MODEL, "Deniability") |
+| End-to-end layer | encryption between two clients on top of the circuits: the KK handshake and the hash ratchet; nodes and the mailbox see only its records (CRYPTO, "End-to-end layer") |
+| Mailbox | an exit that keeps queues of end-to-end records in memory and answers every request with a reply of a constant length (-exit mailbox) |
+| Queue | the queue of records of one client at the mailbox; its identifier is the first 16 bytes of the hash of the fetch capability, and the first put into it creates it |
+| Fetch capability (F) | 16 random bytes of the queue owner: whoever knows them takes records off the queue; the mailbox sees F in every request and keeps only the queue identifier |
+| Record | an end-to-end ciphertext of a constant 392 bytes: the handshake record kk1 or kk2, or data under a ratchet key |
+| Dummy record | a data record with an empty body that the client puts when no message waits; the mailbox and the nodes cannot tell it from a real one |
+| Sticky record | the one record a client puts as copies of the same bytes on every tick until the mailbox answers that it stored it: a handshake record or the probe after a refused put |
+| Contact card | the public data of a client for one contact: the suite, the mailbox address, the queue and the static key; the text `<suite>:<base64>`, its hash card_hash |
+| Pin | the client takes a contact card once per process and afterwards refuses any other and stops |
 | Trust anchor | the CA public key the client trusts in advance, as the string `<suite>:<base64>` |
 | Node certificate | a CA-signed record binding a node's name, address and signing key for a validity period |
 | Node signing key | the node's long-term signing pair (identity key): it signs the certificate request and the descriptor and takes no part in key agreement; when nodes are authenticated its public half goes into the setup and link transcripts of the node |

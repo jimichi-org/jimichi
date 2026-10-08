@@ -11,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jimichi-org/jimichi/client"
@@ -43,11 +45,11 @@ func main() {
 	fixed := flag.Bool("fixed-chain", false, "take the first -hops nodes of -nodes in the listed order instead of drawing the chain at random, for measurements that need a known path")
 	infoPort := flag.String("info-port", "9100", "port where the entry publishes the descriptors of every listed node")
 	message := flag.String("message", "hello from the chain", "payload to send")
-	count := flag.Int("count", 1, "how many messages to send, 0 for endless")
-	interval := flag.Duration("interval", time.Second, "pause between messages")
+	count := flag.Int("count", 1, "how many messages to send, 0 for endless; with -peer the process goes on fetching and answering after the last")
+	interval := flag.Duration("interval", time.Second, "pause between messages; with -peer 0 sends none")
 	cover := flag.Duration("cover", 0, "cover traffic added on top of payload, 0 disables it")
 	mode := flag.String("mode", "immediate", "immediate or fixed: fixed sends one cell per tick and a payload takes a cover slot")
-	rate := flag.Duration("rate", 200*time.Millisecond, "cell period in fixed mode")
+	rate := flag.Duration("rate", 200*time.Millisecond, "cell period in fixed mode, the request period with -peer")
 	jitter := flag.Duration("jitter", 0, "random delay added before each cell")
 	suiteName := flag.String("suite", suite.Default.String(), "primitive suite: gost or c25519, must match the nodes")
 	harden := flag.Bool("harden", true, "disable core dumps and ptrace access for the process")
@@ -56,9 +58,28 @@ func main() {
 	ca := flag.String("ca", "", "trust anchor <suite>:<base64>, the CA public key printed by jimichi enroll")
 	skew := flag.Duration("skew", pki.Skew, "tolerated lag of this clock behind the nodes' clocks")
 	missing := flag.Int("missing", 1, "listed nodes the entry may leave out of its descriptors, at most the nodes beyond -hops; a listed node whose bundle does not pass the check counts as left out; the chain is drawn among the rest, and the entry's own bundle must pass")
+	peer := flag.Bool("peer", false, "talk to one contact through a mailbox at the exit: print card_hash, hand out the card on GET /card of -admin and pin the contact's card on PUT /contact")
+	mailboxAddr := flag.String("mailbox", "", "with -peer: host:port of the node of -nodes that keeps the queues of the conversation and ends every chain")
+	admin := flag.String("admin", "127.0.0.1:9201", "with -peer: loopback IP literal and port of the admin listener")
+	coverPuts := flag.Bool("cover-puts", true, "with -peer: put a record into the contact's queue with every request, a dummy when no message waits, so the mailbox does not see when messages go")
+	respond := flag.Bool("respond", false, "with -peer: answer every message of the contact with its number and text")
+	handshakeTimeout := flag.Duration("handshake-timeout", 60*time.Second, "with -peer: how long the initiator waits for the answer to its handshake once the mailbox holds it, then starts over")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
+
+	if *peer {
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+		os.Exit(runPeer(peerFlags{
+			nodes: *nodes, mailbox: *mailboxAddr, admin: *admin, infoPort: *infoPort,
+			suite: *suiteName, keymem: *keymem, ca: *ca, mode: *mode, message: *message,
+			hops: *hops, count: *count, missing: *missing,
+			fixed: *fixed, auth: *auth, harden: *harden, coverPuts: *coverPuts, respond: *respond,
+			rate: *rate, jitter: *jitter, cover: *cover, interval: *interval,
+			skew: *skew, handshakeTimeout: *handshakeTimeout,
+		}, logger, stop))
+	}
 
 	policy, err := secmem.ParsePolicy(*keymem)
 	if err != nil {
@@ -231,15 +252,17 @@ func checkNodes(p jcrypto.CryptoProvider, addrs []string, hops int, infoPort str
 	case !pki.ValidPort(infoPort):
 		return fmt.Errorf("-info-port %q: want a port number", infoPort)
 	}
-	seen := make(map[string]bool, len(addrs))
-	for _, addr := range addrs {
+	// the refusals name a place in the list and not the address, which a -peer
+	// client never writes to its log
+	seen := make(map[string]int, len(addrs))
+	for i, addr := range addrs {
 		if !pki.ValidAddr(addr) {
-			return fmt.Errorf("-nodes: %q: want host:port in printable ASCII, lower case, at most %d bytes", addr, wire.AddrSize)
+			return fmt.Errorf("-nodes: node %d: want host:port in printable ASCII, lower case, at most %d bytes", i+1, wire.AddrSize)
 		}
-		if seen[addr] {
-			return fmt.Errorf("-nodes: %s listed twice", addr)
+		if first, ok := seen[addr]; ok {
+			return fmt.Errorf("-nodes: node %d repeats node %d", i+1, first)
 		}
-		seen[addr] = true
+		seen[addr] = i + 1
 	}
 	return nil
 }
@@ -295,34 +318,12 @@ func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger) ([]client
 			return nil, err
 		}
 	}
-	bundles, err := nodeBundles(s.web, s.addrs, entry, s.infoPort, s.attempts, s.pause)
+	view, err := s.mirror(p, entry)
 	if err != nil {
 		return nil, s.named(err)
 	}
-	// the entry lists a bundle from the moment its own clock reaches the bundle's
-	// start, so the time is read once the mirror is here, after any retries
-	now := s.now()
-	// every bundle is read on its own, and one that does not pass is a node left
-	// out like one the entry does not serve; bundles are not compared with each
-	// other, since the setup and the link of a node bind its own identity
-	failed := make([]error, len(s.addrs))
-	// position in the list of usable nodes for every listed node, or -1
-	at := make([]int, len(s.addrs))
-	var nodes []pki.Verified
-	for i, b := range bundles {
-		at[i] = -1
-		if b == nil {
-			continue
-		}
-		v, err := readNode(p, s.auth, s.trust, s.addrs[i], b, now)
-		if err != nil {
-			failed[i] = err
-			continue
-		}
-		at[i] = len(nodes)
-		nodes = append(nodes, *v)
-	}
-	if err := s.enough(at, failed, entry); err != nil {
+	nodes, at := view.nodes, view.at
+	if err := s.enough(view, entry); err != nil {
 		return nil, err
 	}
 	if s.auth {
@@ -354,36 +355,81 @@ func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger) ([]client
 	return chainOf(nodes, path), nil
 }
 
+// the nodes of an entry's mirror whose bundles pass the check
+type mirrorView struct {
+	nodes []pki.Verified
+	// position in nodes of every listed node, or -1
+	at []int
+	// listed index of every node in nodes
+	listed []int
+	// why a served bundle of a listed node did not pass
+	failed []error
+}
+
+// the entry lists a bundle from the moment its own clock reaches the bundle's
+// start, so the time is read once the mirror is here, after any retries. Every
+// bundle is read on its own, and one that does not pass is a node left out
+// like one the entry does not serve; bundles are not compared with each other,
+// since the setup and the link of a node bind its own identity
+func (s selection) mirror(p jcrypto.CryptoProvider, entry int) (mirrorView, error) {
+	bundles, err := nodeBundles(s.web, s.addrs, entry, s.infoPort, s.attempts, s.pause)
+	if err != nil {
+		return mirrorView{}, err
+	}
+	now := s.now()
+	v := mirrorView{at: make([]int, len(s.addrs)), failed: make([]error, len(s.addrs))}
+	for i, b := range bundles {
+		v.at[i] = -1
+		if b == nil {
+			continue
+		}
+		node, err := readNode(p, s.auth, s.trust, s.addrs[i], b, now)
+		if err != nil {
+			v.failed[i] = err
+			continue
+		}
+		v.at[i] = len(v.nodes)
+		v.nodes = append(v.nodes, *node)
+		v.listed = append(v.listed, i)
+	}
+	return v, nil
+}
+
+// why listed node i is not usable
+func (v mirrorView) missing(i int) error {
+	if v.failed[i] != nil {
+		return v.failed[i]
+	}
+	return errNoBundle
+}
+
+func (v mirrorView) usable() []bool {
+	usable := make([]bool, len(v.at))
+	for i, place := range v.at {
+		usable[i] = place >= 0
+	}
+	return usable
+}
+
 // a mirror that waits for every node would let one node that withholds its
 // descriptor empty the mirrors of all the others, so the entry may leave out a
-// bounded number of nodes, and a fixed chain needs exactly its own; at holds
-// the usable nodes and failed why a served bundle did not pass
-func (s selection) enough(at []int, failed []error, entry int) error {
-	missing := func(i int) error {
-		if failed[i] != nil {
-			return failed[i]
-		}
-		return errNoBundle
-	}
+// bounded number of nodes, and a fixed chain needs exactly its own
+func (s selection) enough(v mirrorView, entry int) error {
 	if s.fixed {
 		for i := 0; i < s.hops; i++ {
-			if at[i] < 0 {
-				return fmt.Errorf("node %s: %w", s.addrs[i], missing(i))
+			if v.at[i] < 0 {
+				return fmt.Errorf("node %s: %w", s.addrs[i], v.missing(i))
 			}
 		}
 		return nil
 	}
-	usable := make([]bool, len(at))
-	for i, place := range at {
-		usable[i] = place >= 0
-	}
-	switch verdict, absent, allowed := client.JudgeMirror(usable, entry, s.hops, s.missing); verdict {
+	switch verdict, absent, allowed := client.JudgeMirror(v.usable(), entry, s.hops, s.missing); verdict {
 	case client.MirrorTaken:
 		return nil
 	case client.MirrorLacksEntry:
 		// the client connects to the entry, so it needs the entry's own bundle
 		// to pass
-		return &entryError{missing(entry)}
+		return &entryError{v.missing(entry)}
 	default:
 		return fmt.Errorf("%w: %d of %d listed nodes, at most %d may be", errTooFew, absent, len(s.addrs), allowed)
 	}
