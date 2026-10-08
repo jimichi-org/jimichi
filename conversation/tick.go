@@ -48,8 +48,11 @@ func (c *Conversation) choosePut(now time.Time) *put {
 		}
 	}
 	if c.sticky == nil {
+		// the initiator's first record after kk2 is what lets the responder
+		// seal, and without cover puts nothing else would follow it soon
+		confirming := c.session.NeedsRecord()
 		p := c.fresh(now)
-		if p == nil || !c.stall {
+		if p == nil || !c.stall && !confirming {
 			return p
 		}
 		c.sticky = &sticky{rec: p.rec, body: p.body}

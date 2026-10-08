@@ -77,9 +77,10 @@ func TestSilentInitiatorConfirmsWithoutCoverPuts(t *testing.T) {
 
 // the same over round trips up to longer than the window and the depth of a
 // queue, the one a starved runner gave the live test: four legs of a round
-// trip and a tick each. kk1 and kk2 go as no more copies than the window, the
-// mailbox refuses none, the peer drops every copy as one, and the one record
-// of the initiator confirms the session
+// trip and a tick each. kk1, kk2 and the initiator's first record after kk2
+// go as no more copies than the window, the mailbox refuses none, the peer
+// drops every copy as one, and the one record of the initiator confirms the
+// session
 func TestSilentInitiatorOverLongRoundTrips(t *testing.T) {
 	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
 		for _, half := range []int{1, 10, 17} {
@@ -93,17 +94,24 @@ func TestSilentInitiatorOverLongRoundTrips(t *testing.T) {
 				resp.send(t, "ping")
 				n.until("ping at the initiator", 4*(rt+1), func() bool { return ini.count("ping") == 1 })
 
+				// the puts of each kind, all of them copies of the first
 				kinds := func(pr *testPeer) map[byte]int {
-					m := map[byte]int{}
+					m, first := map[byte]int{}, map[byte][]byte{}
 					for _, rec := range pr.circ().puts() {
-						if rec != nil {
-							m[rec[0]]++
+						if rec == nil {
+							continue
 						}
+						if first[rec[0]] == nil {
+							first[rec[0]] = rec
+						} else if !bytes.Equal(rec, first[rec[0]]) {
+							t.Fatalf("%s put two records of kind %d", pr.name, rec[0])
+						}
+						m[rec[0]]++
 					}
 					return m
 				}
 				ki, kr := kinds(ini), kinds(resp)
-				if ki[0x01] == 0 || ki[0x01] > DefaultWindow || ki[0x03] != 1 || len(ki) != 2 {
+				if ki[0x01] == 0 || ki[0x01] > DefaultWindow || ki[0x03] == 0 || ki[0x03] > DefaultWindow || len(ki) != 2 {
 					t.Fatalf("the initiator put %v", ki)
 				}
 				if kr[0x02] == 0 || kr[0x02] > DefaultWindow || kr[0x03] != 1 || len(kr) != 2 {
@@ -113,11 +121,93 @@ func TestSilentInitiatorOverLongRoundTrips(t *testing.T) {
 					t.Fatalf("mailbox %+v", s)
 				}
 				si, sr := ini.session(), resp.session()
-				if si.Copies != uint64(kr[0x02]-1) || sr.Copies != uint64(ki[0x01]-1) {
-					t.Fatalf("copies taken: initiator %d of %d, responder %d of %d", si.Copies, kr[0x02]-1, sr.Copies, ki[0x01]-1)
+				if si.Copies != uint64(kr[0x02]-1) || sr.Copies != uint64(ki[0x01]-1+ki[0x03]-1) {
+					t.Fatalf("copies taken: initiator %d of %d, responder %d of %d", si.Copies, kr[0x02]-1, sr.Copies, ki[0x01]-1+ki[0x03]-1)
 				}
 				if si.DummiesSent != 1 || si.Sent != 0 || sr.DummiesReceived != 1 || sr.Sent != 1 || si.Lost+sr.Lost+si.Bad+sr.Bad != 0 {
 					t.Fatalf("initiator %+v, responder %+v", si, sr)
+				}
+			})
+		}
+	})
+}
+
+// the initiator's first record after kk2 is all that confirms a silent
+// initiator to the responder. The mailbox keeps nothing of its first puts and
+// refuses them with 10 or 11 or answers with a bad reply, or the circuit ends
+// before the reply: its copies go on until the mailbox stores one, the
+// responder drops the extra ones as copies, and its message arrives a few
+// ticks after the mailbox takes puts again, not at the keepalive
+func TestTheConfirmingRecordIsPutUntilStored(t *testing.T) {
+	const soon = 10
+	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		for _, c := range []struct {
+			name string
+			lost int
+			// the reply to a put the mailbox kept nothing of; nil ends the
+			// circuit before the reply comes
+			reply func(b []byte) []byte
+		}{
+			{"refused with 10", 4, func(b []byte) []byte { b[3] |= mailbox.PutFull; return b }},
+			{"refused with 11", 4, func(b []byte) []byte { b[3] |= mailbox.PutRefused; return b }},
+			{"a bad reply", 4, func(b []byte) []byte { b[2]++; return b }},
+			{"the circuit ends", 1, nil},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				n := newNet(t, p, nil)
+				pi, pr := parties(t, p)
+				ini := n.join("initiator", pi, 1, 1, coverPuts(false))
+				resp := n.join("responder", pr, 1, 1, coverPuts(false))
+				lost, end := 0, false
+				stored := map[byte]int{}
+				n.wrap(func(next deliverFunc) deliverFunc {
+					return func(circuit uint64, payload []byte) []byte {
+						req, err := mailbox.ParseRequest(payload)
+						if f := ini.circ(); err != nil || f == nil || circuit != f.id || !req.Puts() {
+							return next(circuit, payload)
+						}
+						if lost == c.lost || !dataRecord(req) {
+							stored[req.Record[0]]++
+							return next(circuit, payload)
+						}
+						lost++
+						req.Put, req.Record = [mailbox.IDSize]byte{}, [mailbox.RecordSize]byte{}
+						clear(payload)
+						reply := next(circuit, req.Bytes())
+						if c.reply == nil {
+							end = true
+							return reply
+						}
+						return c.reply(reply)
+					}
+				})
+				n.before = append(n.before, func() {
+					if end {
+						end = false
+						ini.circ().closed = true
+						ini.c.onEnd()
+					}
+				})
+				pair(t, ini, resp)
+				resp.send(t, "ping")
+				n.until("the puts lost", 40, func() bool { return lost == c.lost && !end })
+				if c.reply == nil {
+					n.until("the rebuild", 10, func() bool { return ini.c.circ != nil })
+				}
+				n.until("ping at the initiator", soon, func() bool { return ini.count("ping") == 1 })
+				n.run(4)
+
+				st, si, sr := ini.c.Stats(), ini.session(), resp.session()
+				switch {
+				case c.reply == nil && (st.Rebuilds != 1 || st.Unanswered == 0),
+					c.reply != nil && st.PutRefused+st.BadReplies != uint64(c.lost):
+					t.Fatalf("initiator %+v", st)
+				}
+				if si.DummiesSent != 1 || si.Sent != 0 {
+					t.Fatalf("the initiator sealed %d dummies and %d messages, want the one confirming record", si.DummiesSent, si.Sent)
+				}
+				if stored[0x03] < 1 || sr.DummiesReceived != 1 || sr.Copies != uint64(stored[0x01]-1+stored[0x03]-1) || sr.Late+sr.Lost+sr.Bad != 0 {
+					t.Fatalf("the mailbox stored %v, responder %+v", stored, sr)
 				}
 			})
 		}

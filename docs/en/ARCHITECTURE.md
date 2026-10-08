@@ -450,6 +450,7 @@ Tick:
 | W requests with a put are already in flight | none |
 | there is a sticky record of the current epoch | a copy of it, the same bytes |
 | the session offers a handshake record (kk1 at the initiator, kk2 at the responder) | that record, which becomes sticky |
+| the initiator has not yet sealed its first record after kk2 | a new record, which becomes sticky (the confirming record) |
 | stall mode | a new record, which becomes sticky (the probe) |
 | otherwise | a new record |
 
@@ -464,22 +465,26 @@ Window and sticky record:
 - Puts are pipelined: up to W = 16 requests with a put unanswered, a new record on every tick. As
   long as W x rate exceeds the round trip of the circuit, there is a put on every tick and the
   pattern of puts does not depend on the delay.
-- A refused put (10 or 11) turns stall mode on: a real body goes back to its place in the outbox
-  by the order it was sent in, a dummy is forgotten.
+- A refused put (10 or 11) turns stall mode on: the real body of a record that is not sticky goes
+  back to its place in the outbox by the order it was sent in, a dummy that is not sticky is
+  forgotten, a sticky record stays.
 - In stall mode one record (the probe) is put as copies of the same bytes on every tick until
   one of the copies gets 01; then stall mode is off and the pipeline resumes. The receiver drops
   the copies by the record number.
 - A handshake record is also put as copies until 01; then the session learns that the mailbox
   holds it, and from that moment the initiator waits for kk2. Copies of kk2 also stop once the
   first record of the initiator has arrived.
+- The initiator's first record after kk2 (the confirming record, real or a dummy) is also put as
+  copies until 01: only it lets the responder seal real messages, and without CoverPuts nothing
+  else would follow it until the keepalive. In stall mode it is the probe.
 - The outcome of a copy of a sticky record already taken off changes nothing.
 
 Reply:
 
 - A reply belongs to the oldest unanswered request by position, and the tag is a check; parsing
   is strict (subsection "Reply, 396 bytes").
-- 01: the sticky record is taken off; a real body, of the probe or of a record that is not
-  sticky, counts as delivered to the mailbox and is zeroed.
+- 01: the sticky record is taken off; a real body, of the probe, of the confirming record or of a
+  record that is not sticky, counts as delivered to the mailbox and is zeroed.
 - 10 and 11: stall mode; the sticky record stays and goes on being put.
 - A bad reply: the outcome of the put is unknown, which is handled as 10 but without turning
   stall mode on; the circuit is not closed. A record in a reply that parsed still goes to the
@@ -557,10 +562,11 @@ Parameter rule:
 | outbox, records before pinning, received messages | 256, 16, 256 |
 
 What the mailbox sees: with CoverPuts a put on every tick while fewer than W requests with a put
-are in flight; without them the moment and number of real messages, the initiator's first record
-after kk2 and the keepalives. The copies of a sticky record are identical bytes, so the mailbox
-sees a repeat. Before pinning the requests only fetch, so the first put shows when the contact
-was pinned: at once at the initiator (kk1), at the responder with kk2 once kk1 has come.
+are in flight; without them the moment and number of real messages, the copies of the initiator's
+first record after kk2 and the keepalives. The copies of a sticky record are identical bytes, so
+the mailbox sees a repeat. Before pinning the requests only fetch, so the first put shows when
+the contact was pinned: at once at the initiator (kk1), at the responder with kk2 once kk1 has
+come.
 
 ## Circuit setup
 
