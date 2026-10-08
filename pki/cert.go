@@ -130,13 +130,13 @@ func ValidAddr(s string) bool {
 	return err == nil && validHost(host) && validPort(port)
 }
 
-// one spelling per host as well: IP literals in their canonical form, names as
-// DNS labels in lower case without a trailing dot. Nothing else gets through,
-// so a host cannot carry what a URL reads as a path, a query, user
-// information or another port
+// one spelling per host as well: IP literals in their canonical form, an IPv4
+// address only as IPv4, names as DNS labels in lower case without a trailing
+// dot. Nothing else gets through, so a host cannot carry what a URL reads as a
+// path, a query, user information or another port
 func validHost(h string) bool {
 	if ip, err := netip.ParseAddr(h); err == nil {
-		return ip.Zone() == "" && ip.String() == h
+		return ip.Zone() == "" && !ip.Is4In6() && ip.String() == h
 	}
 	labels := strings.Split(h, ".")
 	for _, label := range labels {
