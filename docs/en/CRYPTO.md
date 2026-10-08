@@ -360,9 +360,9 @@ and has no primitives of its own.
 
 Two clients run a layer of their own on top of the circuit: the contact card, a handshake on the
 KK pattern and a hash ratchet per direction (packages noise and e2e). Nodes do not open it: to
-them a record of the layer is part of the cell payload. Delivery of records through a mailbox at
-the exit and the recipient client are planned
-([#18](https://github.com/jimichi-org/jimichi/issues/18)).
+them a record of the layer is part of the cell payload. Records travel through a mailbox at the
+exit (package mailbox, `-exit mailbox`) and the conversation driver (package conversation); the
+recipient client is planned ([#18](https://github.com/jimichi-org/jimichi/issues/18)).
 
 Every operation of the layer goes through the provider's Agree, MixKey, DeriveKey, Hash and AEAD,
 so the formulas of the suites are those under "Formulas". The suites differ only in the suite
@@ -389,7 +389,7 @@ handshake payload.
 | `e2e/step` | SID, direction, u32be(n) | 82 / 80 |
 | `e2e/card` | the card | 130 / 160 |
 | `e2e/check` | a one-time public key, the peer's key | 108 / 170 |
-| `mailbox/queue` | the fetch capability F, 16 bytes (the mailbox, planned, #18) | 62 / 60 |
+| `mailbox/queue` | the fetch capability F, 16 bytes (package mailbox) | 62 / 60 |
 
 The lengths for cards and for the exchange `e2e/card` assume a 38-byte mailbox address.
 
@@ -402,9 +402,10 @@ u8 version = 1 | u8 suite (1 GOST, 2 c25519) | u8 address length | mailbox addre
 - The canonical form: decoding and encoding give the same bytes, and no trailing bytes are
   allowed. The address passes the pki rules for node addresses, the queue is not all zeroes, and
   the key is exactly P bytes.
-- The queue is to be the first 16 bytes of the hash of the `mailbox/queue` transcript of the
-  fetch capability F. That derivation belongs to the mailbox, which is planned (#18); until then
-  a card takes any queue that is not all zeroes.
+- The queue is the first 16 bytes of the hash of the `mailbox/queue` transcript of the fetch
+  capability F (`mailbox.QueueID`). A card from a peer carries only the queue, so its parser
+  takes any queue that is not all zeroes; the conversation driver checks its own card's queue
+  against F.
 - The text is `<suite>:<base64 with padding>`; the prefix equals the suite inside the card, and a
   round trip proves the one spelling, as for the trust anchor.
 - `card_hash` is the hash of the `e2e/card` transcript of the card, 32 bytes. There is no short
@@ -549,7 +550,7 @@ inner   = flags (bit 0: dummy, the rest 0) | u16be(length) | body | zeroes, 371 
 | Key | Made by | Where | Lives |
 |---|---|---|---|
 | client identity key (static agreement key) | GenerateEphemeral at start | secmem | until the process ends |
-| fetch capability F | crypto/rand | secmem; a copy in every request on the client heap and in the clear at the mailbox | until the process ends (delivery through a mailbox is planned, #18) |
+| fetch capability F | crypto/rand | secmem; a copy in every request on the client heap and in the clear at the mailbox | until the process ends (the -peer client that uses it is planned, #18) |
 | one-time key of the card check | GenerateEphemeral | secmem | one agreement when a session is made |
 | e_I | GenerateEphemeral | secmem | until kk2 or a new handshake: the wait for kk1 to be stored plus 60 s |
 | e_R | GenerateEphemeral | secmem | the writing of kk2 only |
