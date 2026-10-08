@@ -22,6 +22,9 @@ import (
 // period, and no state of the cache makes the node ask without a pause
 const peerRetry = 5 * time.Second
 
+// the pause for a peer whose last entry ran out with its certificate
+const expiredRetry = maxCheckEvery
+
 // what a failed check of a peer's bundle is reported as
 var pkiFailures = []error{
 	pki.ErrFormat, pki.ErrVersion, pki.ErrSuite, pki.ErrUnknownCA, pki.ErrCertSignature, pki.ErrCertTime,
@@ -74,6 +77,9 @@ type peerEntry struct {
 	from    int64
 	due     int64
 	expires int64
+	// the descriptor runs out with its certificate: the peer signs none that
+	// lasts longer, and none at all once the certificate has run out
+	final bool
 }
 
 // what the info port serves as /descriptors, with the moment the next bundle
@@ -148,13 +154,20 @@ func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []by
 		if err != nil {
 			return nil, err
 		}
-		return &peerEntry{
+		e := &peerEntry{
 			bundle:  bundle,
 			peer:    relay.Peer{LinkPub: v.LinkPub, Identity: v.Identity},
 			from:    max(s.published, s.notBefore),
 			due:     s.published + (s.expires-s.published)/2,
 			expires: s.expires,
-		}, nil
+			final:   s.expires >= s.notAfter,
+		}
+		if e.final {
+			// no later descriptor of the peer ends later, and the peer holds a
+			// replaced onion key until every descriptor naming it has run out
+			e.due = e.expires
+		}
+		return e, nil
 	}
 }
 
@@ -177,7 +190,8 @@ func (c *peerCache) refresh() bool {
 		c.mu.Lock()
 		e := c.entries[addr]
 		c.mu.Unlock()
-		// due comes before expires, so an entry that ran out is asked for again
+		// due is not after expires, so an entry that ran out is asked for again,
+		// except a final one after its pause
 		if e != nil && now.Unix() < e.due {
 			continue
 		}
@@ -191,6 +205,14 @@ func (c *peerCache) refresh() bool {
 		c.mu.Lock()
 		if cause != "" {
 			// the entry held so far stays until it runs out
+			if e != nil && e.final && now.Unix() >= e.expires {
+				// a node takes one certificate per process and enroll discards the CA
+				// key, so no new bundle of this peer is expected to verify under the
+				// roster's anchor
+				spent := *e
+				spent.due = now.Add(expiredRetry).Unix()
+				c.entries[addr] = &spent
+			}
 			if c.failed[addr] != cause {
 				c.failed[addr] = cause
 				c.logger.Printf("peer %s: descriptor: %s", addr, cause)
@@ -252,7 +274,7 @@ func (c *peerCache) publish() {
 // until the next refresh: the nearest moment an entry is due, at most a minute
 // because the timer runs on the monotonic clock while ages are read off the
 // wall clock, and never less than the retry pause, which is also the wait while
-// a peer is missing
+// a peer is missing, unless its last entry ran out with its certificate
 func (c *peerCache) wait() time.Duration {
 	now := c.now().Unix()
 	c.mu.Lock()
@@ -260,7 +282,7 @@ func (c *peerCache) wait() time.Duration {
 	wait := maxCheckEvery
 	for _, addr := range c.addrs {
 		e := c.entries[addr]
-		if e == nil || now >= e.expires || e.due <= now {
+		if e == nil || e.due <= now {
 			return c.retry
 		}
 		if left := e.due - now; left < int64(wait/time.Second) {
