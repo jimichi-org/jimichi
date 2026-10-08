@@ -56,8 +56,9 @@ away. The repository therefore contains both the system and the attack against i
   the last link between relays from cell timings and counts alone; AUC, top-1 accuracy and TPR at
   FPR 0.01 are reported against cover traffic rate, a constant client rate and relays sending on
   their own clocks. Node delay levels ([#45](https://github.com/jimichi-org/jimichi/issues/45)),
-  message size classes ([#68](https://github.com/jimichi-org/jimichi/issues/68)) and the path to a
-  recipient ([#47](https://github.com/jimichi-org/jimichi/issues/47)) are planned.
+  message size classes ([#68](https://github.com/jimichi-org/jimichi/issues/68)) and the topology of a
+  conversation, two entries and the mailbox ([#47](https://github.com/jimichi-org/jimichi/issues/47)),
+  are planned.
 - **Partial compromise.** How often a randomly drawn chain meets rogue nodes is computed and
   sampled with the client's own choice (`cmd/lab -set paths`). What one or two compromised nodes
   of three learn, including a node holding a valid certificate from a compromised CA, is planned
