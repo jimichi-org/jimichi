@@ -80,22 +80,25 @@ func (c *Conversation) fresh(now time.Time) *put {
 	return &put{rec: rec, epoch: c.epoch}
 }
 
+// F follows the version and the tag of a request; written straight into the
+// payload it leaves no copy in a mailbox.Request, which Bytes copies by value
+const fetchAt = 1 + 2
+
 func (c *Conversation) send(p *put, now time.Time) {
 	req := mailbox.Request{Tag: c.tag}
-	copy(req.Fetch[:], c.cfg.Fetch.Bytes())
 	if p != nil {
 		req.Put = c.peer.Queue
 		copy(req.Record[:], p.rec)
 	}
 	b := req.Bytes()
-	clear(req.Fetch[:])
+	copy(b[fetchAt:fetchAt+mailbox.CapSize], c.cfg.Fetch.Bytes())
 	c.pending = append(c.pending, &request{tag: c.tag, put: p, sentAt: now})
 	c.tag++
 	if p != nil {
 		c.inflight++
 	}
 	err := c.circ.Send(b)
-	// the circuit sealed the payload into its cell, so F leaves this copy now
+	// zeroes this copy of F only; one the circuit keeps is its own (Circuit)
 	clear(b)
 	if err != nil {
 		c.endCircuit(now, ErrSendFailed)
@@ -128,22 +131,23 @@ func (c *Conversation) onReply(b []byte) {
 	if err == nil {
 		err = rep.Answers(r.asked(c.peer.Queue))
 	}
-	if err != nil {
+	switch {
+	case err != nil:
 		// not closing the circuit: the mailbox can drop everything anyway, and
 		// a close would give it one more cheap lever
 		c.n.badReplies.Add(1)
 		c.unknown(r.put)
-		return
-	}
-	if r.put != nil {
+	case r.put != nil:
 		c.outcome(r.put, rep.Status&mailbox.PutMask)
 	}
+	// a record in a reply that parsed has left the queue even when the reply
+	// fails Answers, and the session authenticates it and drops a repeat
 	opened := false
 	if rep.Status&mailbox.StatusRecord != 0 {
 		c.n.hits.Add(1)
 		opened = c.take(rep.Record[:], now)
 	}
-	if c.session != nil && !opened {
+	if err == nil && c.session != nil && !opened {
 		c.session.Fetched()
 	}
 }
@@ -162,6 +166,7 @@ func (r *request) asked(queue [mailbox.IDSize]byte) *mailbox.Request {
 func (c *Conversation) take(rec []byte, now time.Time) bool {
 	if c.session == nil {
 		if len(c.held) >= c.cfg.Hold {
+			clear(c.held[0])
 			c.held[0] = nil
 			c.held = c.held[1:]
 			c.n.heldDropped.Add(1)
@@ -209,7 +214,16 @@ func (c *Conversation) outcome(p *put, status byte) {
 			c.session.Stored(p.rec)
 		} else {
 			c.stall = false
+			forget(p.sticky.body)
 		}
+	default:
+		forget(p.body)
+	}
+}
+
+func forget(it *item) {
+	if it != nil {
+		clear(it.body)
 	}
 }
 

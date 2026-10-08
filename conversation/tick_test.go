@@ -208,6 +208,53 @@ func TestStallPutsTheProbeAsCopiesAndResumes(t *testing.T) {
 	})
 }
 
+// the mailbox refuses one real put, with 10 (the queue is full) or with 11 (no
+// room for a new queue): either way stall mode turns on, the body goes back
+// and is sealed again as the probe, and the message arrives once
+func TestEitherRefusalStallsAndSendsTheBodyAgain(t *testing.T) {
+	for _, status := range []byte{mailbox.PutFull, mailbox.PutRefused} {
+		t.Run(fmt.Sprintf("status %02b", status), func(t *testing.T) {
+			p := c25519(t)
+			n := newNet(t, p, nil)
+			pi, pr := parties(t, p)
+			a := n.join("a", pi, 1, 1, coverPuts(false))
+			b := n.join("b", pr, 1, 1, coverPuts(false))
+			n.start(t, a, b)
+			n.run(4)
+
+			refused := 0
+			n.wrap(func(next deliverFunc) deliverFunc {
+				return func(circuit uint64, payload []byte) []byte {
+					req, err := mailbox.ParseRequest(payload)
+					if err != nil || refused > 0 || circuit != a.circ().id || !dataRecord(req) {
+						return next(circuit, payload)
+					}
+					refused++
+					req.Put, req.Record = [mailbox.IDSize]byte{}, [mailbox.RecordSize]byte{}
+					clear(payload)
+					reply := next(circuit, req.Bytes())
+					reply[3] |= status
+					return reply
+				}
+			})
+			sealed := a.session().Sent
+			a.send(t, "refused once")
+			n.until("the refusal", 10, func() bool { return a.c.Stats().PutRefused == 1 })
+			if !a.c.stall || a.c.sticky == nil || a.c.sticky.body == nil || string(a.c.sticky.body.body) != "refused once" {
+				t.Fatalf("after the refusal: stall %v, sticky %+v", a.c.stall, a.c.sticky)
+			}
+			if got := a.session().Sent - sealed; got != 2 {
+				t.Fatalf("the body sealed %d times, want the refused record and the probe", got)
+			}
+			n.until("the message at b", 10, func() bool { return b.count("refused once") == 1 })
+			n.run(10)
+			if b.count("refused once") != 1 || a.c.stall || len(a.outbox()) != 0 {
+				t.Fatalf("b got %q, stall %v, outbox %q", b.got, a.c.stall, a.outbox())
+			}
+		})
+	}
+}
+
 // each way a reply can fail the strict parse: it is counted, the outcome of
 // its put is unknown, so the body goes out again, and the circuit stays
 func TestBadRepliesAreCountedAndTheBodySentAgain(t *testing.T) {
@@ -266,6 +313,100 @@ func TestBadRepliesAreCountedAndTheBodySentAgain(t *testing.T) {
 			n.until("a message after it", 10, func() bool { return a.count("still") == 1 })
 		})
 	}
+}
+
+// a reply that parsed but answers another tag still brings the record the
+// mailbox took off the queue for it: the session opens it and nothing of the
+// peer is lost
+func TestARecordInABadReplyIsTaken(t *testing.T) {
+	p := c25519(t)
+	n := newNet(t, p, nil)
+	pi, pr := parties(t, p)
+	a := n.join("a", pi, 1, 1, coverPuts(false))
+	b := n.join("b", pr, 1, 1, coverPuts(false))
+	n.start(t, a, b)
+	n.run(4)
+
+	spoilt := 0
+	n.wrap(func(next deliverFunc) deliverFunc {
+		return func(circuit uint64, payload []byte) []byte {
+			reply := next(circuit, payload)
+			if spoilt == 0 && circuit == a.circ().id && reply[3]&mailbox.StatusRecord != 0 {
+				spoilt++
+				reply[2]++
+			}
+			return reply
+		}
+	})
+	b.send(t, "carried")
+	n.until("the message at a", 10, func() bool { return a.count("carried") == 1 })
+	if st, s := a.c.Stats(), a.session(); spoilt != 1 || st.BadReplies != 1 || s.Lost != 0 || s.Bad != 0 {
+		t.Fatalf("%d replies spoilt: %+v, session %+v", spoilt, st, s)
+	}
+}
+
+// the peer is away and every reply to a answers another tag: bad replies are
+// no answered fetches, so a does not go stale on them; once the replies are
+// good again it goes stale after StaleAfter of them
+func TestBadRepliesAreNoFetches(t *testing.T) {
+	p := c25519(t)
+	const staleAfter = 40
+	change := func(c *Config) {
+		c.StaleAfter = ticks(staleAfter)
+		c.Keepalive = ticks(20)
+	}
+	n := newNet(t, p, nil)
+	pi, pr := parties(t, p)
+	a := n.join("a", pi, 1, 1, change)
+	b := n.join("b", pr, 1, 1, change)
+	n.start(t, a, b)
+
+	b.paused = true
+	spoil := true
+	n.wrap(func(next deliverFunc) deliverFunc {
+		return func(circuit uint64, payload []byte) []byte {
+			reply := next(circuit, payload)
+			if spoil && circuit == a.circ().id {
+				reply[2]++
+			}
+			return reply
+		}
+	})
+	n.run(3 * staleAfter)
+	if st, s := a.c.Stats(), a.session(); st.BadReplies < 2*staleAfter || s.Stale != 0 {
+		t.Fatalf("stale on bad replies: %+v, session %+v", st, s)
+	}
+	spoil = false
+	n.until("stale on good replies", staleAfter+5, func() bool { return a.session().Stale == 1 })
+}
+
+// the payload that carried F is zero once Send returned, and it did carry F
+func TestTheRequestIsZeroedOnceSent(t *testing.T) {
+	p := c25519(t)
+	n := newNet(t, p, nil)
+	pi, _ := parties(t, p)
+	a := n.join("a", pi, 1, 1, nil)
+	f := a.circ()
+	k := &keeper{fakeCircuit: f}
+	a.c.circ = k
+	a.c.onTick()
+	if len(f.sent) != 1 || !bytes.Equal(f.sent[0].Fetch[:], pi.f.Bytes()) {
+		t.Fatal("the request does not carry F")
+	}
+	if k.last == nil || !allZero(k.last) {
+		t.Fatal("the payload still holds F after Send")
+	}
+}
+
+// a circuit that keeps the slice Send was given
+type keeper struct {
+	*fakeCircuit
+	last []byte
+}
+
+func (k *keeper) Send(b []byte) error {
+	k.last = b
+	return k.fakeCircuit.Send(b)
 }
 
 // without cover puts an idle conversation puts a keepalive whenever it sealed

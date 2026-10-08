@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -430,6 +431,21 @@ func (pr *testPeer) outbox() []string {
 		out[i] = string(it.body)
 	}
 	return out
+}
+
+// the bodies in the outbox themselves, not copies
+func (pr *testPeer) queued() [][]byte {
+	pr.c.mu.Lock()
+	defer pr.c.mu.Unlock()
+	out := make([][]byte, len(pr.c.outbox))
+	for i, it := range pr.c.outbox {
+		out[i] = it.body
+	}
+	return out
+}
+
+func zeroed(bufs [][]byte) bool {
+	return !slices.ContainsFunc(bufs, func(b []byte) bool { return !allZero(b) })
 }
 
 // a record as a third party with nothing but the card makes it

@@ -53,8 +53,10 @@ var (
 	errSmallCircuit = errors.New("conversation: the circuit cannot carry a request")
 )
 
-// what the conversation needs of a circuit; client.Client has it. Send must
-// not keep the payload, and Replies is closed when the circuit ends
+// what the conversation needs of a circuit; client.Client has it. The driver
+// zeroes the payload once Send returns, so Send may keep only a copy, and a
+// copy holds F (client.Client queues one at a fixed rate). Replies is closed
+// when the circuit ends
 type Circuit interface {
 	Send([]byte) error
 	Replies() <-chan []byte
@@ -436,10 +438,24 @@ func (c *Conversation) teardown() {
 	}
 	close(c.stopAll)
 	c.wg.Wait()
+	for _, r := range c.pending {
+		if r.put != nil {
+			forget(r.put.body)
+		}
+	}
+	c.pending = nil
+	if c.sticky != nil {
+		forget(c.sticky.body)
+	}
+	c.sticky = nil
+	for _, rec := range c.held {
+		clear(rec)
+	}
+	c.held = nil
 	c.mu.Lock()
 	c.ended = true
 	for _, it := range c.outbox {
-		clear(it.body)
+		forget(it)
 	}
 	c.outbox = nil
 	c.mu.Unlock()
@@ -527,6 +543,7 @@ func (c *Conversation) onPair(peer e2e.Card) error {
 	c.held = nil
 	for _, rec := range held {
 		c.take(rec, now)
+		clear(rec)
 	}
 	return nil
 }

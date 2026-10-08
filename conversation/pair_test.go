@@ -3,6 +3,7 @@ package conversation
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -176,11 +177,15 @@ func TestRecordsBeforePinningAreTakenAfter(t *testing.T) {
 		if st := resp.c.Stats(); st.HeldDropped == 0 || st.Paired {
 			t.Fatalf("%+v", st)
 		}
+		held := slices.Clone(resp.c.held)
 		if err := resp.c.onPair(ini.party.id.Card()); err != nil {
 			t.Fatal(err)
 		}
 		if resp.state() != e2e.StateEstablished || resp.c.held != nil {
 			t.Fatalf("the responder in %v after pinning", resp.state())
+		}
+		if !zeroed(held) {
+			t.Fatal("a held record is left after the session took it")
 		}
 		n.until("the session", 20, func() bool { return confirmed(ini, resp) })
 	})
@@ -201,6 +206,132 @@ func TestSendRefusesALongBodyAndDropsWhenFull(t *testing.T) {
 	if err := a.c.Send(make([]byte, e2e.MaxBody)); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// a message that finds the inbox full is dropped and counted
+func TestAFullInboxDropsAndCounts(t *testing.T) {
+	p := c25519(t)
+	n := newNet(t, p, nil)
+	pi, pr := parties(t, p)
+	a := n.join("a", pi, 1, 1, nil)
+	b := n.join("b", pr, 1, 1, func(c *Config) { c.Inbox = 1 })
+	n.start(t, a, b)
+	for _, body := range []string{"x1", "x2"} {
+		rec, err := a.c.session.Seal([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !b.c.take(rec, n.clock.Now()) {
+			t.Fatalf("%s did not open", body)
+		}
+	}
+	if got := b.c.Stats().InboxDropped; got != 1 {
+		t.Fatalf("%d messages dropped, want 1", got)
+	}
+	if got := string(<-b.c.Messages()); got != "x1" {
+		t.Fatalf("the inbox holds %q", got)
+	}
+}
+
+// Close zeroes a body still waiting in the outbox
+func TestCloseZeroesTheOutbox(t *testing.T) {
+	p := c25519(t)
+	n := newNet(t, p, nil)
+	pi, _ := parties(t, p)
+	conv, err := Start(Config{
+		Provider: p, Self: pi.id, Fetch: pi.f, First: n.circuit(1, 1),
+		Dial: func() (Circuit, error) { return nil, errors.New("no") },
+		Rate: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conv.Send([]byte("secret")); err != nil {
+		t.Fatal(err)
+	}
+	conv.mu.Lock()
+	body := conv.outbox[0].body
+	conv.mu.Unlock()
+	conv.Close()
+	if !allZero(body) {
+		t.Fatalf("%q left in the outbox after Close", body)
+	}
+}
+
+// a body is zeroed once the mailbox stored its record, and at the end of the
+// conversation every body and held record it still has
+func TestBodiesAreZeroed(t *testing.T) {
+	p := c25519(t)
+	t.Run("stored", func(t *testing.T) {
+		n := newNet(t, p, nil)
+		pi, pr := parties(t, p)
+		a := n.join("a", pi, 1, 1, coverPuts(false))
+		b := n.join("b", pr, 1, 1, coverPuts(false))
+		n.start(t, a, b)
+		a.send(t, "s1", "s2")
+		bodies := a.queued()
+		n.until("both at b", 10, func() bool { return b.count("s1") == 1 && b.count("s2") == 1 })
+		if !zeroed(bodies) {
+			t.Fatalf("%q after the mailbox stored them", bodies)
+		}
+	})
+	t.Run("in flight and queued at the end", func(t *testing.T) {
+		n := newNet(t, p, nil)
+		pi, pr := parties(t, p)
+		a := n.join("a", pi, 3, 3, coverPuts(false))
+		b := n.join("b", pr, 3, 3, coverPuts(false))
+		n.start(t, a, b)
+		n.run(10)
+		a.send(t, "f1", "f2", "f3", "f4")
+		bodies := a.queued()
+		n.run(3)
+		if got := len(a.outbox()); got != 1 {
+			t.Fatalf("%d bodies left in the outbox, want one with three in flight", got)
+		}
+		a.c.teardown()
+		if !zeroed(bodies) {
+			t.Fatalf("%q after the end", bodies)
+		}
+	})
+	for _, end := range []bool{false, true} {
+		name := map[bool]string{false: "the probe stored", true: "the probe at the end"}[end]
+		t.Run(name, func(t *testing.T) {
+			n := newNet(t, p, func(l *mailbox.Limits) { l.Depth = 2 })
+			pi, pr := parties(t, p)
+			a := n.join("a", pi, 1, 1, coverPuts(false))
+			b := n.join("b", pr, 1, 1, coverPuts(false))
+			n.start(t, a, b)
+			n.run(3)
+			b.paused = true
+			a.send(t, "m1", "m2", "m3", "m4", "m5")
+			bodies := a.queued()
+			n.until("a real probe", 10, func() bool { return a.c.stall && a.c.sticky != nil && a.c.sticky.body != nil })
+			if end {
+				a.c.teardown()
+			} else {
+				b.paused = false
+				n.until("every message at b", 60, func() bool { return len(b.got) == 5 && !a.c.stall })
+			}
+			if !zeroed(bodies) {
+				t.Fatalf("%q", bodies)
+			}
+		})
+	}
+	t.Run("held records", func(t *testing.T) {
+		n := newNet(t, p, nil)
+		_, pr := parties(t, p)
+		resp := n.join("responder", pr, 1, 1, func(c *Config) { c.Hold = 1 })
+		n.putFrom(1<<40, resp, garbage(t, 0x03))
+		n.until("a record held", 5, func() bool { return len(resp.c.held) == 1 })
+		first := resp.c.held[0]
+		n.putFrom(1<<40, resp, garbage(t, 0x03))
+		n.until("the first pushed out", 5, func() bool { return resp.c.Stats().HeldDropped == 1 })
+		second := resp.c.held[0]
+		resp.c.teardown()
+		if !zeroed([][]byte{first, second}) {
+			t.Fatal("a held record is left")
+		}
+	})
 }
 
 // a body given back takes its place by the order of Send
