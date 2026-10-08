@@ -18,34 +18,41 @@ import (
 // reply reader, circuits of three relays in this process with the mailbox
 // Store as the Deliver of the exit, and real time
 
-// the relays forward at once, so the round trip of one request on an idle
-// stand is the work it costs along the chain, tens of times more with GOST in
+// relays that forward at once make the round trip of one request on an idle
+// stand the work it costs along the chain, tens of times more with GOST in
 // pure Go than with X25519 under the race detector. Conversations that send
 // faster than the stand works queue their requests in the relays, and the
 // round trip grows until replies time out; so the rate follows a measured
 // round trip, and every wait counts the ticks the conversations ran against
-// the ticks the protocol needs
+// the ticks the protocol needs. Relays with a period of their own make the
+// round trip mostly waiting, up to five periods for three hops, and a rate
+// below it keeps several requests in flight
 const (
 	probes = 5
 	// two conversations, each request about a round trip of work: a rate of
 	// four round trips keeps the stand at half a core
 	rateOverRoundTrip = 4
+	// over paced relays the rate is a third of the round trip but above the
+	// period, since a relay carries one cell per period on a circuit
+	inFlight   = 3
+	livePeriod = 10 * time.Millisecond
 	// 200 rates of reply timeout must outlast a scheduler pause
 	minRate         = 10 * time.Millisecond
 	firstPauseTicks = 2
 	// how many times the ticks a wait needs the test gives it before it calls
-	// the conversation stuck
-	slack = 5
+	// the conversation stuck, and the wall time no wait goes past
+	slack   = 5
+	maxWait = 2 * time.Minute
 )
 
-func startNode(t *testing.T, p jcrypto.CryptoProvider, deliver relay.Deliver) client.Node {
+func startNode(t *testing.T, p jcrypto.CryptoProvider, period time.Duration, deliver relay.Deliver) client.Node {
 	t.Helper()
 	priv, pub, err := p.GenerateEphemeral()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(priv.Release)
-	r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub, Deliver: deliver})
+	r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub, Deliver: deliver, Period: period})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,21 +72,23 @@ type relayNet struct {
 	p     jcrypto.CryptoProvider
 	store *mailbox.Store
 	chain []client.Node
+	// the period of the relays, zero when they forward at once
+	period time.Duration
 	// the slowest round trip of the probe and the slowest circuit build so
 	// far, and the request period they give
 	roundTrip, build, rate time.Duration
 	peers                  []*livePeer
 }
 
-func newRelayNet(t *testing.T, p jcrypto.CryptoProvider) *relayNet {
+func newRelayNet(t *testing.T, p jcrypto.CryptoProvider, period time.Duration) *relayNet {
 	t.Helper()
 	store, err := mailbox.NewStore(p, mailbox.DefaultLimits(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(store.Close)
-	exit := startNode(t, p, store.Deliver)
-	r := &relayNet{p: p, store: store, chain: []client.Node{startNode(t, p, nil), startNode(t, p, nil), exit}}
+	exit := startNode(t, p, period, store.Deliver)
+	r := &relayNet{p: p, store: store, period: period, chain: []client.Node{startNode(t, p, period, nil), startNode(t, p, period, nil), exit}}
 	r.measure(t)
 	return r
 }
@@ -111,7 +120,11 @@ func (r *relayNet) measure(t *testing.T) {
 		}
 		r.roundTrip = max(r.roundTrip, time.Since(start))
 	}
-	r.rate = max(minRate, rateOverRoundTrip*r.roundTrip)
+	if r.period > 0 {
+		r.rate = max(minRate, r.roundTrip/inFlight, r.period+r.period/4)
+	} else {
+		r.rate = max(minRate, rateOverRoundTrip*r.roundTrip)
+	}
 }
 
 func ticksOf(d, rate time.Duration) uint64 { return uint64((d + rate - 1) / rate) }
@@ -134,17 +147,20 @@ func (r *relayNet) rebuildTicks() uint64 {
 // other one still counts. A starved runner drops ticks of the conversations'
 // own tickers as it slows the stand, so wall time says little about the
 // protocol, while a conversation that keeps sending past slack times the
-// ticks it needs is stuck. The poll ticker drops ticks the same way and ends
-// a wait in which neither sends at all
+// ticks it needs is stuck. A wait in which neither sends at all ends at slack
+// squared times the ticks it needs in wall time, and none goes past maxWait,
+// so a stuck conversation fails with the report before the test times out
 func (r *relayNet) wait(t *testing.T, what string, need uint64, done func() bool) uint64 {
 	t.Helper()
 	from := make([]uint64, len(r.peers))
 	for i, lp := range r.peers {
 		from[i] = lp.c.Stats().Requests
 	}
+	start := time.Now()
+	deadline := start.Add(min(time.Duration(slack*slack*need)*r.rate, maxWait))
 	poll := time.NewTicker(r.rate)
 	defer poll.Stop()
-	for polls := uint64(0); ; polls++ {
+	for {
 		var n uint64
 		for i, lp := range r.peers {
 			n = max(n, lp.c.Stats().Requests-from[i])
@@ -152,8 +168,8 @@ func (r *relayNet) wait(t *testing.T, what string, need uint64, done func() bool
 		if done() {
 			return n
 		}
-		if n > slack*need || polls > slack*slack*need {
-			t.Fatalf("%s: not in %d ticks, %d needed\n%s", what, n, need, r.report())
+		if n > slack*need || time.Now().After(deadline) {
+			t.Fatalf("%s: not in %d ticks and %v, %d ticks needed\n%s", what, n, time.Since(start).Round(time.Millisecond), need, r.report())
 		}
 		<-poll.C
 	}
@@ -161,7 +177,7 @@ func (r *relayNet) wait(t *testing.T, what string, need uint64, done func() bool
 
 func (r *relayNet) report() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "rate %v, round trip %v, build %v", r.rate, r.roundTrip, r.build)
+	fmt.Fprintf(&b, "relay period %v, rate %v, round trip %v, build %v", r.period, r.rate, r.roundTrip, r.build)
 	for _, lp := range r.peers {
 		fmt.Fprintf(&b, "\n%s: %+v", lp.name, lp.c.Stats())
 	}
@@ -265,78 +281,104 @@ func (lp *livePeer) send(t *testing.T, body string) {
 // the responder speaks first and the initiator only answers, with cover puts
 // and without: the round trip needs the initiator's first record after kk2.
 // Then the circuit of the initiator is closed under it, and the conversation
-// goes on over a rebuilt one with the same session
+// goes on over a rebuilt one with the same session. X25519 runs over paced
+// relays with several requests in flight, GOST over relays that forward at
+// once at a rate of several round trips
 func TestConversationOverRelays(t *testing.T) {
-	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
-		for _, cover := range []bool{true, false} {
-			t.Run(fmt.Sprintf("cover puts %v", cover), func(t *testing.T) {
-				r := newRelayNet(t, p)
-				pi, pr := parties(t, p)
-				ini := r.join(t, "initiator", pi, coverPuts(cover))
-				resp := r.join(t, "responder", pr, coverPuts(cover))
-				if err := ini.c.Pair(resp.party.id.Card()); err != nil {
-					t.Fatal(err)
-				}
-				resp.send(t, "ping")
-				if err := resp.c.Pair(ini.party.id.Card()); err != nil {
-					t.Fatal(err)
-				}
-				if err := resp.c.Pair(ini.party.id.Card()); err != nil {
-					t.Fatalf("the same card again: %v", err)
-				}
-				// kk1, kk2 and the initiator's first record after it go first
-				ini.expect(t, "ping", r.legs(4))
-				ini.send(t, "pong")
-				resp.expect(t, "pong", r.legs(1))
+	for _, s := range []struct {
+		suite  jcrypto.Suite
+		period time.Duration
+	}{{jcrypto.SuiteC25519, livePeriod}, {jcrypto.SuiteGOST, 0}} {
+		t.Run(s.suite.String(), func(t *testing.T) {
+			p := mustSuite(t, s.suite)
+			for _, cover := range []bool{true, false} {
+				t.Run(fmt.Sprintf("cover puts %v", cover), func(t *testing.T) {
+					conversationOverRelays(t, p, s.period, cover)
+				})
+			}
+		})
+	}
+}
 
-				epoch := ini.c.Stats().Epoch
-				_ = ini.current().Close()
-				rebuilt := r.wait(t, "the rebuild", r.rebuildTicks(), func() bool { return ini.c.Stats().Rebuilds > 0 })
-				// with cover puts the responder put a record on each of its
-				// ticks while the initiator had no circuit, and they wait ahead
-				resp.send(t, "after")
-				ini.expect(t, "after", r.legs(1)+rebuilt)
-				ini.send(t, "again")
-				resp.expect(t, "again", r.legs(1))
-
-				st := ini.c.Stats()
-				ini.mu.Lock()
-				events := append([]Event(nil), ini.events...)
-				ini.mu.Unlock()
-				if st.Epoch != epoch || st.BadReplies != 0 || st.Rebuilds != 1 || st.Refusals != 0 {
-					t.Fatalf("initiator %+v, events %v", st, events)
-				}
-				if len(events) != 2 || events[0].Kind != CircuitEnded || events[1].Kind != CircuitRebuilt {
-					t.Fatalf("events %v", events)
-				}
-				if s := r.store.Stats(); s.Bad != 0 || s.Puts == 0 || s.Hits == 0 {
-					t.Fatalf("mailbox %+v", s)
-				}
-
-				ini.c.Close()
-				select {
-				case <-ini.c.Done():
-				default:
-					t.Fatal("Done is open after Close")
-				}
-				if ini.c.Err() != nil {
-					t.Fatalf("Err after Close: %v", ini.c.Err())
-				}
-				if err := ini.c.Pair(resp.party.id.Card()); err != ErrClosed {
-					t.Fatalf("Pair after Close: %v", err)
-				}
-				for range ini.c.Messages() {
-				}
-			})
+func conversationOverRelays(t *testing.T, p jcrypto.CryptoProvider, period time.Duration, cover bool) {
+	r := newRelayNet(t, p, period)
+	pi, pr := parties(t, p)
+	change := func(c *Config) {
+		c.CoverPuts = cover
+		// a keepalive of the initiator would confirm the responder as well,
+		// so none comes before a wait gives up
+		c.Keepalive, c.StaleAfter = 2*maxWait, 3*maxWait
+	}
+	ini := r.join(t, "initiator", pi, change)
+	resp := r.join(t, "responder", pr, change)
+	if err := ini.c.Pair(resp.party.id.Card()); err != nil {
+		t.Fatal(err)
+	}
+	resp.send(t, "ping")
+	if err := resp.c.Pair(ini.party.id.Card()); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.c.Pair(ini.party.id.Card()); err != nil {
+		t.Fatalf("the same card again: %v", err)
+	}
+	// kk1, kk2 and the initiator's first record after it go first
+	ini.expect(t, "ping", r.legs(4))
+	if got := ini.c.Stats().Session.DummiesSent; !cover && got != 1 {
+		t.Fatalf("the initiator sealed %d dummies by the time ping came, want the confirming record alone\n%s", got, r.report())
+	}
+	ini.send(t, "pong")
+	resp.expect(t, "pong", r.legs(1))
+	for _, lp := range []*livePeer{ini, resp} {
+		if st := lp.c.Stats(); st.Unanswered != 0 || st.PutRefused != 0 || st.Rebuilds != 0 {
+			t.Fatalf("%s before the close\n%s", lp.name, r.report())
 		}
-	})
+	}
+
+	epoch := ini.c.Stats().Epoch
+	_ = ini.current().Close()
+	rebuilt := r.wait(t, "the rebuild", r.rebuildTicks(), func() bool { return ini.c.Stats().Rebuilds > 0 })
+	// with cover puts the responder put a record on each of its ticks while
+	// the initiator had no circuit, and they wait ahead
+	resp.send(t, "after")
+	ini.expect(t, "after", r.legs(1)+rebuilt)
+	ini.send(t, "again")
+	resp.expect(t, "again", r.legs(1))
+
+	st := ini.c.Stats()
+	ini.mu.Lock()
+	events := append([]Event(nil), ini.events...)
+	ini.mu.Unlock()
+	if st.Epoch != epoch || st.BadReplies != 0 || st.Rebuilds != 1 || st.Refusals != 0 {
+		t.Fatalf("initiator %+v, events %v", st, events)
+	}
+	if len(events) != 2 || events[0].Kind != CircuitEnded || events[1].Kind != CircuitRebuilt {
+		t.Fatalf("events %v", events)
+	}
+	if s := r.store.Stats(); s.Bad != 0 || s.Puts == 0 || s.Hits == 0 {
+		t.Fatalf("mailbox %+v", s)
+	}
+
+	ini.c.Close()
+	select {
+	case <-ini.c.Done():
+	default:
+		t.Fatal("Done is open after Close")
+	}
+	if ini.c.Err() != nil {
+		t.Fatalf("Err after Close: %v", ini.c.Err())
+	}
+	if err := ini.c.Pair(resp.party.id.Card()); err != ErrClosed {
+		t.Fatalf("Pair after Close: %v", err)
+	}
+	for range ini.c.Messages() {
+	}
 }
 
 // a contact card that changes after pinning ends the conversation in its own
 // loop: Pair answers ErrContactChanged and Done closes
 func TestAnotherCardEndsTheLoop(t *testing.T) {
 	p := c25519(t)
-	r := newRelayNet(t, p)
+	r := newRelayNet(t, p, 0)
 	pi, pr := parties(t, p)
 	a := r.join(t, "a", pi, nil)
 	if err := a.c.Pair(newParty(t, p).id.Card()); err != nil {
