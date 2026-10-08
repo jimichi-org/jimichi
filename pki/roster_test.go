@@ -59,6 +59,11 @@ func TestRosterHasOneSpelling(t *testing.T) {
 		{"address without a port", `{"anchor":"` + anchor + `","nodes":[{"name":"relay-1","addr":"relay-1"}]}`, ErrFormat},
 		{"repeated name", `{"anchor":"` + anchor + `","nodes":[` + node("relay-1") + `,{"name":"relay-1","addr":"` + addrOf("relay-2") + `"}]}`, ErrDuplicate},
 		{"repeated address", `{"anchor":"` + anchor + `","nodes":[` + node("relay-1") + `,{"name":"relay-2","addr":"` + addrOf("relay-1") + `"}]}`, ErrDuplicate},
+		{"repeated host under another port", `{"anchor":"` + anchor + `","nodes":[` + node("relay-1") + `,{"name":"relay-2","addr":"relay-1.jimichi.svc.cluster.local:9001"}]}`, ErrDuplicate},
+		{"repeated IP host", `{"anchor":"` + anchor + `","nodes":[{"name":"relay-1","addr":"10.0.0.1:9000"},{"name":"relay-2","addr":"10.0.0.1:9001"}]}`, ErrDuplicate},
+		{"repeated IPv6 host", `{"anchor":"` + anchor + `","nodes":[{"name":"relay-1","addr":"[fd00::1]:9000"},{"name":"relay-2","addr":"[fd00::1]:9001"}]}`, ErrDuplicate},
+		{"IPv4 host written as IPv6", `{"anchor":"` + anchor + `","nodes":[{"name":"relay-1","addr":"10.0.0.1:9000"},{"name":"relay-2","addr":"[::ffff:10.0.0.1]:9001"}]}`, ErrFormat},
+		{"host equal to a name", `{"anchor":"` + anchor + `","nodes":[{"name":"relay-1","addr":"relay-2:9000"},{"name":"relay-2","addr":"relay-1:9000"}]}`, nil},
 		{"host with a path", `{"anchor":"` + anchor + `","nodes":[{"name":"relay-1","addr":"relay-1/x:9000"}]}`, ErrFormat},
 		{"host with user information", `{"anchor":"` + anchor + `","nodes":[{"name":"relay-1","addr":"a@relay-1:9000"}]}`, ErrFormat},
 	} {

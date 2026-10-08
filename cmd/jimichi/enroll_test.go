@@ -541,6 +541,7 @@ func TestRosterIsCheckedBeforeAnyRequest(t *testing.T) {
 		{"endpoint without a port", []string{entry("relay-1", addrOf("relay-1"), "127.0.0.1", i1, h1)}},
 		{"repeated name", []string{good, entry("relay-1", addrOf("relay-2"), a2, i2, h2)}},
 		{"repeated address", []string{good, entry("relay-2", addrOf("relay-1"), a2, i2, h2)}},
+		{"repeated host under another port", []string{good, entry("relay-2", "relay-1.jimichi.svc.cluster.local:9001", a2, i2, h2)}},
 		{"repeated endpoint", []string{good, entry("relay-2", addrOf("relay-2"), a2, i1, h2)}},
 		{"repeated identity", []string{good, entry("relay-2", addrOf("relay-2"), a2, i2, h1)}},
 	} {

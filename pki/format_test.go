@@ -160,6 +160,8 @@ func TestNamesAndAddresses(t *testing.T) {
 		{"relay-1.:9000", false},
 		{"[0:0:0:0:0:0:0:1]:9000", false},
 		{"[::1%eth0]:9000", false},
+		{"[::ffff:127.0.0.1]:9000", false},
+		{"[::ffff:7f00:1]:9000", false},
 		{"relay-1/descriptor:9000", false},
 		{"relay-1?x=1:9000", false},
 		{"relay-1#x:9000", false},

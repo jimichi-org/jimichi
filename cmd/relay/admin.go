@@ -145,17 +145,20 @@ func checkPeerFlags(auth bool, advertise, peerInfoPort string, peers []string) e
 		}
 		return nil
 	}
-	seen := map[string]bool{advertise: true}
 	for _, addr := range append([]string{advertise}, peers...) {
 		if !pki.ValidAddr(addr) {
 			return fmt.Errorf("%q: want host:port in printable ASCII, lower case, at most %d bytes", addr, wire.AddrSize)
 		}
 	}
+	// as in a roster: a peer is fetched from its host on -peer-info-port
+	host, _, _ := net.SplitHostPort(advertise)
+	seen := map[string]bool{host: true}
 	for _, addr := range peers {
-		if seen[addr] {
-			return fmt.Errorf("-peers: %s repeated or equal to -advertise", addr)
+		host, _, _ := net.SplitHostPort(addr)
+		if seen[host] {
+			return fmt.Errorf("-peers: %s repeats the host of -advertise or of another peer", addr)
 		}
-		seen[addr] = true
+		seen[host] = true
 	}
 	return nil
 }

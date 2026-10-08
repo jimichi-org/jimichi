@@ -3,6 +3,7 @@ package pki
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"sort"
 )
 
@@ -55,16 +56,20 @@ func ParseRoster(raw []byte) (*Roster, error) {
 	if len(e.Nodes) == 0 {
 		return nil, ErrFormat
 	}
-	seen := make(map[string]bool, 2*len(e.Nodes))
+	names := make(map[string]bool, len(e.Nodes))
+	hosts := make(map[string]bool, len(e.Nodes))
 	for _, n := range e.Nodes {
 		if !ValidName(n.Name) || !ValidAddr(n.Addr) {
 			return nil, ErrFormat
 		}
-		// a name has no colon and an address always has one
-		if seen[n.Name] || seen[n.Addr] {
+		// a node fetches its peers from the host of the address and one info port
+		// for all of them, so a second address on a host reaches the node of the
+		// first, and on the node's own host its own info port
+		host, _, _ := net.SplitHostPort(n.Addr)
+		if names[n.Name] || hosts[host] {
 			return nil, ErrDuplicate
 		}
-		seen[n.Name], seen[n.Addr] = true, true
+		names[n.Name], hosts[host] = true, true
 	}
 	r := &Roster{Anchor: anchor, Nodes: e.Nodes}
 	if !bytes.Equal(r.Marshal(), raw) {

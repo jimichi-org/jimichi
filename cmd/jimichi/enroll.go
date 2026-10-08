@@ -125,15 +125,17 @@ func validKeyHash(s string) bool {
 	return true
 }
 
-// two entries for one relay would get it two certificates, and two relays
-// behind one endpoint would get one relay's certificate installed twice
+// two entries for one relay would get it two certificates, two relays behind
+// one endpoint would get one relay's certificate installed twice, and a relay
+// refuses a roster that names one host twice
 func checkRoster(nodes roster) error {
 	if len(nodes) == 0 {
 		return errors.New("no -node given")
 	}
 	seen := make(map[string]bool)
 	for _, n := range nodes {
-		for _, v := range []string{"name " + n.name, "address " + n.addr, "endpoint " + n.admin, "endpoint " + n.info, "identity " + n.identity} {
+		host, _, _ := net.SplitHostPort(n.addr)
+		for _, v := range []string{"name " + n.name, "host " + host, "endpoint " + n.admin, "endpoint " + n.info, "identity " + n.identity} {
 			if seen[v] {
 				return fmt.Errorf("%s repeated in the roster", v)
 			}
