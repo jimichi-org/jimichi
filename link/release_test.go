@@ -86,13 +86,13 @@ func TestHandshakeReleasesEverySecret(t *testing.T) {
 			a, b := net.Pipe()
 			accepted := make(chan *link.Conn, 1)
 			go func() {
-				srv, err := link.Accept(b, accepter, priv, pub)
+				srv, err := link.Accept(b, accepter, priv, pub, nil)
 				if err != nil {
 					t.Errorf("Accept: %v", err)
 				}
 				accepted <- srv
 			}()
-			client, err := link.Dial(a, dialer, static)
+			client, err := link.Dial(a, dialer, static, nil)
 			if err != nil {
 				t.Fatalf("Dial: %v", err)
 			}
@@ -116,7 +116,7 @@ func TestHandshakeReleasesEverySecret(t *testing.T) {
 				_, _ = b.Write(make([]byte, len(pub)))
 			}()
 			_ = a.SetDeadline(time.Now().Add(5 * time.Second))
-			if _, err := link.Dial(a, dialer, static); !errors.Is(err, link.ErrHandshake) {
+			if _, err := link.Dial(a, dialer, static, nil); !errors.Is(err, link.ErrHandshake) {
 				t.Fatalf("Dial = %v, want %v", err, link.ErrHandshake)
 			}
 			expect(t, "the initiator", dialer, cut)
@@ -140,7 +140,7 @@ func TestHandshakeReleasesEverySecret(t *testing.T) {
 				_, _ = b.Write(append(ephPub, make([]byte, frame)...))
 			}()
 			_ = a.SetDeadline(time.Now().Add(5 * time.Second))
-			if _, err := link.Dial(a, dialer, static); !errors.Is(err, link.ErrHandshake) {
+			if _, err := link.Dial(a, dialer, static, nil); !errors.Is(err, link.ErrHandshake) {
 				t.Fatalf("Dial = %v, want %v", err, link.ErrHandshake)
 			}
 			expect(t, "the initiator", dialer, whole)
@@ -160,7 +160,7 @@ func TestHandshakeReleasesEverySecret(t *testing.T) {
 				_, _ = io.ReadFull(a, make([]byte, len(pub)))
 			}()
 			_ = b.SetDeadline(time.Now().Add(5 * time.Second))
-			if _, err := link.Accept(b, accepter, priv, pub); !errors.Is(err, link.ErrHandshake) {
+			if _, err := link.Accept(b, accepter, priv, pub, nil); !errors.Is(err, link.ErrHandshake) {
 				t.Fatalf("Accept = %v, want %v", err, link.ErrHandshake)
 			}
 			expect(t, "the responder", accepter, 1)

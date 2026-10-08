@@ -44,14 +44,21 @@ func provider(t *testing.T, s jcrypto.Suite) jcrypto.CryptoProvider {
 func addrOf(name string) string { return name + ".jimichi.svc.cluster.local:9000" }
 
 type relayKeys struct {
-	addr  string
-	onion []byte
-	link  []byte
+	addr     string
+	onion    []byte
+	link     []byte
+	identity []byte
 }
 
 // a node enrolled under ca the way jimichi enroll does it, serving a
 // descriptor signed at t0
 func enrolled(t *testing.T, p jcrypto.CryptoProvider, ca *pki.CA, name string, notAfter time.Time) (relayKeys, []byte) {
+	t.Helper()
+	return enrolledWith(t, p, ca, name, notAfter, agreementKey(t, p))
+}
+
+// the same with the onion key given
+func enrolledWith(t *testing.T, p jcrypto.CryptoProvider, ca *pki.CA, name string, notAfter time.Time, onion []byte) (relayKeys, []byte) {
 	t.Helper()
 	id, err := pki.NewIdentity(p, name, addrOf(name))
 	if err != nil {
@@ -77,7 +84,7 @@ func enrolled(t *testing.T, p jcrypto.CryptoProvider, ca *pki.CA, name string, n
 	if err := id.Install(cert.Marshal(), t0); err != nil {
 		t.Fatal(err)
 	}
-	k := relayKeys{addr: addrOf(name), onion: agreementKey(t, p), link: agreementKey(t, p)}
+	k := relayKeys{addr: addrOf(name), onion: onion, link: agreementKey(t, p), identity: id.Public()}
 	id.SetKeys(k.link, k.onion, 0)
 	if err := id.Refresh(t0, time.Hour); err != nil {
 		t.Fatal(err)
@@ -136,30 +143,35 @@ func TestTrustPolicyIsSettledBeforeAnyFetch(t *testing.T) {
 	}
 }
 
-func TestResolveRefusesWhatDoesNotVerify(t *testing.T) {
+func TestReadNodeRefusesWhatDoesNotVerify(t *testing.T) {
 	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
 		t.Run(s.String(), func(t *testing.T) {
 			p := provider(t, s)
 			ca := newCA(t, p)
 			until := t0.Add(72 * time.Hour)
 			trust := pki.Policy{Anchor: ca.Anchor(), Skew: pki.Skew}
-			k1, b1 := enrolled(t, p, ca, "relay-1", until)
-			k2, b2 := enrolled(t, p, ca, "relay-2", until)
-			k3, b3 := enrolled(t, p, ca, "relay-3", until)
-			addrs := []string{k1.addr, k2.addr, k3.addr}
-			bundles := [][]byte{b1, b2, b3}
-
-			nodes, err := resolve(p, true, trust, addrs, bundles, t0)
-			if err != nil {
-				t.Fatalf("resolve: %v", err)
+			keys := make([]relayKeys, 3)
+			bundles := make([][]byte, 3)
+			nodes := make([]pki.Verified, 3)
+			for i := range keys {
+				keys[i], bundles[i] = enrolled(t, p, ca, fmt.Sprintf("relay-%d", i+1), until)
+				v, err := readNode(p, true, trust, keys[i].addr, bundles[i], t0)
+				if err != nil {
+					t.Fatalf("readNode: %v", err)
+				}
+				nodes[i] = *v
 			}
 			chain := chainOf(nodes, []int{0, 1, 2})
-			for i, k := range []relayKeys{k1, k2, k3} {
+			for i, k := range keys {
 				if chain[i].Addr != k.addr || !bytes.Equal(chain[i].StaticPub, k.onion) || !bytes.Equal(chain[i].LinkPub, k.link) {
 					t.Fatalf("hop %d: %+v, want the onion key as StaticPub and the link key as LinkPub", i, chain[i])
 				}
+				if !bytes.Equal(chain[i].Identity, k.identity) {
+					t.Fatalf("hop %d does not carry the identity its certificate certifies", i)
+				}
 			}
 
+			k2, b2 := keys[1], bundles[1]
 			foreign := pki.Policy{Anchor: newCA(t, p).Anchor(), Skew: pki.Skew}
 			_, eb := enrolled(t, p, newCA(t, p), "relay-2", until)
 			unsigned, err := pki.Unsigned(p, k2.link, k2.onion)
@@ -167,37 +179,34 @@ func TestResolveRefusesWhatDoesNotVerify(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, c := range []struct {
-				name    string
-				trust   pki.Policy
-				bundles [][]byte
-				now     time.Time
-				want    error
+				name   string
+				trust  pki.Policy
+				bundle []byte
+				now    time.Time
+				want   error
 			}{
-				{"foreign anchor", foreign, bundles, t0, pki.ErrUnknownCA},
-				{"node certified by another CA", trust, [][]byte{b1, eb, b3}, t0, pki.ErrUnknownCA},
-				{"bundle of another address", trust, [][]byte{b1, b3, b2}, t0, pki.ErrWrongAddr},
-				{"unsigned bundle", trust, [][]byte{b1, unsigned, b3}, t0, pki.ErrFormat},
-				{"descriptor expired", trust, bundles, t0.Add(time.Hour), pki.ErrDescTime},
-				{"certificate expired", trust, bundles, until, pki.ErrCertTime},
-				{"not yet valid", trust, bundles, t0.Add(-pki.Skew - time.Second), pki.ErrCertTime},
+				{"foreign anchor", foreign, b2, t0, pki.ErrUnknownCA},
+				{"node certified by another CA", trust, eb, t0, pki.ErrUnknownCA},
+				{"bundle of another address", trust, bundles[2], t0, pki.ErrWrongAddr},
+				{"unsigned bundle", trust, unsigned, t0, pki.ErrFormat},
+				{"descriptor expired", trust, b2, t0.Add(time.Hour), pki.ErrDescTime},
+				{"certificate expired", trust, b2, until, pki.ErrCertTime},
+				{"not yet valid", trust, b2, t0.Add(-pki.Skew - time.Second), pki.ErrCertTime},
 			} {
-				_, err := resolve(p, true, c.trust, addrs, c.bundles, c.now)
-				if !errors.Is(err, c.want) || !strings.HasPrefix(err.Error(), "node ") {
-					t.Errorf("%s: resolve = %v, want node ...: %v", c.name, err, c.want)
+				if v, err := readNode(p, true, c.trust, k2.addr, c.bundle, c.now); !errors.Is(err, c.want) || v != nil {
+					t.Errorf("%s: readNode = %v, %v, want %v", c.name, v, err, c.want)
 				}
 			}
 
-			twice := []string{k1.addr, k1.addr}
-			if _, err := resolve(p, true, trust, twice, [][]byte{b1, b1}, t0); !errors.Is(err, pki.ErrDuplicate) {
-				t.Errorf("repeated node: resolve = %v, want %v", err, pki.ErrDuplicate)
-			}
-
-			nodes, err = resolve(p, false, pki.Policy{}, addrs, [][]byte{b1, unsigned, b3}, t0.Add(1000*time.Hour))
+			v, err := readNode(p, false, pki.Policy{}, k2.addr, unsigned, t0.Add(1000*time.Hour))
 			if err != nil {
-				t.Fatalf("resolve without auth: %v", err)
+				t.Fatalf("readNode without auth: %v", err)
 			}
-			if !bytes.Equal(nodes[1].OnionPub, k2.onion) {
-				t.Fatal("resolve without auth lost the unsigned onion key")
+			if !bytes.Equal(v.OnionPub, k2.onion) || len(v.Identity) != 0 {
+				t.Fatal("readNode without auth lost the unsigned onion key or found an identity")
+			}
+			if v, err := readNode(p, false, pki.Policy{}, k2.addr, b2, t0); err != nil || len(chainOf([]pki.Verified{*v}, []int{0})[0].Identity) != 0 {
+				t.Fatalf("readNode without auth of a signed bundle: %v, or the chain binds an identity", err)
 			}
 		})
 	}
@@ -397,13 +406,13 @@ func TestBundlesComeFromTheEntryOnly(t *testing.T) {
 			if err != nil {
 				t.Fatalf("nodeBundles: %v", err)
 			}
-			nodes, err := resolve(tb.p, true, tb.trust, tb.addrs, bundles, t0)
-			if err != nil {
-				t.Fatalf("resolve: %v", err)
-			}
 			for i, k := range tb.keys {
-				if nodes[i].Addr != k.addr || !bytes.Equal(nodes[i].OnionPub, k.onion) || !bytes.Equal(nodes[i].LinkPub, k.link) {
-					t.Fatalf("node %d: %+v, want the keys of %s", i, nodes[i], k.addr)
+				v, err := readNode(tb.p, true, tb.trust, tb.addrs[i], bundles[i], t0)
+				if err != nil {
+					t.Fatalf("readNode %d: %v", i, err)
+				}
+				if v.Addr != k.addr || !bytes.Equal(v.OnionPub, k.onion) || !bytes.Equal(v.LinkPub, k.link) {
+					t.Fatalf("node %d: %+v, want the keys of %s", i, v, k.addr)
 				}
 			}
 			if got := tb.requests(); !slices.Equal(got, []int32{3, 0, 0}) {
@@ -491,7 +500,10 @@ func TestBundlesAreCheckedAtTheTimeTheMirrorArrives(t *testing.T) {
 	}
 }
 
-func TestTamperedMirrorRefusesTheChain(t *testing.T) {
+// a listed bundle that does not pass is a node left out: -missing bounds it,
+// and the chain is drawn among the others. 3, 0: the entry is 3 mod 3 = 0, and
+// the one other usable node is the second hop
+func TestTamperedBundleCountsAsLeftOut(t *testing.T) {
 	tb := newTestbed(t, jcrypto.SuiteC25519, 3)
 	_, foreign := enrolled(t, tb.p, newCA(t, tb.p), "relay-2", t0.Add(72*time.Hour))
 	unsigned, err := pki.Unsigned(tb.p, tb.keys[1].link, tb.keys[1].onion)
@@ -502,25 +514,120 @@ func TestTamperedMirrorRefusesTheChain(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		second []byte
-		want   error
 	}{
-		{"node certified by another CA", foreign, pki.ErrUnknownCA},
-		{"bundle of another node", tb.bundles[2], pki.ErrWrongAddr},
-		{"unsigned bundle", unsigned, pki.ErrFormat},
-		{"descriptor signature altered", altered(t, tb.bundles[1]), pki.ErrDescSignature},
+		{"node certified by another CA", foreign},
+		{"bundle of another node", tb.bundles[2]},
+		{"unsigned bundle", unsigned},
+		{"descriptor signature altered", altered(t, tb.bundles[1])},
 	} {
 		tb.publish(t, [][]byte{tb.bundles[0], c.second, tb.bundles[2]})
-		bundles, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 1, 0)
-		if err != nil {
-			t.Fatalf("%s: nodeBundles: %v", c.name, err)
+		s := tb.selection(2, words(3, 0))
+		if chain, _, err := build(s, tb.p); !errors.Is(err, errTooFew) || namesAny(err.Error(), tb.addrs) || chain != nil {
+			t.Errorf("%s without -missing: chain = %v, %v, want %v naming no node", c.name, chain, err, errTooFew)
 		}
-		_, err = resolve(tb.p, true, tb.trust, tb.addrs, bundles, t0)
-		if !errors.Is(err, c.want) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[1]+": ") {
-			t.Errorf("%s: resolve = %v, want node %s: %v", c.name, err, tb.addrs[1], c.want)
+		s = tb.selection(2, words(3, 0))
+		s.missing = 1
+		chain, logged, err := build(s, tb.p)
+		if err != nil || len(chain) != 2 || chain[0].Addr != tb.addrs[0] || chain[1].Addr != tb.addrs[2] {
+			t.Errorf("%s with -missing 1: chain = %v, %v, want nodes 0 and 2", c.name, chain, err)
+		}
+		if !strings.HasSuffix(logged, "2 of 3 listed nodes verified\n") || strings.Contains(logged, "relay-2 ") {
+			t.Errorf("%s: logged\n%s", c.name, logged)
 		}
 	}
 	if got := tb.requests(); got[1] != 0 || got[2] != 0 {
 		t.Fatalf("requests per node %v, want none beyond the entry", got)
+	}
+}
+
+// a node the entry leaves out and a node whose bundle fails take one bound
+// together: five nodes, three hops, the entry 7 mod 5 = 2 serves no bundle of
+// node 0 and an altered one of node 1, so two are lacking, more than
+// min(1, 5 - 3) = 1 and within min(2, 5 - 3) = 2
+func TestLeftOutAndFailingShareOneBound(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	entries := []pki.MirrorEntry{{Addr: tb.addrs[1], Bundle: altered(t, tb.bundles[1])}}
+	for i := 2; i < 5; i++ {
+		entries = append(entries, pki.MirrorEntry{Addr: tb.addrs[i], Bundle: tb.bundles[i]})
+	}
+	raw, err := pki.MarshalMirror(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, srv := range tb.info {
+		srv.mirror.Store(&raw)
+	}
+	s := tb.selection(3, words(7, 6, 5))
+	s.missing = 1
+	if chain, _, err := build(s, tb.p); !errors.Is(err, errTooFew) || namesAny(err.Error(), tb.addrs) || chain != nil {
+		t.Fatalf("-missing 1: chain = %v, %v, want %v naming no node", chain, err, errTooFew)
+	}
+	s = tb.selection(3, words(7, 6, 5))
+	s.missing = 2
+	chain, _, err := build(s, tb.p)
+	if err != nil || len(chain) != 3 || chain[0].Addr != tb.addrs[2] {
+		t.Fatalf("-missing 2: chain = %v, %v, want three hops from node 2", chain, err)
+	}
+	for _, n := range chain {
+		if n.Addr == tb.addrs[0] || n.Addr == tb.addrs[1] {
+			t.Fatalf("chain %v holds a node the mirror lacks", chain)
+		}
+	}
+}
+
+// a mirror that lists one address twice is the entry's fault and names no node
+func TestMirrorWithARepeatedAddressNamesTheClass(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 3)
+	raw := mirrorOf(t, tb.addrs, tb.bundles)
+	raw = bytes.Replace(raw, []byte(`"`+tb.addrs[1]+`"`), []byte(`"`+tb.addrs[0]+`"`), 1)
+	for _, srv := range tb.info {
+		srv.mirror.Store(&raw)
+	}
+	s := tb.selection(2, words(3, 0))
+	s.missing = 1
+	_, _, err := build(s, tb.p)
+	if !errors.Is(err, pki.ErrDuplicate) || err.Error() != "the entry: "+pki.ErrDuplicate.Error() {
+		t.Fatalf("err = %v, want the entry: %v", err, pki.ErrDuplicate)
+	}
+}
+
+// two listed nodes carry one onion key, each under its own certificate: the
+// mirror is taken, and each node keeps the identity of its own certificate,
+// which the setup and the link of that node bind
+func TestTwoNodesWithOneOnionKeyAreTaken(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			tb := newTestbed(t, s, 3)
+			ca := newCA(t, tb.p)
+			tb.trust = pki.Policy{Anchor: ca.Anchor(), Skew: pki.Skew}
+			until := t0.Add(72 * time.Hour)
+			a, ba := enrolled(t, tb.p, ca, "relay-1", until)
+			b, bb := enrolled(t, tb.p, ca, "relay-2", until)
+			c, bc := enrolledWith(t, tb.p, ca, "relay-3", until, a.onion)
+			tb.keys = []relayKeys{a, b, c}
+			tb.publish(t, [][]byte{ba, bb, bc})
+
+			fixed := tb.selection(3, nil)
+			fixed.fixed = true
+			chain, logged, err := build(fixed, tb.p)
+			if err != nil || len(chain) != 3 {
+				t.Fatalf("chain = %v, %v, want all three listed nodes", chain, err)
+			}
+			if !strings.HasSuffix(logged, "3 of 3 listed nodes verified\n") {
+				t.Fatalf("logged\n%s", logged)
+			}
+			if !bytes.Equal(chain[0].StaticPub, chain[2].StaticPub) {
+				t.Fatal("the test needs one onion key on two nodes")
+			}
+			for i, k := range tb.keys {
+				if !bytes.Equal(chain[i].Identity, k.identity) {
+					t.Fatalf("hop %d does not carry the identity of its own certificate", i)
+				}
+			}
+			if bytes.Equal(chain[0].Identity, chain[2].Identity) {
+				t.Fatal("the two nodes with one onion key carry one identity")
+			}
+		})
 	}
 }
 
@@ -640,34 +747,46 @@ func TestLogIsTheSameWhateverThePath(t *testing.T) {
 	}
 }
 
-func TestNodeOffThePathStillRefusesTheChain(t *testing.T) {
+// a node off the path whose bundle does not pass counts against -missing
+// like a node the entry leaves out, and the text of a refusal names no node;
+// a fixed chain needs its own nodes only. 7, 6, 5 among the four usable nodes
+// 1 2 3 4: 7 mod 5 = 2 is the entry, the second usable node; among 1 3 4,
+// 6 mod 3 = 0 takes node 1 and 5 mod 2 = 1 takes node 4
+func TestNodeOffThePathCountsAsLeftOut(t *testing.T) {
 	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
 
 	bad := slices.Clone(tb.bundles)
 	bad[0] = altered(t, tb.bundles[0])
 	tb.publish(t, bad)
 	chain, _, err := build(tb.selection(3, words(7, 6, 5)), tb.p)
-	if !errors.Is(err, pki.ErrDescSignature) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[0]+": ") || chain != nil {
-		t.Fatalf("chain = %v, %v, want node %s: %v though the path 2, 3, 4 does not hold it", chain, err, tb.addrs[0], pki.ErrDescSignature)
+	if !errors.Is(err, errTooFew) || namesAny(err.Error(), tb.addrs) || chain != nil {
+		t.Fatalf("chain = %v, %v, want %v naming no node", chain, err, errTooFew)
+	}
+	s := tb.selection(3, words(7, 6, 5))
+	s.missing = 1
+	chain, _, err = build(s, tb.p)
+	if err != nil || len(chain) != 3 || chain[0].Addr != tb.addrs[2] || chain[1].Addr != tb.addrs[1] || chain[2].Addr != tb.addrs[4] {
+		t.Fatalf("chain with -missing 1 = %v, %v, want nodes 2, 1, 4", chain, err)
 	}
 
 	bad = slices.Clone(tb.bundles)
 	bad[4] = altered(t, tb.bundles[4])
 	tb.publish(t, bad)
-	s := tb.selection(3, nil)
+	s = tb.selection(3, nil)
 	s.fixed = true
 	chain, _, err = build(s, tb.p)
-	if !errors.Is(err, pki.ErrDescSignature) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[4]+": ") || chain != nil {
-		t.Fatalf("fixed chain = %v, %v, want node %s: %v though the chain ends at the third node", chain, err, tb.addrs[4], pki.ErrDescSignature)
+	if err != nil || len(chain) != 3 {
+		t.Fatalf("fixed chain = %v, %v, want the first three nodes though the fifth does not pass", chain, err)
 	}
 
-	// a node the entry leaves out is another matter than one it serves wrongly:
-	// without -missing it refuses as well, and the text names no node
-	m := mirrorOf(t, tb.addrs[1:], tb.bundles[1:])
-	tb.info[2].mirror.Store(&m)
-	chain, _, err = build(tb.selection(3, words(7, 6, 5)), tb.p)
-	if !errors.Is(err, errTooFew) || namesAny(err.Error(), tb.addrs) || chain != nil {
-		t.Fatalf("chain = %v, %v, want %v naming no node", chain, err, errTooFew)
+	bad = slices.Clone(tb.bundles)
+	bad[1] = altered(t, tb.bundles[1])
+	tb.publish(t, bad)
+	s = tb.selection(3, nil)
+	s.fixed, s.missing = true, 2
+	chain, _, err = build(s, tb.p)
+	if !errors.Is(err, pki.ErrDescSignature) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[1]+": ") || chain != nil {
+		t.Fatalf("fixed chain = %v, %v, want node %s: %v", chain, err, tb.addrs[1], pki.ErrDescSignature)
 	}
 }
 
@@ -734,16 +853,32 @@ func TestEntryMayLeaveOutABoundedNumberOfNodes(t *testing.T) {
 	}
 }
 
-func TestBundleServedWronglyIsNotANodeLeftOut(t *testing.T) {
+// the client connects to the entry, so a bundle of its own that does not pass
+// refuses the mirror whatever -missing allows, with a text that names no node.
+// 7 mod 5 = 2 is the entry
+func TestEntryWhoseOwnBundleFailsRefusesTheMirror(t *testing.T) {
 	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
 	bad := slices.Clone(tb.bundles)
-	bad[0] = altered(t, tb.bundles[0])
+	bad[2] = altered(t, tb.bundles[2])
 	tb.publish(t, bad)
 	s := tb.selection(3, words(7, 6, 5))
 	s.missing = 2
-	chain, _, err := build(s, tb.p)
-	if !errors.Is(err, pki.ErrDescSignature) || chain != nil {
-		t.Fatalf("chain = %v, %v, want %v: -missing covers absent nodes only", chain, err, pki.ErrDescSignature)
+	chain, logged, err := build(s, tb.p)
+	var failed *entryError
+	if !errors.As(err, &failed) || !errors.Is(err, pki.ErrDescSignature) || chain != nil {
+		t.Fatalf("chain = %v, %v, want the entry: %v", chain, err, pki.ErrDescSignature)
+	}
+	if err.Error() != "the entry: "+pki.ErrDescSignature.Error() || namesAny(err.Error(), tb.addrs) || logged != "" {
+		t.Fatalf("refusal %q with the log %q names a node or says more than its class", err, logged)
+	}
+
+	// a mirror that does not hold the entry at all is the other way to lack it
+	m := mirrorOf(t, slices.Delete(slices.Clone(tb.addrs), 2, 3), slices.Delete(slices.Clone(tb.bundles), 2, 3))
+	tb.info[2].mirror.Store(&m)
+	s = tb.selection(3, words(7, 6, 5))
+	s.missing = 2
+	if _, _, err := build(s, tb.p); !errors.Is(err, errNoBundle) || !errors.As(err, &failed) {
+		t.Fatalf("mirror without the entry = %v, want the entry: %v", err, errNoBundle)
 	}
 }
 
@@ -765,6 +900,36 @@ func TestFixedChainNeedsItsOwnNodesOnly(t *testing.T) {
 	chain, _, err = build(s, tb.p)
 	if !errors.Is(err, errNoBundle) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[1]+": ") || chain != nil {
 		t.Fatalf("fixed chain with its second node left out = %v, %v, want node %s: %v", chain, err, tb.addrs[1], errNoBundle)
+	}
+}
+
+// with a fixed chain the first listed node is the entry, and its own bundle
+// must pass as well: one that fails or is missing refuses the mirror whatever
+// -missing allows, before anything is logged
+func TestFixedChainRefusesAnEntryItCannotVerify(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			tb := newTestbed(t, s, 5)
+			for _, c := range []struct {
+				name   string
+				mirror []byte
+				want   error
+			}{
+				{"altered", mirrorOf(t, tb.addrs, append([][]byte{altered(t, tb.bundles[0])}, tb.bundles[1:]...)), pki.ErrDescSignature},
+				{"missing", mirrorOf(t, tb.addrs[1:], tb.bundles[1:]), errNoBundle},
+			} {
+				tb.info[0].mirror.Store(&c.mirror)
+				sel := tb.selection(3, nil)
+				sel.fixed, sel.missing = true, 2
+				chain, logged, err := build(sel, tb.p)
+				if !errors.Is(err, c.want) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[0]+": ") || chain != nil {
+					t.Fatalf("%s bundle of the entry: chain = %v, %v, want node %s: %v", c.name, chain, err, tb.addrs[0], c.want)
+				}
+				if logged != "" {
+					t.Fatalf("%s bundle of the entry: logged %q before the refusal", c.name, logged)
+				}
+			}
+		})
 	}
 }
 
@@ -1039,7 +1204,7 @@ func TestProcessExitsWithTheCodeOfTheCircuitEnd(t *testing.T) {
 						return err
 					}
 					defer raw.Close()
-					conn, err := link.Accept(raw, p, linkPriv, linkPub)
+					conn, err := link.Accept(raw, p, linkPriv, linkPub, nil)
 					if err != nil {
 						return err
 					}

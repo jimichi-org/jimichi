@@ -44,6 +44,8 @@ var (
 type SetupHop struct {
 	// public key of the relay this layer is addressed to
 	StaticPub []byte
+	// the key its certificate certifies; empty without node authentication
+	Identity []byte
 	// address of the next relay, empty at the exit
 	NextAddr string
 	// circuit identifier the next link will use; the exit has no next link,
@@ -160,7 +162,7 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 			release()
 			return nil, err
 		}
-		ctx, err := setupContext(p, i, hop.Link, hop.StaticPub, ephPub)
+		ctx, err := setupContext(p, i, hop.Link, hop.StaticPub, ephPub, hop.Identity)
 		if err != nil {
 			ephPriv.Release()
 			release()
@@ -269,9 +271,10 @@ type SetupLayer struct {
 
 // index travels in the counter field: a relay must know its position before it
 // can tell how much of the body belongs to its layer. staticPub is the key the
-// client took from the descriptor: it is part of the transcript, so a layer
-// built for another key does not open
-func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []byte, cell *Cell) (*SetupLayer, error) {
+// client took from the descriptor and identity the node's own identity key,
+// empty without node authentication: both are part of the transcript, so a
+// layer built for another key or another node does not open
+func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub, identity []byte, cell *Cell) (*SetupLayer, error) {
 	hdr, err := cell.Header()
 	if err != nil {
 		return nil, err
@@ -302,7 +305,7 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []
 	layer := cell.Body()[:layerLen]
 	ephPub := layer[:pubLen]
 
-	ctx, err := setupContext(p, index, hdr.Circuit, staticPub, ephPub)
+	ctx, err := setupContext(p, index, hdr.Circuit, staticPub, ephPub, identity)
 	if err != nil {
 		return nil, err
 	}
@@ -402,11 +405,18 @@ func setupAAD(index int) []byte {
 }
 
 // one transcript per hop: version, hop index, identifier of the link into the
-// hop, the hop's onion key, the client's ephemeral key
-func setupContext(p jcrypto.CryptoProvider, index int, link uint64, staticPub, ephPub []byte) (jcrypto.Context, error) {
+// hop, the hop's onion key, the client's ephemeral key and, when nodes are
+// authenticated, the hop's identity key; without authentication the part is
+// left out rather than sent empty, and the count of parts keeps the two forms
+// apart
+func setupContext(p jcrypto.CryptoProvider, index int, link uint64, staticPub, ephPub, identity []byte) (jcrypto.Context, error) {
 	var id [8]byte
 	binary.BigEndian.PutUint64(id[:], link)
-	return jcrypto.NewContext(p, exchangeSetup, []byte{byte(Version)}, []byte{byte(index)}, id[:], staticPub, ephPub)
+	parts := [][]byte{{byte(Version)}, {byte(index)}, id[:], staticPub, ephPub}
+	if len(identity) > 0 {
+		parts = append(parts, identity)
+	}
+	return jcrypto.NewContext(p, exchangeSetup, parts...)
 }
 
 func putAddr(dst []byte, addr string) error {

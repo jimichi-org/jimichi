@@ -99,12 +99,13 @@ Decisions taken:
 ## Key derivation
 
 Every secret and every key depends on the transcript of its exchange, on the suite and on the
-scheme version. A substituted public key, mode, suite or version on either side gives different
-keys, and the first AEAD check fails.
+scheme version, and, when nodes are authenticated, on the identity of the node. A substituted
+public key, identity, mode, suite or version on either side gives different keys, and the first
+AEAD check fails.
 
 ### Label
 
-`label = ASCII("jimichi/v1/" || suite || "/" || purpose)`, the suite being `c25519` or `gost`.
+`label = ASCII("jimichi/v2/" || suite || "/" || purpose)`, the suite being `c25519` or `gost`.
 A label holds no 0x00 byte and is at most 50 bytes long.
 
 | purpose | Label length, c25519 / GOST | Derived by | Key size |
@@ -127,7 +128,7 @@ A label holds no 0x00 byte and is at most 50 bytes long.
 ### Transcript
 
 ```
-T  = ASCII("jimichi/v1/" || suite || "/transcript/" || exchange) || 0x00 || u8(n)
+T  = ASCII("jimichi/v2/" || suite || "/transcript/" || exchange) || 0x00 || u8(n)
      || n times: u16be(part length) || part
 th = Hash(T)        SHA-256 or Streebog-256, 32 bytes
 ```
@@ -156,8 +157,9 @@ Circuit setup, exchange `setup`, one context per hop:
 | 3 | link id | 8, big endian | chosen for the hop | from the cell header |
 | 4 | onion key | public key | from the verified descriptor | the public half of the onion key being tried |
 | 5 | client ephemeral key | public key | generated | the bytes at the start of the layer |
+| 6 | node identity key, only when nodes are authenticated | signing key | from the verified certificate | its own, the one its certificate certifies |
 
-T is 120 bytes long on c25519 and 182 on GOST.
+T is 120 bytes long on c25519 and 182 on GOST; with part 6, 154 and 248.
 
 Link, exchange `link`:
 
@@ -168,8 +170,27 @@ Link, exchange `link`:
 | 3 | initiator ephemeral key | as in the hello after the mode byte |
 | 4 | responder ephemeral key | as sent |
 | 5 | responder link key, in mode 0x01 only | the initiator takes it from the descriptor, the responder uses its published one |
+| 6 | responder identity key, in mode 0x01 only and when nodes are authenticated | the initiator takes it from the verified certificate, the responder uses its own |
 
-T in modes 0x00 and 0x01: 109 and 143 bytes on c25519, 171 and 237 on GOST.
+T in modes 0x00 and 0x01: 109 and 143 bytes on c25519, 171 and 237 on GOST; with part 6, 177
+and 303.
+
+Node identity:
+- The identity key is the public signing key of the node that its certificate certifies
+  (Verified.Identity). It is made at node start and lives as long as the process, so it stays the
+  same when the node is enrolled again, unlike the bytes of the certificate.
+- A node with -auth binds its identity key from the start: to every setup it opens and to every
+  authenticated link it accepts. Before its certificate it serves no descriptor and extends no
+  circuit, so nobody knows the keys to reach it by. The client takes the identity key of every
+  node of the chain from its verified certificate, a node takes the identity key of the next node
+  from that peer's descriptor in its cache.
+- Without node authentication (-auth=false) both sides bind the empty identity: part 6 is left
+  out and the transcript has one part fewer. The layout admits no empty part, and the number of
+  parts tells the two forms apart. A node with -auth and a client or neighbouring node without it
+  agree on no key: this is a configuration mismatch, and a setup or link handshake between them
+  fails.
+- A setup layer and an authenticated link open only at the node that holds the private half of
+  the key and binds the same identity.
 
 ### Formulas
 
@@ -239,16 +260,20 @@ not a bad pair.
 
 ### Rules for changes
 
-- The scheme version `v1` changes with any change to the transcript layout, to the formulas, or
-  to the name or size of an existing purpose. Versions are not compatible with each other, and
-  there is no version negotiation.
+- The scheme version (now `v2`) changes with any change to the transcript layout, to the
+  formulas, or to the name or size of an existing purpose. Versions are not compatible with each
+  other, and there is no version negotiation: nodes and clients are updated together. The version
+  is not visible on the wire, and the cell version byte (wire.Version) does not change with the
+  key scheme.
 - A new purpose does not change the version: it adds a row to the label table and a golden
   vector in crypto/providertest.
-- The golden vectors pin the composition: the hashes of three transcripts, every derived key,
-  MixKey and Agree on fixed keys, for both suites. The comment next to them says how to recompute
-  the values without this code. The VKO examples of RFC 7836 (appendix B, examples 7 and 8) are on
-  the 512-bit paramSetA, so the GOST primitives are checked against the examples of the standards
-  in the tests of crypto/gost, and the composition on the 256-bit paramSetA is pinned by the
+- The golden vectors pin the composition: the hashes of five transcripts (the setup and both
+  link modes without an identity, the setup and the authenticated link with an identity key),
+  every derived key, MixKey and Agree on fixed keys, for both suites. The comment next to them
+  says how to recompute the values without this code. The VKO examples of RFC 7836 (appendix B,
+  examples 7 and 8) are on the 512-bit paramSetA, so the GOST primitives are checked against the
+  examples of the standards in the tests of crypto/gost, and the composition on the 256-bit
+  paramSetA is pinned by the
   vectors of the scheme with the intermediate values (the transcript hash, the UKM, the KEK)
   written down in crypto/providertest. They were computed by an independent implementation that
   is not part of the repository; everything but the KEK is a hash or an HMAC and can be
@@ -299,7 +324,7 @@ and has no primitives of its own.
 
 | Key | What it does | Lives |
 |---|---|---|
-| Node signing key | signs the certificate request and the descriptors | until the process ends |
+| Node signing key | signs the certificate request and the descriptors; its public half (the identity key) goes into the setup and link transcripts of the node when nodes are authenticated (section "Transcript") | until the process ends |
 | Link key | mixed into the handshake by whoever opens a link to the node, which authenticates the node on that link | until the process ends |
 | Onion key | the client agrees the layer secret of a circuit setup with it | with -onion-rotate one period as the published key and the grace period after it; without rotation the link key serves in this role until the process ends |
 | Hop keys of a circuit | open and seal the cells of one circuit at one node | until the circuit is torn down |

@@ -27,6 +27,8 @@ type Node struct {
 	StaticPub []byte
 	// the entry link key; empty means StaticPub
 	LinkPub []byte
+	// the key its certificate certifies; empty without node authentication
+	Identity []byte
 }
 
 var ErrNodeKey = errors.New("client: node key missing or of the wrong size")
@@ -133,7 +135,7 @@ func Dial(cfg Config) (*Client, error) {
 
 	chain := make([]wire.SetupHop, len(cfg.Chain))
 	for i, node := range cfg.Chain {
-		hop := wire.SetupHop{StaticPub: node.StaticPub, Link: links[i]}
+		hop := wire.SetupHop{StaticPub: node.StaticPub, Identity: node.Identity, Link: links[i]}
 		if i+1 < len(cfg.Chain) {
 			hop.NextAddr = cfg.Chain[i+1].Addr
 			hop.NextCircuit = links[i+1]
@@ -165,7 +167,7 @@ func Dial(cfg Config) (*Client, error) {
 	}
 	// a silent entry would otherwise hold Dial, and the circuit keys, for good
 	_ = raw.SetDeadline(time.Now().Add(orDefault(cfg.HandshakeTimeout, DefaultHandshakeTimeout)))
-	conn, err := link.Dial(raw, cfg.Provider, cfg.Chain[0].linkKey())
+	conn, err := link.Dial(raw, cfg.Provider, cfg.Chain[0].linkKey(), cfg.Chain[0].Identity)
 	if err != nil {
 		circuit.Close()
 		release()

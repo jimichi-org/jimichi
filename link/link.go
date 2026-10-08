@@ -103,12 +103,19 @@ func FrameSize(p jcrypto.CryptoProvider) (int, error) {
 	return wire.CellSize + a.Overhead(), nil
 }
 
+var errIdentityWithoutKey = errors.New("link: an identity needs the link key it goes with")
+
 // peerStatic authenticates the responder when the initiator knows its key; nil
 // gives an anonymous channel that still hides everything from a passive observer.
+// peerIdentity is the identity key the responder's certificate certifies, empty
+// when nodes are not authenticated; the responder must bind the same one.
 // Dial returns only after the responder's first frame opened under the keys
 // derived here, so nothing is sent to a responder that derived other keys; the
 // caller's deadline on raw bounds the wait
-func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, error) {
+func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic, peerIdentity []byte) (*Conn, error) {
+	if peerStatic == nil && len(peerIdentity) > 0 {
+		return nil, errIdentityWithoutKey
+	}
 	ephPriv, ephPub, err := p.GenerateEphemeral()
 	if err != nil {
 		return nil, err
@@ -132,7 +139,7 @@ func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, err
 		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
 
-	ctx, err := handshakeContext(p, mode, ephPub, peerEph, peerStatic)
+	ctx, err := handshakeContext(p, mode, ephPub, peerEph, peerStatic, peerIdentity)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
@@ -157,10 +164,11 @@ func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, err
 	return c, nil
 }
 
-// staticPub is the link key as the responder published it: an initiator in the
+// staticPub is the link key as the responder published it and identity its own
+// identity key, empty when nodes are not authenticated: an initiator in the
 // authenticated mode put the same bytes into the transcript. A responder
 // without a link key takes anonymous links only
-func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []byte) (*Conn, error) {
+func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub, identity []byte) (*Conn, error) {
 	n, err := pubSize(p)
 	if err != nil {
 		return nil, err
@@ -172,7 +180,7 @@ func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, s
 	mode, peerEph := hello[0], hello[1:]
 	switch mode {
 	case modeAnonymous:
-		staticPriv, staticPub = nil, nil
+		staticPriv, staticPub, identity = nil, nil, nil
 	case modeAuthenticated:
 		if staticPriv == nil || len(staticPub) != n {
 			return nil, ErrHandshake
@@ -190,7 +198,7 @@ func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, s
 		return nil, err
 	}
 
-	ctx, err := handshakeContext(p, mode, peerEph, ephPub, staticPub)
+	ctx, err := handshakeContext(p, mode, peerEph, ephPub, staticPub, identity)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
@@ -213,11 +221,15 @@ func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, s
 }
 
 // version, mode, both ephemeral keys as they crossed the wire and, in the
-// authenticated mode, the responder's link key
-func handshakeContext(p jcrypto.CryptoProvider, mode byte, initiatorEph, responderEph, responderStatic []byte) (jcrypto.Context, error) {
+// authenticated mode, the responder's link key followed by its identity key
+// when nodes are authenticated; an absent identity is left out, not sent empty
+func handshakeContext(p jcrypto.CryptoProvider, mode byte, initiatorEph, responderEph, responderStatic, responderIdentity []byte) (jcrypto.Context, error) {
 	parts := [][]byte{{wire.Version}, {mode}, initiatorEph, responderEph}
 	if mode == modeAuthenticated {
 		parts = append(parts, responderStatic)
+		if len(responderIdentity) > 0 {
+			parts = append(parts, responderIdentity)
+		}
 	}
 	return jcrypto.NewContext(p, exchangeLink, parts...)
 }

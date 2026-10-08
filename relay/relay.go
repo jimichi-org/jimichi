@@ -29,6 +29,10 @@ type Config struct {
 	// the public half as the node publishes it: an initiator that authenticates
 	// the link, and a client when Onion is nil, bind their keys to these bytes
 	StaticPub []byte
+	// the key its certificate certifies, bound by its setup layers and
+	// authenticated links; empty without node authentication, and a side that
+	// binds another value shares no key with the node
+	Identity []byte
 	// the keys that open setup layers, closed by the caller after Close; nil
 	// keeps StaticPriv, the link key, in that role as well for the life of the
 	// node
@@ -69,10 +73,18 @@ type Config struct {
 	SourceSetupRate  float64
 	SourceSetupBurst int
 
-	// the nodes this one extends to and the link key each must prove; nil
-	// extends to any address over an anonymous link, which is the baseline
-	// without node authentication
-	Peers func(addr string) (linkPub []byte, ok bool)
+	// the nodes this one extends to and the keys each must prove; nil extends
+	// to any address over an anonymous link, which is the baseline without node
+	// authentication
+	Peers func(addr string) (Peer, bool)
+}
+
+// a node to extend to, as its verified descriptor names it
+type Peer struct {
+	LinkPub []byte
+	// the key its certificate certifies; the link binds it, so only the node
+	// that holds the link key and binds this identity confirms the link
+	Identity []byte
 }
 
 type Relay struct {
@@ -199,6 +211,7 @@ func New(cfg Config) (*Relay, error) {
 		return nil, fmt.Errorf("%w: %d bytes, want %d", ErrStaticPubSize, len(cfg.StaticPub), pubSize)
 	}
 	cfg.StaticPub = bytes.Clone(cfg.StaticPub)
+	cfg.Identity = bytes.Clone(cfg.Identity)
 	if cfg.QueueCells < 0 || cfg.QueueCells > maxQueueCells {
 		return nil, fmt.Errorf("relay: queue of %d cells outside 0..%d", cfg.QueueCells, maxQueueCells)
 	}
@@ -368,7 +381,7 @@ func (r *Relay) handle(conn net.Conn, src netip.Addr) {
 	if r.lim.handshake > 0 {
 		_ = conn.SetDeadline(time.Now().Add(r.lim.handshake))
 	}
-	lc, err := link.Accept(conn, r.cfg.Provider, r.cfg.StaticPriv, r.cfg.StaticPub)
+	lc, err := link.Accept(conn, r.cfg.Provider, r.cfg.StaticPriv, r.cfg.StaticPub, r.cfg.Identity)
 	r.handshakeDone(src)
 	if err != nil {
 		r.stats.timeout(err)
@@ -610,7 +623,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn, src net
 		return r.setupFailed(from, errSetupRate)
 	}
 
-	layer, err := r.onion.Open(r.cfg.Provider, cell)
+	layer, err := r.onion.Open(r.cfg.Provider, r.cfg.Identity, cell)
 	if err != nil {
 		return r.setupFailed(from, err)
 	}
@@ -688,16 +701,16 @@ func (r *Relay) setupFailed(from *link.Conn, err error) error {
 }
 
 func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
-	var peerLink []byte
+	var peer Peer
 	if r.cfg.Peers != nil {
-		key, ok := r.cfg.Peers(layer.NextAddr)
+		known, ok := r.cfg.Peers(layer.NextAddr)
 		// link.Dial reads a missing key as an anonymous link, so an empty one
 		// counts as unknown
-		if !ok || len(key) == 0 {
+		if !ok || len(known.LinkPub) == 0 {
 			r.stats.add(&r.stats.RefusedExtend)
 			return errNotPeer
 		}
-		peerLink = key
+		peer = known
 	}
 	raw, err := r.dial(layer.NextAddr)
 	if err != nil {
@@ -715,11 +728,11 @@ func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
 	}
 
 	_ = raw.SetDeadline(time.Now().Add(r.onward))
-	// with the next node's link key the frame keys depend on its static key, and
-	// the handshake ends only once that node has shown it derived them, so the
-	// setup goes to no other; without a key the link is anonymous and hides
+	// with the next node's link key and identity the frame keys depend on both,
+	// and the handshake ends only once that node has shown it derived them, so
+	// the setup goes to no other; without a key the link is anonymous and hides
 	// headers from a passive observer only
-	conn, err := link.Dial(raw, r.cfg.Provider, peerLink)
+	conn, err := link.Dial(raw, r.cfg.Provider, peer.LinkPub, peer.Identity)
 	if err != nil {
 		if errors.Is(err, link.ErrHandshake) {
 			r.stats.add(&r.stats.FailedExtend)

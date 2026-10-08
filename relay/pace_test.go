@@ -26,10 +26,10 @@ func pacedPipe(t *testing.T, period time.Duration, size int) (*pacer, net.Conn, 
 	a, b := net.Pipe()
 	accepted := make(chan error, 1)
 	go func() {
-		_, err := link.Accept(b, p, priv, pub)
+		_, err := link.Accept(b, p, priv, pub, nil)
 		accepted <- err
 	}()
-	out, err := link.Dial(a, p, nil)
+	out, err := link.Dial(a, p, nil, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

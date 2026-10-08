@@ -256,7 +256,7 @@ func idleLink(t *testing.T, s *served) net.Conn {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { _ = raw.Close() })
-	if _, err := link.Dial(raw, c25519.New(), s.pub); err != nil {
+	if _, err := link.Dial(raw, c25519.New(), s.pub, nil); err != nil {
 		t.Fatalf("link: %v", err)
 	}
 	return raw
@@ -330,7 +330,7 @@ func startStalledHop(t *testing.T) *stalledHop {
 		if tcp, ok := raw.(*net.TCPConn); ok {
 			_ = tcp.SetReadBuffer(1)
 		}
-		lc, err := link.Accept(raw, p, priv, pub)
+		lc, err := link.Accept(raw, p, priv, pub, nil)
 		if err != nil {
 			return
 		}
@@ -513,7 +513,7 @@ func TestSilentNextHopFailsTheExtendAtItsDeadline(t *testing.T) {
 	}{{"no answer", false}, {"no confirmation", true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			addr, pub := startSilentHop(t, tc.answersKey)
-			s := serveBounded(t, Config{Peers: func(next string) ([]byte, bool) { return pub, next == addr }}, 150*time.Millisecond)
+			s := serveBounded(t, Config{Peers: func(next string) (Peer, bool) { return Peer{LinkPub: pub}, next == addr }}, 150*time.Millisecond)
 
 			cl, err := client.Dial(client.Config{Provider: c25519.New(), Chain: []client.Node{
 				{Addr: s.addr, StaticPub: s.pub},

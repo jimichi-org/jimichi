@@ -2,6 +2,7 @@ package relay_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -15,14 +16,14 @@ import (
 	"github.com/jimichi-org/jimichi/relay"
 )
 
-func peersOf(nodes ...*node) func(string) ([]byte, bool) {
-	keys := make(map[string][]byte, len(nodes))
+func peersOf(nodes ...*node) func(string) (relay.Peer, bool) {
+	peers := make(map[string]relay.Peer, len(nodes))
 	for _, n := range nodes {
-		keys[n.addr] = n.pub
+		peers[n.addr] = relay.Peer{LinkPub: n.pub, Identity: n.identity}
 	}
-	return func(addr string) ([]byte, bool) {
-		key, ok := keys[addr]
-		return key, ok
+	return func(addr string) (relay.Peer, bool) {
+		peer, ok := peers[addr]
+		return peer, ok
 	}
 }
 
@@ -66,7 +67,7 @@ func TestPeerWithoutAKeyIsRefused(t *testing.T) {
 	next := startNode(t, p, nil)
 	var dials atomic.Int32
 	entry := startRelay(t, p, relay.Config{
-		Peers: func(string) ([]byte, bool) { return nil, true },
+		Peers: func(string) (relay.Peer, bool) { return relay.Peer{}, true },
 		Dial:  countDials(&dials),
 	})
 
@@ -110,7 +111,7 @@ func TestSetupIsNotForwardedToANodeWithAnotherKey(t *testing.T) {
 	var dials atomic.Int32
 	var written atomic.Int64
 	entry := startRelay(t, p, relay.Config{
-		Peers: func(addr string) ([]byte, bool) { return other, addr == exit.addr },
+		Peers: func(addr string) (relay.Peer, bool) { return relay.Peer{LinkPub: other}, addr == exit.addr },
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			conn, err := countDials(&dials)(ctx, network, addr)
 			if err != nil {
@@ -147,6 +148,125 @@ func TestSetupIsNotForwardedToANodeWithAnotherKey(t *testing.T) {
 	if got := entry.r.Stats().Snapshot(); got.FailedExtend != 1 || got.Dropped != 1 || got.RefusedExtend != 0 || got.TimedOut != 0 {
 		t.Fatalf("failed extends = %d, dropped = %d, refused extends = %d, timed out = %d, want 1, 1, 0, 0",
 			got.FailedExtend, got.Dropped, got.RefusedExtend, got.TimedOut)
+	}
+}
+
+func signingKey(t *testing.T, p jcrypto.CryptoProvider) []byte {
+	t.Helper()
+	priv, pub, err := p.GenerateSigning()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv.Release()
+	return pub
+}
+
+// authenticated nodes e, a and x, each binding its own identity; c is a
+// descriptor that names the keys of a under another identity, at an address
+// whose connections reach a. A chain through a delivers. A chain through c
+// fails wherever c stands: as the entry the client's link to it is not
+// confirmed; in the middle the link onwards is not confirmed; and where that
+// link is sound, the layer built for c does not open at a
+func TestChainBindsTheIdentityOfEveryNode(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			p, err := suite.New(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			delivered := make(chan []byte, 4)
+			exit := startRelay(t, p, relay.Config{
+				Identity: signingKey(t, p),
+				Deliver: func(_ uint64, payload []byte) []byte {
+					delivered <- append([]byte(nil), payload...)
+					return nil
+				},
+				Peers: peersOf(),
+			})
+			a := startRelay(t, p, relay.Config{Identity: signingKey(t, p), Peers: peersOf(exit)})
+			const cAddr = "relay-c.test:9000"
+			c := &node{addr: cAddr, pub: a.pub, identity: signingKey(t, p)}
+			toA := func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if addr == cAddr {
+					addr = a.addr
+				}
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
+			}
+			// the entry knows c by what its descriptor says; the second entry
+			// reaches a under the address of c with the identity of a, so only
+			// the setup layer tells the two apart
+			entry := startRelay(t, p, relay.Config{Identity: signingKey(t, p), Peers: peersOf(a, c), Dial: toA})
+			sound := startRelay(t, p, relay.Config{
+				Identity: signingKey(t, p),
+				Peers: func(addr string) (relay.Peer, bool) {
+					if addr == cAddr {
+						return relay.Peer{LinkPub: a.pub, Identity: a.identity}, true
+					}
+					return relay.Peer{}, false
+				},
+				Dial: toA,
+			})
+
+			cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, a, exit)})
+			if err != nil {
+				t.Fatalf("Dial through a: %v", err)
+			}
+			if err := cl.Send([]byte("through a")); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			select {
+			case got := <-delivered:
+				if string(got) != "through a" {
+					t.Fatalf("delivered %q", got)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("nothing delivered through a")
+			}
+			_ = cl.Close()
+
+			asEntry := chainOf(c, exit)
+			asEntry[0].Addr = a.addr
+			if cl, err := client.Dial(client.Config{Provider: p, Chain: asEntry}); !errors.Is(err, link.ErrHandshake) {
+				if cl != nil {
+					_ = cl.Close()
+				}
+				t.Fatalf("c as the entry: Dial = %v, want %v", err, link.ErrHandshake)
+			}
+
+			for _, tc := range []struct {
+				name   string
+				first  *node
+				failed uint64
+				// setups a dropped because the layer did not open
+				dropped uint64
+			}{
+				{"c in the middle", entry, 1, 0},
+				{"c in the middle over a sound link", sound, 0, 1},
+			} {
+				before := a.r.Stats().Snapshot()
+				cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(tc.first, c, exit)})
+				if err != nil {
+					t.Fatalf("%s: Dial: %v", tc.name, err)
+				}
+				_ = cl.Send([]byte("through c"))
+				expectEnd(t, cl)
+				_ = cl.Close()
+				if got := tc.first.r.Stats().Snapshot().FailedExtend; got != tc.failed {
+					t.Fatalf("%s: %d failed extends, want %d", tc.name, got, tc.failed)
+				}
+				got := a.r.Stats().Snapshot()
+				if got.Forwarded != before.Forwarded || got.Dropped-before.Dropped != tc.dropped {
+					t.Fatalf("%s: a forwarded %d cells meant for c and dropped %d, want 0 and %d",
+						tc.name, got.Forwarded-before.Forwarded, got.Dropped-before.Dropped, tc.dropped)
+				}
+			}
+			select {
+			case got := <-delivered:
+				t.Fatalf("delivered %q through c", got)
+			default:
+			}
+		})
 	}
 }
 

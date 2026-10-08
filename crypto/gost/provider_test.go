@@ -187,15 +187,15 @@ func TestAgreeIsVKOThenKDF(t *testing.T) {
 		t.Fatal(err)
 	}
 	th := ctx.Sum()
-	if got := hex.EncodeToString(th[:ukmSize]); got != "28381a1c9c8e2531" {
-		t.Fatalf("UKM %s, want 28381a1c9c8e2531", got)
+	if got := hex.EncodeToString(th[:ukmSize]); got != "d45eab779d45b756" {
+		t.Fatalf("UKM %s, want d45eab779d45b756", got)
 	}
 
 	kek, err := vko(c, priv, pubB, th[:ukmSize])
 	if err != nil {
 		t.Fatalf("vko: %v", err)
 	}
-	if got := hex.EncodeToString(kek); got != "e50506395189f57d28577d26b265f204e048cb78976dd3bee1fbe7098d75ca94" {
+	if got := hex.EncodeToString(kek); got != "db1d15909ad1f826e3b9d90415c62109049c866ca16527b1f948d6717da94a5d" {
 		t.Fatalf("KEK %s", got)
 	}
 	label, err := jcrypto.Label(jcrypto.SuiteGOST, "agree")

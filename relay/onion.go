@@ -146,11 +146,12 @@ func (g *OnionRing) Current() (epoch uint32, pub []byte) {
 
 // Open tries every live key, in one order and to the end even after one has
 // opened, so the time a setup takes does not tell which epoch its client used.
-// Each key is tried under a transcript that holds its own public half, so a
-// layer built for one epoch does not open under the key of another.
+// Each key is tried under a transcript that holds its own public half and the
+// node's identity, so a layer built for one epoch does not open under the key
+// of another, nor one built for another node under the same key.
 // The tag is burned on first sight whatever happens to the setup next: one that
 // fails further on must not come back later on a fresh link either
-func (g *OnionRing) Open(p jcrypto.CryptoProvider, cell *wire.Cell) (*wire.SetupLayer, error) {
+func (g *OnionRing) Open(p jcrypto.CryptoProvider, identity []byte, cell *wire.Cell) (*wire.SetupLayer, error) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	if g.closed {
@@ -165,7 +166,7 @@ func (g *OnionRing) Open(p jcrypto.CryptoProvider, cell *wire.Cell) (*wire.Setup
 		if k == nil {
 			continue
 		}
-		layer, err := wire.OpenSetup(p, k.priv, k.pub, cell)
+		layer, err := wire.OpenSetup(p, k.priv, k.pub, identity, cell)
 		switch {
 		case err != nil:
 			if refused == nil {

@@ -99,7 +99,7 @@ func opensFor(t *testing.T, p jcrypto.CryptoProvider, ring *relay.OnionRing, oni
 		t.Fatal(err)
 	}
 	setup.CellKeys[0].Release()
-	layer, err := ring.Open(p, setup.Cell)
+	layer, err := ring.Open(p, nil, setup.Cell)
 	if err != nil {
 		return false
 	}
@@ -456,7 +456,7 @@ func TestUnsignedNodePublishesTheRotatedKey(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("GET /descriptor = %d", code)
 		}
-		nodes, err := pki.Unverified(p, []string{testAddr}, [][]byte{bundle})
+		v, err := pki.Unverified(p, testAddr, bundle)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -465,7 +465,7 @@ func TestUnsignedNodePublishesTheRotatedKey(t *testing.T) {
 		if err != nil || len(entries) != 1 || !bytes.Equal(entries[0].Bundle, bundle) {
 			t.Fatalf("the mirror does not carry the descriptor in service: %v", err)
 		}
-		return nodes[0]
+		return *v
 	}
 
 	if v := read(); v.Epoch != 0 || !bytes.Equal(v.OnionPub, k0) {
@@ -779,11 +779,11 @@ func TestNodeRotatesAndOpensSetupsWithItsNewKey(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("GET /descriptor = %d", code)
 		}
-		nodes, err := pki.Unverified(p, []string{cells}, [][]byte{bundle})
+		v, err := pki.Unverified(p, cells, bundle)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return nodes[0]
+		return *v
 	}
 	echoes := func(onion []byte, link []byte) bool {
 		t.Helper()

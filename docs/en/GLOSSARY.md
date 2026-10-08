@@ -14,7 +14,7 @@ English | [Русский](../ru/GLOSSARY.md)
 | Fixed chain | the first nodes of the list in the listed order instead of a random choice, for measurements that need a known path |
 | Ephemeral key | a key that lives for one session; its buffer is zeroed afterwards, while the copies the libraries made stay on the heap until that memory is reused (CRYPTO, "Known gaps") |
 | UKM | the VKO factor binding an agreed secret to a session; in the GOST suite it is the first 8 bytes of the transcript hash |
-| Transcript | the public data of one key exchange in an unambiguous layout: the version, the parameters of the exchange and the public keys of both sides (CRYPTO, "Key derivation") |
+| Transcript | the public data of one key exchange in an unambiguous layout: the version, the parameters of the exchange, the public keys of both sides and, when nodes are authenticated, the identity key of the node (CRYPTO, "Key derivation") |
 | Key context | the transcript hash together with the suite (Context); it enters every agreement and every key derivation, and the provider derives no key without it |
 | AEAD | authenticated encryption with associated data |
 | Cover traffic | cells with no payload, sent to mask when a real message leaves: on top of the messages or in the empty slots of a constant-rate schedule; how much they mask is measured, not assumed (EXPERIMENT, block 1) |
@@ -26,7 +26,7 @@ English | [Русский](../ru/GLOSSARY.md)
 | Forward secrecy | compromise of a long-term key does not expose past sessions |
 | Trust anchor | the CA public key the client trusts in advance, as the string `<suite>:<base64>` |
 | Node certificate | a CA-signed record binding a node's name, address and signing key for a validity period |
-| Node signing key | the node's long-term signing pair (identity key): it signs the certificate request and the descriptor and takes no part in key agreement |
+| Node signing key | the node's long-term signing pair (identity key): it signs the certificate request and the descriptor and takes no part in key agreement; when nodes are authenticated its public half goes into the setup and link transcripts of the node |
 | Onion key | the node key the client agrees a layer secret with during circuit setup; with rotation a node replaces it by epochs |
 | Link key | the node public key (LinkPub in the descriptor) the initiator of a link to that node mixes into the handshake: the client for its entry, a node for the next node of a circuit |
 | Node descriptor | a record signed by the node signing key: certificate hash, link key, onion key, epoch and a short validity |

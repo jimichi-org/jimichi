@@ -197,9 +197,10 @@ certificate and one roster: `kubectl -n jimichi rollout restart deployment -l ap
 The client lists all five relays and builds a chain of three (`-hops`). At every start it draws
 its entry at random, asks that entry for the signed bundles of every listed node, verifies each
 bundle it gets against the anchor and only then draws the other two hops among the verified nodes.
-The entry may leave out one listed node (`-missing`, 1 by default), which lets a rogue entry narrow
-the choice ([LIMITATIONS](docs/en/LIMITATIONS.md)). The client does not log the chain, and after
-any failure it exits and draws a new one at its next start. `-fixed-chain` keeps the listed order
+The entry may leave out one listed node, and a bundle that does not verify counts as left out
+(`-missing`, 1 by default; the entry's own bundle must verify), which lets a rogue entry narrow the choice
+([LIMITATIONS](docs/en/LIMITATIONS.md)). The client does not log the chain, and after any
+failure it exits and draws a new one at its next start. `-fixed-chain` keeps the listed order
 for measurements that need a known path.
 
 Aggregated counters go to stdout once a minute and to port 9101 on loopback only, read through a

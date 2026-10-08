@@ -86,7 +86,7 @@ func setupFor(t *testing.T, p jcrypto.CryptoProvider, pub []byte) *wire.Cell {
 
 func opens(t *testing.T, p jcrypto.CryptoProvider, ring *relay.OnionRing, cell *wire.Cell) error {
 	t.Helper()
-	layer, err := ring.Open(p, cell)
+	layer, err := ring.Open(p, nil, cell)
 	if err != nil {
 		return err
 	}
@@ -326,7 +326,7 @@ func TestNoKeyIsReleasedUnderASetup(t *testing.T) {
 			gate := &gateProvider{CryptoProvider: p, entered: make(chan struct{}), release: make(chan struct{})}
 			opened := make(chan error, 1)
 			go func() {
-				layer, err := ring.Open(gate, cell)
+				layer, err := ring.Open(gate, nil, cell)
 				if err == nil {
 					layer.CellKey.Release()
 				}
@@ -398,7 +398,7 @@ func TestSetupsRunAcrossRotations(t *testing.T) {
 					return
 				}
 				setup.CellKeys[0].Release()
-				if layer, err := ring.Open(p, setup.Cell); err == nil {
+				if layer, err := ring.Open(p, nil, setup.Cell); err == nil {
 					layer.CellKey.Release()
 					opened.Add(1)
 				}
@@ -521,7 +521,7 @@ func TestRingReleasesEveryBuffer(t *testing.T) {
 		if got := p.live(); got != 0 {
 			t.Fatalf("%d buffers live after Close", got)
 		}
-		if _, err := ring.Open(p, setupFor(t, inner, k2.pub)); err == nil {
+		if _, err := ring.Open(p, nil, setupFor(t, inner, k2.pub)); err == nil {
 			t.Fatal("a closed ring opened a setup")
 		}
 		late, pub, err := p.GenerateEphemeral()
@@ -878,7 +878,7 @@ func TestSetupsDoNotWaitForTheKeyPairCheckOfARotation(t *testing.T) {
 		<-h.entered
 		opened := make(chan error, 1)
 		go func() {
-			layer, err := ring.Open(inner, cell)
+			layer, err := ring.Open(inner, nil, cell)
 			if err == nil {
 				layer.CellKey.Release()
 			}

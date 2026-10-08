@@ -57,10 +57,13 @@ English | [Русский](../ru/LIMITATIONS.md)
   who connects to its cell port. Authenticating the initiator on links between nodes is planned
   ([#56](https://github.com/jimichi-org/jimichi/issues/56)); a client stays unauthenticated to
   its entry.
-- The transcript binds keys, not the identity of a node: the certificate hash and the address of
-  the node are not part of it. A node that publishes another node's link key byte for byte in
-  its own descriptor is not detected by this: the chain check compares the addresses, the
-  signing keys and the onion keys of the nodes, and does not compare the link keys.
+- The identity of a node (the key its certificate certifies) is part of the setup and link
+  transcripts only when nodes are authenticated; with -auth=false only keys are bound. The
+  address of the node and the hash of its certificate are not part of them: the certificate
+  certifies the address, and the bytes of the certificate change when the node is enrolled
+  again. The client does not compare the bundles of different nodes with each other; enroll
+  compares the addresses, signing keys and onion keys of the roster nodes, but not their link
+  keys.
 - The link handshake has no explicit confirmation from the initiator: the responder learns that
   the initiator derived the same keys only when the first frame from it opens. The mode byte
   crosses the wire in the clear ([#57](https://github.com/jimichi-org/jimichi/issues/57)).
@@ -74,7 +77,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   The scheme has vectors of its own (CRYPTO, section "Key derivation").
 - There is no negotiation of the key scheme version: sides on different versions are not
   compatible, and a link handshake between them ends at the confirmation frame with no cause
-  named. Nodes and clients are updated together.
+  named. Nodes and clients are updated together. The same holds for a node with -auth and a side
+  with -auth=false: one binds the identity of the node and the other does not, and neither a
+  setup nor a link between them succeeds.
 - Frame keys of a link and hop keys do not change while the link and the circuit live. Cells
   under a hop key are bounded only by the counter limit (2^60 per direction); frames under a
   frame key are bounded by nothing but the 64-bit frame number. Rotation inside links and
@@ -86,14 +91,16 @@ English | [Русский](../ru/LIMITATIONS.md)
   with the authenticated configuration. The lab harness works without certificates as well: its
   nodes have no roster, the links between them are anonymous, and its clients get the node keys
   from the harness.
-- The entry serves the bundles of the listed nodes it holds. It cannot alter them, but it can
-  withhold the mirror: the client then exits and draws another entry at its next start. It can
-  also leave out up to -missing listed nodes (one by default), and the chain is then drawn among
-  the rest. On the testbed (five nodes, chains of three, two rogue nodes) both ends of a chain
-  are rogue with probability 2/5 x 1/4 = 0.1 when no node is left out, and 2/5 x 1/3 = 2/15 when
-  a rogue entry leaves out one honest node: the exit is then drawn among three nodes, one of them
-  rogue. Both values are computed and sampled (EXPERIMENT, block 3). The entry also sees when a
-  client prepares a circuit: the request for the descriptors precedes the setup.
+- The entry serves the bundles of the listed nodes it holds. It cannot alter them, since an
+  altered bundle fails the check and counts as left out, but it can withhold the mirror: the
+  client then exits and draws another entry at its next start. It can also leave out up to
+  -missing listed nodes (one by default), and the chain is then drawn among the rest; a listed
+  bundle that fails the check counts against the same bound. On the testbed (five nodes, chains
+  of three, two rogue nodes) both ends of a chain are rogue with probability 2/5 x 1/4 = 0.1 when
+  no node is left out, and 2/5 x 1/3 = 2/15 when a rogue entry leaves out one honest node: the
+  exit is then drawn among three nodes, one of them rogue. Both values are computed and sampled
+  (EXPERIMENT, block 3). The entry also sees when a client prepares a circuit: the request for
+  the descriptors precedes the setup.
 - A node that withholds its descriptor from the others removes itself from their mirrors, and
   they extend no circuit to it. When more nodes do so than -missing allows, the mirrors of honest
   nodes no longer satisfy a client and only the mirrors of the withholding nodes do: with two

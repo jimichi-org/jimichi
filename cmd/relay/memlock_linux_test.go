@@ -350,11 +350,11 @@ func TestRotatingNodeRunsAtTheMemlockMinimum(t *testing.T) {
 				if code != http.StatusOK {
 					t.Fatalf("GET /descriptor = %d", code)
 				}
-				nodes, err := pki.Unverified(p, []string{cells}, [][]byte{bundle})
+				v, err := pki.Unverified(p, cells, bundle)
 				if err != nil {
 					t.Fatal(err)
 				}
-				return nodes[0]
+				return *v
 			}
 
 			first := read()

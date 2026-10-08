@@ -59,7 +59,7 @@ func TestKeyScheduleIsHKDF(t *testing.T) {
 	ctx := context(t, []byte("session-1"))
 	th := ctx.Sum()
 	info := func(purpose string) []byte {
-		return append(append([]byte("jimichi/v1/c25519/"+purpose), 0x00), th...)
+		return append(append([]byte("jimichi/v2/c25519/"+purpose), 0x00), th...)
 	}
 
 	// RFC 7748, 6.1: Alice's private key, Bob's public key, their shared secret

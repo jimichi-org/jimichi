@@ -44,9 +44,10 @@ func (c *cluster) add(t *testing.T, name string, own *clock, ttl time.Duration) 
 
 // what a client that drew f as its entry makes of f's mirror when its clock is
 // ahead of the cluster's by the given time, behind when negative: every listed
-// bundle has to verify, as in cmd/client, and the client's own rule decides on
-// the set, for -missing 1 and a chain one hop shorter than the roster, so that
-// one node may be left out: min(1, n - (n-1)) = 1
+// bundle has to verify, stricter than cmd/client, where a bundle that fails is
+// a node left out, and the client's own rule decides on the set, for -missing 1
+// and a chain one hop shorter than the roster, so that one node may be left
+// out: min(1, n - (n-1)) = 1
 func (c *cluster) clientTakes(t *testing.T, f *fixture, ahead time.Duration) ([]string, error) {
 	t.Helper()
 	code, raw := f.descriptors(t)
@@ -427,7 +428,7 @@ func TestStaleBundleLeavesTheMirrorAndAFreshOneReturns(t *testing.T) {
 	if n2.n.descriptorRequests.Load() != asked {
 		t.Fatal("a request for the descriptors fetched from a peer")
 	}
-	if key, ok := n1.n.peerKey(n2.n.addr); !ok || !bytes.Equal(key, n2.pub) {
+	if key, ok := n1.n.peerKey(n2.n.addr); !ok || !bytes.Equal(key.LinkPub, n2.pub) {
 		t.Fatal("relay-2 is no peer 126 s before its descriptor expires")
 	}
 	if got := n1.stats(t); !strings.Contains(got, `"peers":2`) {

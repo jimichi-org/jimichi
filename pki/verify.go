@@ -184,44 +184,16 @@ func Verify(p jcrypto.CryptoProvider, pol Policy, addr string, bundle []byte, no
 	}, nil
 }
 
+// the check of an enrollment, whose operator can act on both names: a bundle
+// that fails, or two nodes with one address, onion key or identity, refuse the
+// list; a client verifies every bundle on its own
 func VerifyChain(p jcrypto.CryptoProvider, pol Policy, addrs []string, bundles [][]byte, now time.Time) ([]Verified, error) {
-	return eachNode(addrs, bundles, func(addr string, bundle []byte) (*Verified, error) {
-		return Verify(p, pol, addr, bundle, now)
-	})
-}
-
-// the baseline for measuring what authentication is worth: the same bundles
-// read with no signature, time or address checked
-func Unverified(p jcrypto.CryptoProvider, addrs []string, bundles [][]byte) ([]Verified, error) {
-	return eachNode(addrs, bundles, func(addr string, bundle []byte) (*Verified, error) {
-		b, err := ParseBundle(bundle)
-		if err != nil {
-			return nil, err
-		}
-		if b.Suite != p.Suite().String() {
-			return nil, ErrSuite
-		}
-		d, err := ParseDescriptor(b.Descriptor)
-		if err != nil {
-			return nil, err
-		}
-		if d.Suite != p.Suite() {
-			return nil, ErrSuite
-		}
-		if err := keySizes(p, d); err != nil {
-			return nil, err
-		}
-		return &Verified{Addr: addr, LinkPub: d.LinkPub, OnionPub: d.OnionPub, Epoch: d.Epoch}, nil
-	})
-}
-
-func eachNode(addrs []string, bundles [][]byte, read func(string, []byte) (*Verified, error)) ([]Verified, error) {
 	if len(addrs) != len(bundles) {
 		return nil, fmt.Errorf("pki: %d addresses for %d bundles", len(addrs), len(bundles))
 	}
 	nodes := make([]Verified, len(addrs))
 	for i, addr := range addrs {
-		v, err := read(addr, bundles[i])
+		v, err := Verify(p, pol, addr, bundles[i], now)
 		if err != nil {
 			return nil, fmt.Errorf("node %s: %w", addr, err)
 		}
@@ -237,6 +209,29 @@ func eachNode(addrs []string, bundles [][]byte, read func(string, []byte) (*Veri
 		}
 	}
 	return nodes, nil
+}
+
+// the baseline for measuring what authentication is worth: the same bundle
+// read with no signature, time or address checked, and with no identity
+func Unverified(p jcrypto.CryptoProvider, addr string, bundle []byte) (*Verified, error) {
+	b, err := ParseBundle(bundle)
+	if err != nil {
+		return nil, err
+	}
+	if b.Suite != p.Suite().String() {
+		return nil, ErrSuite
+	}
+	d, err := ParseDescriptor(b.Descriptor)
+	if err != nil {
+		return nil, err
+	}
+	if d.Suite != p.Suite() {
+		return nil, ErrSuite
+	}
+	if err := keySizes(p, d); err != nil {
+		return nil, err
+	}
+	return &Verified{Addr: addr, LinkPub: d.LinkPub, OnionPub: d.OnionPub, Epoch: d.Epoch}, nil
 }
 
 func certWindow(c *Cert, now time.Time, skew time.Duration) error {
