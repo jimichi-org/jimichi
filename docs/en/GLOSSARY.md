@@ -24,6 +24,9 @@ English | [Русский](../ru/GLOSSARY.md)
 | Correlation attack | linking sender and recipient by timings and volumes |
 | Unlinkability | the property that an observer cannot link sender and recipient |
 | Forward secrecy | compromise of a long-term key does not expose past sessions |
+| KK pattern | a handshake in which both sides know each other's static keys in advance: each of the two messages carries a fresh ephemeral key and mixes in agreements with the peer's keys; in the end-to-end layer these are the records kk1 and kk2 (CRYPTO, "End-to-end layer") |
+| Hash ratchet | the key chain of one direction: every step derives a record key and the next chain key and wipes the previous one, so compromise of the current key does not expose past records; it gives no post-compromise recovery |
+| KCI | key compromise impersonation: whoever knows a side's private key poses as someone else to that side; in KK this forges kk1, and the session rules reduce it to resetting a session that is absent, unconfirmed or stale |
 | Trust anchor | the CA public key the client trusts in advance, as the string `<suite>:<base64>` |
 | Node certificate | a CA-signed record binding a node's name, address and signing key for a validity period |
 | Node signing key | the node's long-term signing pair (identity key): it signs the certificate request and the descriptor and takes no part in key agreement; when nodes are authenticated its public half goes into the setup and link transcripts of the node |
