@@ -294,13 +294,13 @@ func TestNothingIsReadAfterAReadCutShort(t *testing.T) {
 	m := &meter{Conn: a}
 	accepted := make(chan *link.Conn, 1)
 	go func() {
-		srv, err := link.Accept(b, p, priv, pub)
+		srv, err := link.Accept(b, p, priv, pub, nil)
 		if err != nil {
 			t.Errorf("Accept: %v", err)
 		}
 		accepted <- srv
 	}()
-	client, err := link.Dial(m, p, pub)
+	client, err := link.Dial(m, p, pub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
