@@ -669,11 +669,11 @@ transmitted.
   leading zero, from 1 to 65535. wire drops trailing NULs from an address, so an address with a
   NUL, a space or a byte outside ASCII could name one node and lead to another. Host and port
   have one spelling each (host names in lower case without a trailing dot, IP literals in
-  canonical form) because Verify compares addresses byte for byte. A host is an IP literal
-  without a zone or DNS labels of a-z, 0-9 and the hyphen joined by dots, no label empty or
-  starting or ending with a hyphen, the last label neither all digits nor starting with 0x (some
-  resolvers read such a name as an address): an address carries nothing a URL would read as a
-  path, a query, user information or another port.
+  canonical form, an IPv4 address only as IPv4 and not as ::ffff:a.b.c.d) because Verify compares
+  addresses byte for byte. A host is an IP literal without a zone or DNS labels of a-z, 0-9 and the
+  hyphen joined by dots, no label empty or starting or ending with a hyphen, the last label neither
+  all digits nor starting with 0x (some resolvers read such a name as an address): an address
+  carries nothing a URL would read as a path, a query, user information or another port.
 - Keys and signatures are at most 128 bytes. cert_hash is the Hash of the whole certificate,
   signature included.
 - Parsing rejects an unknown version (ErrVersion), an unknown suite (ErrSuite), a field over its
@@ -693,8 +693,9 @@ transmitted.
   addresses are well formed, and the names and the hosts of the addresses are pairwise distinct
   (ErrFormat, ErrDuplicate). A node fetches every peer from the host of its address on the one
   -peer-info-port, so a second address on a host would reach the node of the first, and on the
-  node's own host its own info port. Hosts are compared in their one spelling: one host under
-  two names, or under a name and an IP address, is not caught.
+  node's own host its own info port. Hosts are compared in their one spelling, and an IPv4 address
+  has no IPv6 spelling, but one host under two names, or under a name and an IP address, is not
+  caught.
 - The descriptor mirror: JSON `[{"addr":"<host:port>","bundle":{...}},...]`, sorted by address,
   every bundle in its own canonical spelling; parsing accepts only that. The mirror carries no
   signature of its own: each bundle in it is verified like any other.
@@ -863,26 +864,25 @@ finds by the label of their deployments (app=relay).
 - The node fetches an entry again once its wall-clock age reaches half of its descriptor's
   lifetime: from then on the entry is due. Its timer sleeps until the nearest such moment, at
   most 1 min and at least 5 s. A pass asks every peer that is missing or due, except one paused
-  after its certificate has expired (below), and no other, one after another, each with one request under the 5 s timeout, and while such a peer is left the
-  next pass starts 5 s after this one ends. A due entry stays due until a fetch brings a
-  descriptor signed later, so with a 5 s pause between passes the node keeps asking a peer that
-  does not answer, a peer whose bundle does not verify and a peer that still serves the
-  descriptor it has not signed again. The last is routine: it starts at the middle of the
-  descriptor's lifetime and ends with the first pass after that peer has signed its descriptor
-  again. The peer's timer does that within one period, min(ttl/4, 1 min), when the wall clocks
-  of the two nodes agree, and a rotation of its onion key does it at once, whichever comes
-  first (section "Key lifetime and revocation"). A descriptor whose expires is cut to the
-  certificate's not_after is not due before it expires: the peer signs no descriptor that ends
-  later, and it holds a replaced onion key until every descriptor naming it has expired, so the
-  held one serves to its end. Once the certificate has expired the peer answers 503; when the
+  after its certificate has expired (below), and no other, one after another, each with one request
+  under the 5 s timeout, and while such a peer is left the next pass starts 5 s after this one
+  ends. A due entry stays due until a fetch brings a descriptor signed later, so with a 5 s pause
+  between passes the node keeps asking a peer that does not answer, a peer whose bundle does not
+  verify and a peer that still serves the descriptor it has not signed again. The last is routine:
+  it starts at the middle of the descriptor's lifetime and ends with the first pass after that peer
+  has signed its descriptor again. The peer's timer does that within one period, min(ttl/4, 1 min),
+  when the wall clocks of the two nodes agree, and a rotation of its onion key does it at once,
+  whichever comes first (section "Key lifetime and revocation"). A descriptor whose expires is cut
+  to the certificate's not_after is not due before it expires: the peer signs no descriptor that
+  ends later, and it holds a replaced onion key until every descriptor naming it has expired, so
+  the held one serves to its end. Once the certificate has expired the peer answers 503; when the
   fetch of a peer whose entry ended with its certificate fails, the peer is asked again after
   1 min instead of the 5 s pause, and so on while it fails: a node takes one certificate per
   process and enroll discards the CA key, so no new bundle of that peer is expected to verify
-  under the roster's anchor. An entry ends at the expires of its
-  descriptor. A bundle that cannot be fetched or does not verify is not taken, and the entry
-  held so far stays until it expires. The log gets one line per kind of cause: no answer, the
-  status code or the check that failed, and nothing the peer sent. No request and no circuit
-  setup triggers a fetch.
+  under the roster's anchor. An entry ends at the expires of its descriptor. A bundle that cannot
+  be fetched or does not verify is not taken, and the entry held so far stays until it expires. The
+  log gets one line per kind of cause: no answer, the status code or the check that failed, and
+  nothing the peer sent. No request and no circuit setup triggers a fetch.
 - A circuit is extended from this cache alone: the next address must be a roster node with a
   valid entry, and the link to it is authenticated with the link key of that entry. A node with
   -auth extends nowhere until its roster arrives.
@@ -910,11 +910,12 @@ finds by the label of their deployments (app=relay).
 - -descriptor-ttl is at least 16 min and at most 24 h, so a peer that signs again on time stays
   in the mirror while its clock is within Skew of the node's: its next descriptor is signed
   before the age of the held one reaches ttl/2 + 1 min and is taken on the first pass once it
-  is signed and its published time has come on the node's clock, while the held one stays in
-  the mirror until its age reaches ttl - 2 min 6 s. With the peer's clock up to 2 min behind,
-  that leaves ttl/2 - 1 min - Skew - 2 min 6 s for the 5 s pause and one pass over the peers:
-  2 min 54 s with the shortest lifetime and 4 min 54 s with the testbed's 20 min. A descriptor
-  cut to the certificate's not_after leaves the mirrors of the peers 2 min 6 s before
+  is signed and its published time has come on the node's clock (unless the held one is cut to
+  not_after: that one is kept until it expires and is not replaced by a later one), while the held
+  one stays in the mirror until its age reaches ttl - 2 min 6 s. With the peer's clock up to 2 min
+  behind, that leaves ttl/2 - 1 min - Skew - 2 min 6 s for the 5 s pause and one pass over the
+  peers: 2 min 54 s with the shortest lifetime and 4 min 54 s with the testbed's 20 min. A
+  descriptor cut to the certificate's not_after leaves the mirrors of the peers 2 min 6 s before
   not_after; the node itself serves its descriptor and its own mirror, and takes circuits,
   until not_after.
 - The client (-missing, 1 by default, at most the listed nodes beyond -hops) accepts a mirror that
