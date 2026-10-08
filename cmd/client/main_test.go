@@ -540,6 +540,57 @@ func TestTamperedBundleCountsAsLeftOut(t *testing.T) {
 	}
 }
 
+// a node the entry leaves out and a node whose bundle fails take one bound
+// together: five nodes, three hops, the entry 7 mod 5 = 2 serves no bundle of
+// node 0 and an altered one of node 1, so two are lacking, more than
+// min(1, 5 - 3) = 1 and within min(2, 5 - 3) = 2
+func TestLeftOutAndFailingShareOneBound(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	entries := []pki.MirrorEntry{{Addr: tb.addrs[1], Bundle: altered(t, tb.bundles[1])}}
+	for i := 2; i < 5; i++ {
+		entries = append(entries, pki.MirrorEntry{Addr: tb.addrs[i], Bundle: tb.bundles[i]})
+	}
+	raw, err := pki.MarshalMirror(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, srv := range tb.info {
+		srv.mirror.Store(&raw)
+	}
+	s := tb.selection(3, words(7, 6, 5))
+	s.missing = 1
+	if chain, _, err := build(s, tb.p); !errors.Is(err, errTooFew) || namesAny(err.Error(), tb.addrs) || chain != nil {
+		t.Fatalf("-missing 1: chain = %v, %v, want %v naming no node", chain, err, errTooFew)
+	}
+	s = tb.selection(3, words(7, 6, 5))
+	s.missing = 2
+	chain, _, err := build(s, tb.p)
+	if err != nil || len(chain) != 3 || chain[0].Addr != tb.addrs[2] {
+		t.Fatalf("-missing 2: chain = %v, %v, want three hops from node 2", chain, err)
+	}
+	for _, n := range chain {
+		if n.Addr == tb.addrs[0] || n.Addr == tb.addrs[1] {
+			t.Fatalf("chain %v holds a node the mirror lacks", chain)
+		}
+	}
+}
+
+// a mirror that lists one address twice is the entry's fault and names no node
+func TestMirrorWithARepeatedAddressNamesTheClass(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 3)
+	raw := mirrorOf(t, tb.addrs, tb.bundles)
+	raw = bytes.Replace(raw, []byte(`"`+tb.addrs[1]+`"`), []byte(`"`+tb.addrs[0]+`"`), 1)
+	for _, srv := range tb.info {
+		srv.mirror.Store(&raw)
+	}
+	s := tb.selection(2, words(3, 0))
+	s.missing = 1
+	_, _, err := build(s, tb.p)
+	if !errors.Is(err, pki.ErrDuplicate) || err.Error() != "the entry: "+pki.ErrDuplicate.Error() {
+		t.Fatalf("err = %v, want the entry: %v", err, pki.ErrDuplicate)
+	}
+}
+
 // two listed nodes carry one onion key, each under its own certificate: the
 // mirror is taken, and each node keeps the identity of its own certificate,
 // which the setup and the link of that node bind

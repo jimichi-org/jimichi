@@ -285,8 +285,8 @@ type selection struct {
 
 // the entry is drawn first and asked for the bundles of every listed node, so
 // the request is the same whatever path follows; the other hops are drawn only
-// once all of them have passed the check. Nothing here logs the entry or any
-// other node of the path: the lines are the same for every draw
+// once the bundles the entry served have been checked. Nothing here logs the
+// entry or any other node of the path: the lines are the same for every draw
 func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger) ([]client.Node, error) {
 	entry := 0
 	if !s.fixed {
@@ -419,7 +419,7 @@ func (e *entryError) Unwrap() error { return e.err }
 
 var knownFailures = []error{
 	errNoBundle, fetch.ErrTooLarge,
-	pki.ErrFormat, pki.ErrVersion, pki.ErrSuite, pki.ErrUnknownCA, pki.ErrCertSignature, pki.ErrCertTime,
+	pki.ErrFormat, pki.ErrVersion, pki.ErrDuplicate, pki.ErrSuite, pki.ErrUnknownCA, pki.ErrCertSignature, pki.ErrCertTime,
 	pki.ErrWrongAddr, pki.ErrCertMismatch, pki.ErrDescSignature, pki.ErrDescTime, pki.ErrKeySize,
 	link.ErrHandshake, client.ErrNodeKey, wire.ErrPayloadSize,
 }
