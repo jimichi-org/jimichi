@@ -301,9 +301,10 @@ hold. It will be reported as a measured boundary, not passed over.
 
 Status: partly implemented. go test -bench covers key generation, key agreement, signing,
 verification, one AEAD layer of a cell, the transcript hash, the derivation of the hop keys and
-the chaining of two agreements on both suites (crypto/suite) and sealing a cell and layer
-stripping on c25519 (wire). The lab reports round-trip latency for chains of two and more
-nodes. Planned ([#118](https://github.com/jimichi-org/jimichi/issues/118)): the setup benchmark
+the chaining of two agreements on both suites (crypto/suite), sealing a cell and layer
+stripping on c25519 (wire), and the KK handshake and one record of the hash ratchet on both
+suites (e2e). The lab reports round-trip latency for chains of two and more nodes. Planned
+([#118](https://github.com/jimichi-org/jimichi/issues/118)): the setup benchmark
 at a node with one and two onion keys, node throughput at saturation, goodput per client, latency
 for a chain of one node (the lab takes no fewer than two hops) and the cost of memory locking (the
 lab and the benchmarks have no switch for the key-memory measures).
@@ -316,6 +317,13 @@ lab and the benchmarks have no switch for the key-memory measures).
 | Node throughput | cells per second at saturation, on 1, 2 and 4 cores |
 | Latency by hop count | one, two, three nodes; p50, p95, p99 |
 | Cost of mlock | the same metrics with memory locking on and off |
+| End-to-end layer | go test -bench, nanoseconds per KK handshake of both sides and per record of the hash ratchet, GOST against X25519 |
+
+The end-to-end layer has two benchmarks in e2e. BenchmarkKK times one handshake of both sides:
+two sessions with their card checks, kk1 and kk2. BenchmarkRatchetStep times one record with a
+368-byte body: a step and a Seal at the sender, a step and an Open at the receiver. No
+measurement of either is recorded yet, and there is no earlier one to compare with: the layer is
+new. Their numbers are a planned measurement and will be published only from a recorded run.
 
 The binding of every derived key to the transcript, the suite and the scheme version has no
 switch, like the setup replay tag and the link confirmation frame: a build without it would be a
@@ -404,10 +412,10 @@ benchmark to compare with.
 
 Planned: a table over the same features for Tor, Session, SimpleX, Briar and this work. Features:
 constant cell size, cover traffic, state kept on a node, deniability, primitive suite, published
-latency figures. Of the deniability properties this work has today only deniability of sending
-at a constant rate and nothing to surrender after a session (THREAT_MODEL); deniable authentication
-([#19](https://github.com/jimichi-org/jimichi/issues/19)) and the client container
-([#20](https://github.com/jimichi-org/jimichi/issues/20)) are planned. Numbers for other systems
+latency figures. Of the deniability properties this work has today deniability of sending at a
+constant rate, nothing to surrender after a session and offline deniable authentication between
+clients, shown by a forgery and not measured (THREAT_MODEL); the client container
+([#20](https://github.com/jimichi-org/jimichi/issues/20)) is planned. Numbers for other systems
 will come from their documentation and papers, ours will be measured. No direct performance
 comparison will be made: the conditions differ, and that will be stated.
 
@@ -433,3 +441,7 @@ comparison will be made: the conditions differ, and that will be stated.
 6. The cost table: GOST against X25519 from the benchmarks and round-trip latency for chains of
    two and three nodes; the rest of block 6 is planned
    ([#118](https://github.com/jimichi-org/jimichi/issues/118)).
+7. A forged conversation: `cmd/lab -set deny` on both suites. Holding only its own keys, the
+   recipient builds a transcript that passes the same check as the genuine one, while a forgery
+   made with a fresh key in place of the recipient's fails it. Shown with its limits: offline
+   only, no witnessed transcript, no metadata ([CRYPTO](CRYPTO.md), "Deniability").

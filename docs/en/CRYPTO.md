@@ -562,6 +562,70 @@ An established session holds the identity key and two ratchet chains; the initia
 e_I and ck until kk2; a record that skips numbers adds a temporary chain and a record key while
 it is taken.
 
+### Deniability
+
+Claim: offline deniability for both parties. A session transcript (kk1, kk2 and every data
+record), even together with the recipient's private keys, does not prove to a third party that
+the sender took part in the session, unless the judge holds an independent trusted record of who
+transmitted these ciphertexts and when. The sender can be the initiator or the responder.
+
+The perfect simulation argument:
+
+1. Every byte of a transcript is a deterministic function of public values (both cards, E_I,
+   E_R), the plaintexts and four Agree outputs: es, ss, ee and se. The context of each output is
+   built from public values only: h at the token and the token byte.
+2. Agree is symmetric under one Context on both suites: Agree(a, B, ctx) = Agree(b, A, ctx). The
+   conformance tests of the providers check this (agreement both ways and the golden agreement
+   vectors), and so do the vectors of the end-to-end layer: both sides of every DH token get one
+   output.
+3. The recipient knows its own static key and draws both ephemeral keys itself, with the same
+   GenerateEphemeral the honest parties use. The sender's key enters two outputs, and the
+   recipient computes each of them from its own side; the other two depend only on ephemeral
+   keys it drew itself.
+
+| Sender | Outputs with the sender's key | How the recipient computes them |
+|---|---|---|
+| initiator | ss = DH(s_I, s_R), se = DH(s_I, e_R) | Agree(s_R, S_I), Agree(e_R, S_I) |
+| responder | es = DH(e_I, s_R), ss = DH(s_I, s_R) | Agree(e_I, S_R), Agree(s_I, S_R) |
+
+4. The nonces are fixed, the handshake payloads are zero, and the transcript holds no other
+   random value. So a forgery is distributed exactly like a genuine transcript with the same
+   plaintexts, with no computational assumption, even for a judge handed both static keys.
+5. Only a value that the sender alone can compute, that is a signature, would break this. Hence
+   the rule under "Signatures": identity signatures never authenticate client messages.
+
+The witnessed transcript condition: the argument speaks only of the bytes of a transcript. A
+mailbox or an observer of the sender's link colluding with the recipient lifts the condition: a
+log of put requests by circuit together with the binding of a circuit to the sender's address
+(collusion with the entry or a correlation attack) is an independent record of who transmitted
+the ciphertexts, and the simulation does not cover it.
+
+The check: the lab/scenario package and `cmd/lab -set deny`.
+
+- Genuine runs a real session of two identities. Forge builds a session with the same plaintexts
+  holding the recipient's private keys only. Verify plays a transcript to a fresh session of the
+  recipient: every record of the sender must open to the text it claims, every record of the
+  recipient must come out again byte for byte.
+- Both sides of the forgery are the production e2e session. The sender's side goes through the
+  noise.Static interface: a stand-in key knows only the public half of the sender's key and
+  answers every agreement with the agreement of the recipient's key, static or ephemeral, with
+  that half (step 3). A wrapper over the CryptoProvider records the recipient's ephemeral key and
+  hands it back for the check; the production API cannot set an ephemeral key.
+- The set runs on both suites with the recipient in both roles. The genuine and the forged
+  transcript pass Verify and have the same structure. The negative control: a forgery made with a
+  fresh key in place of the recipient's passes Verify under that key and fails under the
+  recipient's. A provider wrapper that sees every agreement sees the sender's private key in the
+  genuine session and sees it neither in the forgery nor in the checks.
+- The report `artifacts/deny-<suite>-<time>.json` carries the verdicts, the assumption and the
+  records in hex (the handshake records hold the public ephemeral keys), and no byte of a secret
+  key. It is a demonstration on concrete keys, not a measurement.
+
+Not claimed: online deniability, that is against a judge acting together with the recipient
+during the session; deniability of metadata (mailbox records, network observations, circuit
+timings); a witnessed transcript; a sender's device compromised before the session. There is no
+formal model: the argument rests on the symmetry of Agree, which the tests check, and on the
+transcript holding no other value.
+
 ## Memory (crypto/secmem)
 
 - A buffer comes from mmap on pages of its own outside the Go heap, then mlock and

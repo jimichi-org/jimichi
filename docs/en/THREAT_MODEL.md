@@ -49,28 +49,41 @@ the implementation.
 | Linking a flow by cell headers | link encryption between neighbours, frames of one size on the wire; an identifier and a counter of its own on every link, counters strictly in turn | link tests: a capture of a link holds neither the counter nor the identifier of the cell it carried; wire and relay tests: one cell carries a different counter on every link, in both directions | implemented |
 | Replay and tampering | On the wire a link frame is sealed with an AEAD whose nonce is the frame number: a copied or altered frame does not open and the circuit on that link closes. Inside the circuit there is an AEAD on every layer (the random fill after a layer is outside it and the next node replaces it) and counters go strictly in turn on every link. Forward, a node opens its layer and only then takes the counter: a cell that does not open is dropped and takes no turn, while a copy, a gap or a reorder of genuine cells closes the circuit. Backward, a node cannot open the layers and checks only the kind and the counter order, so a reply with an altered body travels on to the client. The client checks every reply, cover and payload alike: the header (version, kind, the identifier of its own link), every layer, the number strictly next, and no more replies than the cells it wrote. The first reply that fails a check closes the circuit, the client exits and builds a new circuit after its restart. Control cells: a node keeps the tags of those it opened for as long as it holds the onion key that opened them, and a copy that carries another encoding of the ephemeral key does not open the layer: the bytes of the key are part of the setup transcript. Not covered: the exit opens the last layer and can replace the content of a message and of a reply, the end-to-end layer is planned ([#18](https://github.com/jimichi-org/jimichi/issues/18)); a reply that never arrives is not noticed by these checks, only by waiting for it; a node of the chain with a single cell, or a party on the wire with a damaged frame, closes the circuit, which is a denial of service (LIMITATIONS) | link tests: a copied frame and a frame with an altered byte do not open, and after a frame that does not open the link takes no genuine one either; wire tests: a cell with an altered body, counter or kind does not open, nor does a copy of a control cell with another encoding of the ephemeral key; relay tests: a copy, a gap and a step back close the circuit in either direction, backward a far counter and a cell of another kind do too, a forward cell that does not open is dropped without closing, a copy of a control cell is refused; client tests: a reply with an altered bit in any of its 512 bytes is refused, an altered reply, a copied reply, replies out of order or with a gap and a reply too many close the circuit at the first such cell, replies in turn, cover included, do not, and a frame from the entry that does not open closes it as well | implemented |
 | Proving that a message was sent | cover and payload cells have the same size and header for every node before the exit, and the frames on the wire are of one size: the cover flag sits inside the innermost layer. The moment of sending is hidden only at a constant rate (-mode fixed, set on the testbed): in the immediate mode, the default of the client, a cell leaves when the user sends, and without -cover every data cell is a message | wire and relay tests: a node before the exit sees the same header on a cover and a payload cell, and the exit answers each with one cell. Planned ([#119](https://github.com/jimichi-org/jimichi/issues/119)): distinguishing the two kinds from observable features, expecting chance level | partly: the distinguisher is not implemented ([#119](https://github.com/jimichi-org/jimichi/issues/119)), the moment of sending is hidden only at a constant rate |
-| Proving authorship to a third party | planned: deniable authentication, where the recipient is convinced by a shared secret, not by a signature. There is no recipient client and no authentication between clients yet ([#18](https://github.com/jimichi-org/jimichi/issues/18), [#19](https://github.com/jimichi-org/jimichi/issues/19)) | planned: a demonstration that the recipient can forge the conversation, a transcript it can produce itself | planned ([#19](https://github.com/jimichi-org/jimichi/issues/19)) |
+| Proving authorship to a third party | deniable authentication in the end-to-end layer: a KK handshake made of key agreements only, records under shared keys, no signing key at the client (CRYPTO, "Signatures" and "Deniability"). The recipient is convinced of the author by a shared secret, but can compute every value of the transcript itself, without the sender's key, so a transcript together with the recipient's keys does not prove the sender's participation to a third party. Not covered: a transcript witnessed by a mailbox or an observer of the sender's link colluding with the recipient, online deniability and metadata (the "Deniability" section below) | `cmd/lab -set deny` on both suites with the recipient in both roles: the recipient forges the conversation with the production session code, the genuine and the forged transcript pass one check and have the same structure, a forgery made with a fresh key in place of the recipient's fails the check, a provider wrapper sees the sender's private key in the genuine session and sees it neither in the forgery nor in the checks; lab/scenario tests on the same; noise and e2e tests: not a single signing call | implemented: offline deniability for both parties |
 | Coercion after the session | ephemeral key buffers are zeroed, the node writes no key to disk; library copies on the heap live until the memory is reused and are not locked against swap ([#36](https://github.com/jimichi-org/jimichi/issues/36)) | relay tests: a node holds no cipher of a circuit once it is closed. Planned ([#24](https://github.com/jimichi-org/jimichi/issues/24)): searching memory and disk for the key after the session ends | partly: the search after a session is not implemented ([#24](https://github.com/jimichi-org/jimichi/issues/24)) |
 
 ## Deniability: what is claimed and what is not
 
-Three properties are claimed: two are implemented within the limits named below, deniable
-authentication is planned. None of them is measured yet, the measurements are planned:
+Three properties are claimed, all within the limits named below. Deniability of sending and
+having nothing to surrender after a session are not measured yet, the measurements are planned.
+Deniable authentication follows from the design of the handshake and is shown by forging a
+conversation, not measured:
 
 - Deniability of sending: an observer cannot tell a cell carrying a message from a cover cell, so
   it cannot prove that the user sent anything at that moment. This holds when the client sends at
   a constant rate (-mode fixed): in the immediate mode, the default, a cell leaves when the user
   sends, and without -cover every data cell is a message. The distinguisher that will measure the
   property is planned ([#119](https://github.com/jimichi-org/jimichi/issues/119)).
-- Deniable authentication, planned ([#19](https://github.com/jimichi-org/jimichi/issues/19))
-  together with the recipient client ([#18](https://github.com/jimichi-org/jimichi/issues/18)):
-  the recipient will be sure of the author but unable to prove authorship to a third party,
-  because it will be able to produce the same transcript itself.
+- Offline deniable authentication for both parties of the end-to-end layer. The recipient is
+  sure of the author: the record keys need either the sender's key or its own. But a session
+  transcript, even together with the recipient's private keys, does not prove the sender's
+  participation to a third party unless the judge holds an independent trusted record of who
+  transmitted these ciphertexts and when: the recipient builds a transcript with the same
+  plaintexts, distributed like the genuine one, by itself (CRYPTO, "Deniability"), and
+  `cmd/lab -set deny` does so with the production session code. A mailbox or an observer of the
+  sender's link colluding with the recipient lifts the condition: a log of put requests by
+  circuit together with the binding of a circuit to the sender's address (through the entry or a
+  correlation attack) is a witnessed transcript, and the simulation does not cover it.
 - Nothing to surrender after the session: keys are ephemeral, their buffers are zeroed, and a node
   writes no key to disk. The copies libraries leave on the heap are not locked and on a host with
   swap can be paged out to disk before that memory is reused (LIMITATIONS). How long those copies
   survive is to be measured, not assumed ([#24](https://github.com/jimichi-org/jimichi/issues/24));
   locking all process memory is planned ([#36](https://github.com/jimichi-org/jimichi/issues/36)).
+
+Not claimed for authentication: online deniability, that is against a judge acting together with
+the recipient during the session; deniability of metadata: mailbox records of requests, network
+observations, the moments circuits are set up and torn down; a witnessed transcript; a sender's
+device compromised before the session.
 
 Not claimed: hidden volumes and a second bottom in storage. Such schemes fall to an adversary
 holding several snapshots of the state over time and give no verifiable guarantee. The nodes store
