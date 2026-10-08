@@ -60,7 +60,7 @@ func TestStatsCarryEveryCounter(t *testing.T) {
 		return relay.Counters{Accepted: 1, Forwarded: 2, Delivered: 3, Dropped: 4, Padding: 5, Broken: 6,
 			AcceptRetries: 7, RefusedLinks: 8, RefusedBusy: 9, RefusedSource: 10, RefusedRate: 11,
 			RefusedSetups: 12, TimedOut: 13, Expired: 14, RefusedExtend: 15, FailedExtend: 16}
-	}))
+	}, nil))
 	defer admin.Close()
 	_, body := call(t, http.MethodGet, admin.URL+"/stats", nil)
 	for _, want := range []string{

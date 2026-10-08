@@ -271,7 +271,7 @@ func TestNodeHasNoPeersBeforeTheRoster(t *testing.T) {
 		t.Fatalf("stats before the roster: %s", got)
 	}
 
-	rc := relayConfig(c.p, nil, nil, config{auth: true}, f.n)
+	rc := relayConfig(c.p, nil, nil, config{auth: true}, f.n, nil)
 	if rc.Peers == nil {
 		t.Fatal("with -auth the relay extends without asking the node for its peers")
 	}
@@ -293,7 +293,7 @@ func TestNodeHasNoPeersBeforeTheRoster(t *testing.T) {
 	if !bytes.Equal(peer.Identity, c.nodes[1].n.id.Public()) {
 		t.Fatal("the relay does not get the identity the peer's certificate certifies")
 	}
-	if rc := relayConfig(c.p, nil, nil, config{auth: false}, f.n); rc.Peers != nil || rc.Identity != nil {
+	if rc := relayConfig(c.p, nil, nil, config{auth: false}, f.n, nil); rc.Peers != nil || rc.Identity != nil {
 		t.Fatal("without -auth the relay is given peers or an identity; the baseline extends to any address and binds none")
 	}
 }

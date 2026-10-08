@@ -18,6 +18,7 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/internal/fetch"
+	"github.com/jimichi-org/jimichi/mailbox"
 	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/relay"
 	"github.com/jimichi-org/jimichi/wire"
@@ -26,7 +27,8 @@ import (
 type config struct {
 	listen, info, stats string
 	logEvery            time.Duration
-	echo                bool
+	exit                string
+	mailbox             mailbox.Limits
 	period              time.Duration
 	queue, setupCache   int
 	auth                bool
@@ -48,37 +50,7 @@ type config struct {
 
 func main() {
 	var cfg config
-	flag.StringVar(&cfg.listen, "listen", ":9000", "address for cells")
-	flag.StringVar(&cfg.info, "info", ":9100", "address for the node descriptor and health check")
-	flag.StringVar(&cfg.stats, "stats", "127.0.0.1:9101", "loopback address for counters and enrollment")
-	flag.DurationVar(&cfg.logEvery, "log-every", time.Minute, "print aggregated counters to stdout this often; 0 disables")
-	flag.BoolVar(&cfg.harden, "harden", true, "disable core dumps and ptrace access for the process")
-	suiteName := flag.String("suite", suite.Default.String(), "primitive suite: gost or c25519")
-	flag.StringVar(&cfg.keymem, "keymem", "all", "key memory measures: all, none, or a list of offheap, lock, dontdump, zero")
-	flag.BoolVar(&cfg.echo, "echo", true, "as an exit, send the payload back along the circuit")
-	flag.DurationVar(&cfg.period, "period", 0, "send one frame per circuit and direction every period, padding when idle; 0 forwards at once")
-	flag.IntVar(&cfg.queue, "queue", 64, "cells a circuit may queue per direction when -period is set")
-	flag.IntVar(&cfg.setupCache, "setup-cache", wire.DefaultSetupCache, fmt.Sprintf("setups remembered per onion key to refuse a replay, 0 for the default, at most %d; when full the node refuses new circuits under that key, until restart or, with -onion-rotate, until the next key is published", relay.MaxSetupCache))
-	flag.BoolVar(&cfg.auth, "auth", true, "serve a descriptor signed under a certificate from jimichi enroll and extend only to the roster nodes it names, over authenticated links; false serves it unsigned and extends to any address over anonymous links")
-	flag.StringVar(&cfg.name, "name", "", "node name for its certificate, required with -auth")
-	flag.StringVar(&cfg.advertise, "advertise", "", fmt.Sprintf("host:port clients dial, bound into the certificate, at most %d bytes, required with -auth; without -auth the address this node lists itself under in /descriptors", wire.AddrSize))
-	flag.DurationVar(&cfg.descriptorTTL, "descriptor-ttl", time.Hour, fmt.Sprintf("lifetime of a signed descriptor, re-signed once half of it has passed; from %v to %v", minDescriptorTTL, pki.MaxDescriptorLife))
-	flag.DurationVar(&cfg.onionRotate, "onion-rotate", time.Hour, fmt.Sprintf("replace the onion key this often and release the replaced one -descriptor-ttl plus %v later, once no valid descriptor names it; a setup cell recorded before that no longer opens with what the node holds; the next rotation waits for that release; not shorter than -descriptor-ttl; 0 is the baseline for measurements: the link key is the onion key for the life of the process and recorded setups never stop opening", pki.Skew))
-	flag.StringVar(&cfg.peerInfoPort, "peer-info-port", "9100", "port where the other nodes publish their descriptors")
-	peers := flag.String("peers", "", "without -auth only: comma separated host:port of the other nodes, whose unsigned descriptors this node serves in /descriptors; with -auth they come from the roster")
-	flag.DurationVar(&cfg.limits.HandshakeTimeout, "handshake-timeout", relay.DefaultHandshakeTimeout, "close a connection whose link handshake has not finished this long after it was accepted; an initiator sends its hello at once; negative turns it off")
-	flag.DurationVar(&cfg.limits.SetupTimeout, "setup-timeout", relay.DefaultSetupTimeout, "close a link that has opened no circuit this long after its handshake; clients and relays send the setup at once; negative turns it off")
-	flag.DurationVar(&cfg.limits.WriteTimeout, "write-timeout", 0, "longest one frame may wait to be written before its circuit is torn down, so a peer that stops reading cannot hold a sender; 0 picks 4 periods and at least 1s, or 5s without -period; negative turns it off")
-	flag.DurationVar(&cfg.limits.IdleTimeout, "idle-timeout", relay.DefaultIdleTimeout, "tear down a circuit that carried no cell either way this long, so an abandoned paced circuit stops sending padding; the stand client sends every 200ms; negative turns it off")
-	flag.DurationVar(&cfg.limits.CircuitLifetime, "circuit-lifetime", relay.DefaultCircuitLifetime, "tear down any circuit this old, which bounds how long one set of circuit keys lives; the client builds a new one; negative turns it off")
-	flag.IntVar(&cfg.limits.MaxHandshakes, "max-handshakes", relay.DefaultMaxHandshakes, "link handshakes running at once; more would only queue for the CPU while each holds a socket; negative turns it off")
-	flag.IntVar(&cfg.limits.MaxHandshakesPerSource, "max-handshakes-per-source", 0, "link handshakes one address may run at once, so it cannot hold every slot of -max-handshakes; 0 picks an eighth of -max-handshakes and at least 1, also 4 when -max-handshakes is off; negative turns it off")
-	flag.IntVar(&cfg.limits.MaxLinks, "max-links", relay.DefaultMaxLinks, "open inbound links; keeps the sockets, goroutines and locked key pages of their circuits inside a 128 MiB pod; negative turns it off")
-	flag.IntVar(&cfg.limits.MaxLinksPerSource, "max-links-per-source", relay.DefaultMaxLinksPerSource, "open inbound links from one address, an IPv6 /64 counting as one, so one peer cannot take every slot; a preceding relay is one address, so every circuit it forwards here shares this allowance; negative turns it off")
-	flag.Float64Var(&cfg.limits.SourceLinkRate, "source-link-rate", relay.DefaultSourceLinkRate, "new links per second one address may open, checked before any key agreement; every connection costs one, refused or not; negative turns it off")
-	flag.IntVar(&cfg.limits.SourceLinkBurst, "source-link-burst", relay.DefaultSourceLinkBurst, "links one address may open at once before -source-link-rate applies; covers a client building several circuits; 0 for the default, a negative -source-link-rate turns the limit off")
-	flag.Float64Var(&cfg.limits.SourceSetupRate, "source-setup-rate", relay.DefaultSourceSetupRate, "circuit setups per second from one address, checked after the link handshake and before the agreement with the node key, each costing that agreement, twice while a replaced onion key is held, a dial onwards and a tag held as long as the onion key; at the default one address needs about 91 hours to fill -setup-cache; negative turns it off")
-	flag.IntVar(&cfg.limits.SourceSetupBurst, "source-setup-burst", relay.DefaultSourceSetupBurst, "setups one address may send at once before -source-setup-rate applies; 0 for the default, a negative -source-setup-rate turns the limit off")
+	suiteName, peers := registerFlags(flag.CommandLine, &cfg)
 	flag.Parse()
 	cfg.peers = splitList(*peers)
 
@@ -95,6 +67,9 @@ func main() {
 		logger.Fatal(err)
 	}
 	if err := checkRotateFlags(cfg.onionRotate, cfg.descriptorTTL); err != nil {
+		logger.Fatal(err)
+	}
+	if err := checkExit(cfg.exit, cfg.mailbox); err != nil {
 		logger.Fatal(err)
 	}
 
@@ -130,6 +105,46 @@ func main() {
 		logger.Print(err)
 		os.Exit(1)
 	}
+}
+
+func registerFlags(fs *flag.FlagSet, cfg *config) (suiteName, peers *string) {
+	fs.StringVar(&cfg.listen, "listen", ":9000", "address for cells")
+	fs.StringVar(&cfg.info, "info", ":9100", "address for the node descriptor and health check")
+	fs.StringVar(&cfg.stats, "stats", "127.0.0.1:9101", "loopback address for counters and enrollment")
+	fs.DurationVar(&cfg.logEvery, "log-every", time.Minute, "print aggregated counters to stdout this often; 0 disables")
+	fs.BoolVar(&cfg.harden, "harden", true, "disable core dumps and ptrace access for the process")
+	suiteName = fs.String("suite", suite.Default.String(), "primitive suite: gost or c25519")
+	fs.StringVar(&cfg.keymem, "keymem", "all", "key memory measures: all, none, or a list of offheap, lock, dontdump, zero")
+	fs.StringVar(&cfg.exit, "exit", exitEcho, "as an exit: echo sends the payload back along the circuit, mailbox keeps queues of end-to-end records and answers every request, none sends a cover reply")
+	cfg.mailbox = mailbox.DefaultLimits()
+	fs.DurationVar(&cfg.mailbox.TTL, "mailbox-ttl", cfg.mailbox.TTL, "with -exit mailbox: how long a record waits for its fetch, and how long a queue nobody fetches is held against eviction")
+	fs.IntVar(&cfg.mailbox.Depth, "mailbox-depth", cfg.mailbox.Depth, "with -exit mailbox: records one queue holds")
+	fs.IntVar(&cfg.mailbox.Queues, "mailbox-queues", cfg.mailbox.Queues, "with -exit mailbox: queues the node holds; a put for a new one evicts the queue fetched least recently only if nobody fetched it within -mailbox-ttl")
+	fs.IntVar(&cfg.mailbox.Records, "mailbox-records", cfg.mailbox.Records, fmt.Sprintf("with -exit mailbox: records the node holds in all, %d bytes each", mailbox.RecordSize))
+	fs.DurationVar(&cfg.period, "period", 0, "send one frame per circuit and direction every period, padding when idle; 0 forwards at once")
+	fs.IntVar(&cfg.queue, "queue", 64, "cells a circuit may queue per direction when -period is set")
+	fs.IntVar(&cfg.setupCache, "setup-cache", wire.DefaultSetupCache, fmt.Sprintf("setups remembered per onion key to refuse a replay, 0 for the default, at most %d; when full the node refuses new circuits under that key, until restart or, with -onion-rotate, until the next key is published", relay.MaxSetupCache))
+	fs.BoolVar(&cfg.auth, "auth", true, "serve a descriptor signed under a certificate from jimichi enroll and extend only to the roster nodes it names, over authenticated links; false serves it unsigned and extends to any address over anonymous links")
+	fs.StringVar(&cfg.name, "name", "", "node name for its certificate, required with -auth")
+	fs.StringVar(&cfg.advertise, "advertise", "", fmt.Sprintf("host:port clients dial, bound into the certificate, at most %d bytes, required with -auth; without -auth the address this node lists itself under in /descriptors", wire.AddrSize))
+	fs.DurationVar(&cfg.descriptorTTL, "descriptor-ttl", time.Hour, fmt.Sprintf("lifetime of a signed descriptor, re-signed once half of it has passed; from %v to %v", minDescriptorTTL, pki.MaxDescriptorLife))
+	fs.DurationVar(&cfg.onionRotate, "onion-rotate", time.Hour, fmt.Sprintf("replace the onion key this often and release the replaced one -descriptor-ttl plus %v later, once no valid descriptor names it; a setup cell recorded before that no longer opens with what the node holds; the next rotation waits for that release; not shorter than -descriptor-ttl; 0 is the baseline for measurements: the link key is the onion key for the life of the process and recorded setups never stop opening", pki.Skew))
+	fs.StringVar(&cfg.peerInfoPort, "peer-info-port", "9100", "port where the other nodes publish their descriptors")
+	peers = fs.String("peers", "", "without -auth only: comma separated host:port of the other nodes, whose unsigned descriptors this node serves in /descriptors; with -auth they come from the roster")
+	fs.DurationVar(&cfg.limits.HandshakeTimeout, "handshake-timeout", relay.DefaultHandshakeTimeout, "close a connection whose link handshake has not finished this long after it was accepted; an initiator sends its hello at once; negative turns it off")
+	fs.DurationVar(&cfg.limits.SetupTimeout, "setup-timeout", relay.DefaultSetupTimeout, "close a link that has opened no circuit this long after its handshake; clients and relays send the setup at once; negative turns it off")
+	fs.DurationVar(&cfg.limits.WriteTimeout, "write-timeout", 0, "longest one frame may wait to be written before its circuit is torn down, so a peer that stops reading cannot hold a sender; 0 picks 4 periods and at least 1s, or 5s without -period; negative turns it off")
+	fs.DurationVar(&cfg.limits.IdleTimeout, "idle-timeout", relay.DefaultIdleTimeout, "tear down a circuit that carried no cell either way this long, so an abandoned paced circuit stops sending padding; the stand client sends every 200ms; negative turns it off")
+	fs.DurationVar(&cfg.limits.CircuitLifetime, "circuit-lifetime", relay.DefaultCircuitLifetime, "tear down any circuit this old, which bounds how long one set of circuit keys lives; the client builds a new one; negative turns it off")
+	fs.IntVar(&cfg.limits.MaxHandshakes, "max-handshakes", relay.DefaultMaxHandshakes, "link handshakes running at once; more would only queue for the CPU while each holds a socket; negative turns it off")
+	fs.IntVar(&cfg.limits.MaxHandshakesPerSource, "max-handshakes-per-source", 0, "link handshakes one address may run at once, so it cannot hold every slot of -max-handshakes; 0 picks an eighth of -max-handshakes and at least 1, also 4 when -max-handshakes is off; negative turns it off")
+	fs.IntVar(&cfg.limits.MaxLinks, "max-links", relay.DefaultMaxLinks, "open inbound links; keeps the sockets, goroutines and locked key pages of their circuits inside a 128 MiB pod; negative turns it off")
+	fs.IntVar(&cfg.limits.MaxLinksPerSource, "max-links-per-source", relay.DefaultMaxLinksPerSource, "open inbound links from one address, an IPv6 /64 counting as one, so one peer cannot take every slot; a preceding relay is one address, so every circuit it forwards here shares this allowance; negative turns it off")
+	fs.Float64Var(&cfg.limits.SourceLinkRate, "source-link-rate", relay.DefaultSourceLinkRate, "new links per second one address may open, checked before any key agreement; every connection costs one, refused or not; negative turns it off")
+	fs.IntVar(&cfg.limits.SourceLinkBurst, "source-link-burst", relay.DefaultSourceLinkBurst, "links one address may open at once before -source-link-rate applies; covers a client building several circuits; 0 for the default, a negative -source-link-rate turns the limit off")
+	fs.Float64Var(&cfg.limits.SourceSetupRate, "source-setup-rate", relay.DefaultSourceSetupRate, "circuit setups per second from one address, checked after the link handshake and before the agreement with the node key, each costing that agreement, twice while a replaced onion key is held, a dial onwards and a tag held as long as the onion key; at the default one address needs about 91 hours to fill -setup-cache; negative turns it off")
+	fs.IntVar(&cfg.limits.SourceSetupBurst, "source-setup-burst", relay.DefaultSourceSetupBurst, "setups one address may send at once before -source-setup-rate applies; 0 for the default, a negative -source-setup-rate turns the limit off")
+	return suiteName, peers
 }
 
 func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, stop <-chan os.Signal) error {
@@ -206,7 +221,17 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		n.setPeers(cfg.peers, unverifiedPeer(provider))
 	}
 
-	r, err := relay.New(relayConfig(provider, staticPriv, staticPub, cfg, n))
+	var store *mailbox.Store
+	if cfg.exit == exitMailbox {
+		if store, err = mailbox.NewStore(provider, cfg.mailbox, cfg.now); err != nil {
+			return fmt.Errorf("mailbox: %w", err)
+		}
+		// deferred before the relay, so it runs after r.Close and no Deliver
+		// comes once the records are zeroed
+		defer store.Close()
+	}
+
+	r, err := relay.New(relayConfig(provider, staticPriv, staticPub, cfg, n, deliverFor(cfg.exit, store)))
 	if err != nil {
 		return fmt.Errorf("relay: %w", err)
 	}
@@ -234,7 +259,14 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 	go func() { served <- r.Serve(cells) }()
 	n.serving = r.Serving
 	go serve(infoLn, n.infoMux(), logger)
-	go serve(adminLn, n.adminMux(r.Stats().Snapshot), logger)
+	var mailboxStats func() mailbox.Counters
+	if store != nil {
+		mailboxStats = store.Stats
+		stopped := make(chan struct{})
+		defer close(stopped)
+		go store.Run(stopped)
+	}
+	go serve(adminLn, n.adminMux(r.Stats().Snapshot, mailboxStats), logger)
 	if n.id != nil {
 		go n.keepFresh()
 	}
@@ -248,8 +280,8 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		go logCounters(r, n, cfg.logEvery, logger)
 	}
 
-	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v, onion_rotate=%v",
-		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth, cfg.onionRotate)
+	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v, onion_rotate=%v, exit=%s",
+		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth, cfg.onionRotate, cfg.exit)
 	return untilStopped(stop, served, logger)
 }
 
@@ -265,19 +297,12 @@ func untilStopped(stop <-chan os.Signal, served <-chan error, logger *log.Logger
 	}
 }
 
-func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []byte, cfg config, n *node) relay.Config {
+func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []byte, cfg config, n *node, deliver relay.Deliver) relay.Config {
 	rc := relay.Config{
 		Provider:   provider,
 		StaticPriv: staticPriv,
 		StaticPub:  staticPub,
-		// the payload is never logged: that would hand out exactly the metadata
-		// the node exists to withhold
-		Deliver: func(_ uint64, payload []byte) []byte {
-			if cfg.echo {
-				return payload
-			}
-			return nil
-		},
+		Deliver:    deliver,
 		Period:     cfg.period,
 		QueueCells: cfg.queue,
 		SetupCache: cfg.setupCache,
@@ -308,6 +333,37 @@ func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, sta
 		rc.Onion = n.onion.ring
 	}
 	return rc
+}
+
+const (
+	exitEcho    = "echo"
+	exitMailbox = "mailbox"
+	exitNone    = "none"
+)
+
+func checkExit(exit string, lim mailbox.Limits) error {
+	switch exit {
+	case exitEcho, exitNone:
+		return nil
+	case exitMailbox:
+		if lim.TTL <= 0 || lim.Depth <= 0 || lim.Queues <= 0 || lim.Records <= 0 {
+			return errors.New("-mailbox-ttl, -mailbox-depth, -mailbox-queues and -mailbox-records must be positive")
+		}
+		return nil
+	}
+	return fmt.Errorf("-exit %q: want echo, mailbox or none", exit)
+}
+
+// the payload is never logged: that would hand out exactly the metadata the
+// node exists to withhold. A nil Deliver makes every reply a cover reply
+func deliverFor(exit string, store *mailbox.Store) relay.Deliver {
+	switch {
+	case exit == exitMailbox && store != nil:
+		return store.Deliver
+	case exit == exitEcho:
+		return func(_ uint64, payload []byte) []byte { return payload }
+	}
+	return nil
 }
 
 func splitList(s string) []string {

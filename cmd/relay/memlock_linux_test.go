@@ -437,7 +437,7 @@ func runBoundNode(t *testing.T, name string) {
 		stop <- os.Interrupt
 	}()
 	cfg := config{
-		listen: "127.0.0.1:0", info: "127.0.0.1:0", stats: "127.0.0.1:0", echo: true,
+		listen: "127.0.0.1:0", info: "127.0.0.1:0", stats: "127.0.0.1:0", exit: exitEcho,
 		descriptorTTL: time.Hour, onionRotate: time.Hour, lock: true, now: clk.Now,
 	}
 	if err := serveNode(p, cfg, log.New(os.Stdout, "", 0), stop); err != nil {

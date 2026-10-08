@@ -30,8 +30,9 @@ end-to-end layer are planned ([#18](https://github.com/jimichi-org/jimichi/issue
 client-a -> entry -> middle -> exit
 ```
 
-The exit is the end of the path: it opens the message and, with -echo (the default), sends it back
-as the reply. A recipient client (client-b) and an end-to-end layer are planned
+The exit is the end of the path: it opens the message and, with -exit echo (the default), sends it
+back as the reply, while with -exit mailbox it answers as a mailbox (section "End-to-end layer and
+mailbox"). A recipient client (client-b) and an end-to-end layer are planned
 ([#18](https://github.com/jimichi-org/jimichi/issues/18)).
 
 1. The client holds a list of N nodes and the length of the chain, three by default. It draws
@@ -283,6 +284,150 @@ The exit answers every data cell with exactly one backward cell: a message with 
 cell with a cover reply. Replies to messages only would show every node on the way back, by their
 number and timing, which cells were real. The count is the same in every mode; the timing matches
 only when the delivery at the exit takes constant time or the nodes send on their own clocks.
+
+## End-to-end layer and mailbox
+
+Status: the store at the exit is implemented (package mailbox, `cmd/relay -exit mailbox`); the
+client that uses it and the end-to-end layer are planned
+([#18](https://github.com/jimichi-org/jimichi/issues/18)); on the testbed the exit runs in echo mode.
+
+The -exit flag sets what the exit does with the payload of a data cell:
+
+| -exit | Reply |
+|---|---|
+| echo (the default) | the same payload |
+| mailbox | a mailbox reply, always 396 bytes |
+| none | a cover reply |
+
+The cell format does not change. A mailbox request and reply are the payload of an ordinary data
+cell, and wire fills the rest of the body with random bytes. The client sends one request per
+tick: a fetch from its own queue and, when it has something to put, a put into the peer's queue.
+A record is a ciphertext of the end-to-end layer of a constant 392 bytes, opaque to the mailbox.
+
+| Hops | Cell capacity | Left after a 427-byte request | Left after a 396-byte reply |
+|---|---|---|---|
+| 2 | 460 | 33 | 64 |
+| 3 | 444 | 17 | 48 |
+| 4 (c25519 only) | 428 | 1 | 32 |
+
+### Queue and fetch capability
+
+- Fetch capability F: 16 random bytes of the queue owner, not all zero.
+- Queue identifier: `QueueID(F) = NewContext(p, "mailbox/queue", F).Sum()[0:16]`. The
+  transcript is 62 bytes on c25519 and 60 on GOST.
+- Whoever knows F fetches; whoever knows the identifier puts. The mailbox sees F in every
+  request and keeps only the identifier.
+
+### Request, 427 bytes
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0 | 1 | version, 0x01 |
+| 1 | 2 | tag, u16be: the number of the request on the circuit modulo 2^16 |
+| 3 | 16 | F; zeros: no fetch |
+| 19 | 16 | queue identifier for a put; zeros: no put |
+| 35 | 392 | record; zeros without a put |
+
+### Reply, 396 bytes
+
+Every data cell gets a reply, never nil.
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0 | 1 | version, 0x01 |
+| 1 | 2 | tag of the request; 0 when the request is shorter than 3 bytes |
+| 3 | 1 | status |
+| 4 | 392 | record or zeros |
+
+| Status bits | Meaning |
+|---|---|
+| 0x80 | bad request: length not 427, version not 1, or an identifier other than the one bound to the circuit; the other bits 0, the record zeros |
+| 0-1 | put: 00 not asked, 01 stored, 10 the queue is full or the total record limit is reached, 11 refused: no room for a new queue |
+| 0x04 | the record field holds the head of the queue |
+| 3-6 | always 0 |
+
+The client matches a reply to its oldest unanswered request by position: the replies of a
+circuit arrive strictly in order, and the tag is a check. A reply is bad when:
+
+- its length is not 396, its version not 1, a bit of 3-6 is set, 0x80 comes with another bit, or
+  the record is non-zero without 0x04 (ParseReply);
+- the tag differs, 0x80 answers a correct request, the put bits are not 00 for a request without
+  a put or 00 for a request with one, or 0x04 answers a request without F (Reply.Answers).
+
+A bad reply does not close the circuit: the outcome of the put is unknown and the record is
+dropped. The mailbox can drop everything anyway, and closing would give it one more cheap lever.
+
+### Store
+
+Handling one request:
+
+1. The hash QueueID(F) is computed before any check and before the lock, on every request, for a
+   zero F and for a bad request too: whether it runs does not depend on the content of the request.
+2. Length not 427 or version not 1: reply 0x80.
+3. Binding: a circuit (its identifier on the inbound link of the exit, unique among the live
+   circuits of the node) gets its fetch queue from the first non-zero F and its put queue from the
+   first non-zero put identifier. A request with another identifier in a field already set gets
+   0x80 as a whole, neither put nor fetch. An honest client fetches from one queue and puts into
+   one.
+4. Put: the queue is full or the total record limit is reached: 10. No queue and the queue limit
+   reached: the queue fetched least recently is evicted if it was not fetched within the TTL,
+   otherwise 11. Then the queue is created and the record is copied with its arrival time: 01.
+5. Fetch: if the queue exists, the fetch time is noted, expired records at the head are removed,
+   the head is taken into the reply and 0x04 is set. A fetch never creates a queue.
+6. The payload slice is zeroed and the reply is built in a new slice.
+
+- A queue lives as long as its owner fetches. It is held while its last fetch, or its creation
+  for a queue not fetched yet, is within the TTL, whether or not the circuit that did it is still
+  open. Nobody evicts a held queue.
+- A circuit is bound to one fetch queue and one put queue for its whole life, so it holds at most
+  two. A put does not extend the hold. The cost of holding N queues depends on how long the
+  circuits stay open:
+  - A circuit that closes after its requests holds the queue its put created for a TTL from the
+    creation and the queue it fetched for a TTL from its last fetch, after it closes as well. N
+    queues take about N/2 circuit setups per TTL. Every node limits setups per source address, the
+    mailbox too, where a preceding relay is one source: at 0.2 per second and a TTL of 5 min one
+    source brings about 60 setups, that is about 120 held queues, and the default 1024 queues take
+    about 9 sources.
+  - A circuit that stays open holds its fetch queue as long as it lives: every fetch restarts the
+    TTL and every request restarts the idle timeout of the circuit (-idle-timeout, 5 min; padding
+    does not count), so one request per 5 min keeps both until -circuit-lifetime, 24 h. A queue
+    its put created is held for a TTL from the creation and after that only by fetches. N queues
+    take N open circuits with one request per TTL each, that is N setups per 24 h. At the mailbox
+    every open circuit is one inbound link: at most 32 from one preceding relay and 512 in all
+    (-max-links-per-source, -max-links), shared with the honest circuits.
+- The binding table is bounded; when it is full, the binding seen least recently is evicted. An
+  evicted honest circuit binds again to the same identifiers.
+- Every 30 s the expired records, the empty queues not fetched within the TTL and the bindings
+  not seen for longer than the TTL are removed.
+- Removal on fetch is the acknowledgement: there is no second delivery. A node restart loses
+  everything.
+- A reply carries only the tag, the status and the record: no queue depth, no time, no
+  identifiers.
+- The array of a record is zeroed when it is fetched, when it expires, when its queue is evicted
+  and when the node stops. Copies of the request remain in the cell body, in the link buffer and
+  in the hash transcript on the heap, and nobody zeroes them.
+- Work per request is bounded, not constant: one hash, operations on maps and lists, a copy of one
+  record for a put or a fetched head, and at most -mailbox-depth removals of expired records at
+  the head of the fetched queue. No request walks the queues; only the timed sweep does. The
+  difference is microseconds; outside the exit it shows only when the exit forwards at once
+  (-period 0).
+
+| Limit | Flag | Default |
+|---|---|---|
+| TTL of a record and of a held queue | -mailbox-ttl | 5 min |
+| records per queue | -mailbox-depth | 16 |
+| queues | -mailbox-queues | 1024 |
+| records in all | -mailbox-records | 16384, 6.1 MiB of records |
+| circuit bindings | none | 4096 |
+
+The mailbox sees both queues of every circuit, the time of each request and the outcome of each
+put, so it links the two circuits of one conversation. It cannot read the records.
+
+Counters (aggregates): mailbox_requests, mailbox_queues, mailbox_records, mailbox_bindings,
+mailbox_puts, mailbox_put_full, mailbox_put_refused, mailbox_fetches, mailbox_hits,
+mailbox_expired, mailbox_evicted, mailbox_bad. They appear only in /stats on loopback and only
+with -exit mailbox, never in the stdout line once a minute: stdout goes to the kubelet logs on
+the node's disk, and the number of queues and records would show pending messages.
 
 ## Circuit setup
 
@@ -831,7 +976,7 @@ those come from the nodes' agreement keys, which the CA never sees.
 | Source | Data |
 |---|---|
 | client | on the testbed (cmd/client), per message: the size of the reply and the round-trip time, or a line when no reply comes within 5 s; at the end of the circuit the line `circuit closed`, or `circuit closed: client: reply refused: <check>` with the class of the reply or frame the client refused, naming neither a node nor a cell number, or `send: <class>` with the class of a failed send (with -fixed-chain the error itself, which can name the entry address and the local port); at start the name, fingerprint and certificate validity of every listed node whose bundle it verified, in the listed order (with -fixed-chain the descriptor validity as well), how many of the listed nodes were verified, and the number of hops; with a drawn chain never which nodes form it. In the lab harness, per run: the round-trip time of every message whose echo came back, matched by flow and sequence number, the number of messages a constant-rate schedule dropped, the number left unanswered, the number of clients that refused a reply or a link frame, and per flow whether and when its circuit closed |
-| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests), the epoch of the onion key and the failed attempts to rotate it (onion_epoch, onion_rotate_failed). No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, on every rotation of the onion key a line with the new epoch and no key material, on a failed rotation one line per kind of cause (pages not mapped, pages not locked, key not locked, key refused by the ring, other), a fixed class with no size and no text of the underlying error, with no new line while consecutive failures share the class and a line again for the first failure after a success, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified |
+| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests), the epoch of the onion key and the failed attempts to rotate it (onion_epoch, onion_rotate_failed). With -exit mailbox also the mailbox counters (section "End-to-end layer and mailbox"), on loopback on request only, not on stdout. No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, on every rotation of the onion key a line with the new epoch and no key material, on a failed rotation one line per kind of cause (pages not mapped, pages not locked, key not locked, key refused by the ring, other), a fixed class with no size and no text of the underlying error, with no new line while consecutive failures share the class and a line again for the first failure after a success, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified |
 | network | in the lab harness only, inside its process and without a packet capture: the moment every frame crosses the client-entry link and the last link between nodes, the one into the exit, in both directions. There is no link past the exit to observe yet ([#47](https://github.com/jimichi-org/jimichi/issues/47)) |
 | memory | planned: dumps of the relay process in the key extraction scenario ([#24](https://github.com/jimichi-org/jimichi/issues/24)); nothing takes a dump yet |
 
@@ -857,6 +1002,7 @@ prints the counters to the terminal.
 | internal/fetch | reading bundles and the mirror from an info port | pki |
 | relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
 | client | choice of the chain, send, receive, cover traffic | crypto, crypto/secmem, link, wire |
+| mailbox | queue store at the exit, request and reply format | crypto |
 | vault | planned: client container with two volumes ([#20](https://github.com/jimichi-org/jimichi/issues/20)); an empty package today | nothing yet |
 | lab | harness that runs one configuration in one process, the observer on two links, seeds, sampling of chains | client, relay, link, crypto, crypto/secmem, crypto/suite |
 | lab/metrics | correlation scores, AUC and its bootstrap interval, traffic multiplier and latency percentiles, share of compromised chains | standard library only |

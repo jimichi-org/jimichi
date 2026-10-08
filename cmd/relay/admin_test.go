@@ -109,7 +109,7 @@ func (f *fixture) serve(t *testing.T) {
 	t.Helper()
 	f.info = httptest.NewServer(f.n.infoMux())
 	t.Cleanup(f.info.Close)
-	f.admin = httptest.NewServer(f.n.adminMux(func() relay.Counters { return relay.Counters{Accepted: 7} }))
+	f.admin = httptest.NewServer(f.n.adminMux(func() relay.Counters { return relay.Counters{Accepted: 7} }, nil))
 	t.Cleanup(f.admin.Close)
 }
 

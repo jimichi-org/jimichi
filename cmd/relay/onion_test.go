@@ -722,11 +722,11 @@ func TestKeepOnionRotatesWhenThePeriodIsOver(t *testing.T) {
 
 func TestRotatingNodeGivesTheRelayItsRing(t *testing.T) {
 	f := newFixture(t, jcrypto.SuiteC25519)
-	if rc := relayConfig(f.p, nil, nil, config{auth: true}, f.n); rc.Onion != nil {
+	if rc := relayConfig(f.p, nil, nil, config{auth: true}, f.n, nil); rc.Onion != nil {
 		t.Fatal("a node without rotation must leave the relay its link key as the onion key")
 	}
 	ring := f.rotating(t, time.Hour)
-	if rc := relayConfig(f.p, nil, nil, config{auth: true}, f.n); rc.Onion != ring {
+	if rc := relayConfig(f.p, nil, nil, config{auth: true}, f.n, nil); rc.Onion != ring {
 		t.Fatal("the relay of a rotating node does not get the ring the node rotates")
 	}
 }
@@ -742,7 +742,7 @@ func TestNodeRotatesAndOpensSetupsWithItsNewKey(t *testing.T) {
 	}
 	clk := &clock{now: time.Now()}
 	cfg := config{
-		listen: "127.0.0.1:0", info: "127.0.0.1:0", stats: "127.0.0.1:0", echo: true,
+		listen: "127.0.0.1:0", info: "127.0.0.1:0", stats: "127.0.0.1:0", exit: exitEcho,
 		descriptorTTL: time.Hour, onionRotate: time.Hour, now: clk.Now,
 	}
 	var out logBuffer
