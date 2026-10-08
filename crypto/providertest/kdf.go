@@ -23,6 +23,11 @@ var purposes = []struct {
 	{"counter/bwd", 8},
 	{"link/i2r", 32},
 	{"link/r2i", 32},
+	{"noise/key", 32},
+	{"noise/split/i2r", 32},
+	{"noise/split/r2i", 32},
+	{"e2e/step/key", 32},
+	{"e2e/step/next", 32},
 }
 
 func testAgreeMatches(t *testing.T, p jcrypto.CryptoProvider) {
@@ -430,6 +435,11 @@ var golden = map[jcrypto.Suite]goldenSuite{
 			{3, "counter/bwd", 8, "f6ca6ef42dae9b09"},
 			{4, "link/i2r", 32, "921feb1700aaf54a43d61778e02ef58838f20ce387e635f7df69478f8da7766c"},
 			{4, "link/r2i", 32, "9ca621f67bb3f1e9f5decebbc1e7b8c6fabcf16a5a85baa9e873cdfc4ce287c4"},
+			{0, "noise/key", 32, "f78988654bf5f28eebd2a08494476d6ca6a49e4b485b76651075ab6718862b0f"},
+			{0, "noise/split/i2r", 32, "4006dc382df7bfd66af19b2425c30eb7ea8f89f1178ea0ec1c345caa518d8131"},
+			{0, "noise/split/r2i", 32, "43c0eda0ca427224acff4f2ecf247c4f3f41eff77aea8a14660385a2871e0b3e"},
+			{0, "e2e/step/key", 32, "d0c7990fea65435b8469344ec77b8d9797a31aafcfbcf83b26687870159b3e62"},
+			{0, "e2e/step/next", 32, "ae3cb7c681bb463b02bdb6c0174e462f7fc2690bcf06536d696f9d17ed1a561b"},
 		},
 		mix: [2]string{
 			"afb0cba8f71ea59fc429db92ef6b09db684d2b4287136e84c1cd8b68316362aa",
@@ -477,6 +487,11 @@ var golden = map[jcrypto.Suite]goldenSuite{
 			{3, "counter/bwd", 8, "eeee7d74a91ab022"},
 			{4, "link/i2r", 32, "67e7e5e5ff3071cf929f5301222d687f204c05936ae1eefc59c2bd021341e4bd"},
 			{4, "link/r2i", 32, "6b1941655ac88a53101e939b3d971f8b092d79b98b3a0ccf007fdeaab381ccf8"},
+			{0, "noise/key", 32, "a9e17ba373acdd6b5edec75764c98170b565ebd3cbb05045994cb5f9512ebc64"},
+			{0, "noise/split/i2r", 32, "82a42337deef54b305929d8252a152fb75010b0af92998913879b88befdd13d9"},
+			{0, "noise/split/r2i", 32, "2f3efa57b0ed0e92b139166e140f761e388d41ae06c3e334aaa7668d6aa72f41"},
+			{0, "e2e/step/key", 32, "5385109422b7f4640bff01aa5bc25be26b1d30314f25ad388667b71529e9c8be"},
+			{0, "e2e/step/next", 32, "a2e56a5acb5e267c22c73a78fcd4f33654c1b605cee9f8a9cc3249ef121de007"},
 		},
 		mix: [2]string{
 			"c0135e5bc83af1586c67367eda0e249e6c0a45e30e2259da474ed7d6939f87ba",
