@@ -201,7 +201,7 @@ func command(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if *set == "deny" {
-		return deny(*suiteName, *rev, *out, stdout, stderr)
+		return deny(scenarioSteps, *suiteName, *rev, *out, stdout, stderr)
 	}
 
 	if *flows < 2 || *hops < 2 {

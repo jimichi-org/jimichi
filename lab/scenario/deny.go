@@ -27,6 +27,31 @@ var (
 	errNoKey    = errors.New("scenario: no key to answer this agreement with")
 )
 
+// a refusal of Verify: Record is the index of the record that does not verify,
+// -1 when the transcript is refused as a whole
+type Mismatch struct {
+	Record int
+	Reason string
+}
+
+func (m *Mismatch) Error() string {
+	if m.Record < 0 {
+		return fmt.Sprintf("%v: %s", ErrMismatch, m.Reason)
+	}
+	return fmt.Sprintf("%v: record %d: %s", ErrMismatch, m.Record, m.Reason)
+}
+
+func (m *Mismatch) Is(target error) bool { return target == ErrMismatch }
+
+// the index of the record a Verify error refuses, -1 for any other error
+func RefusedAt(err error) int {
+	var m *Mismatch
+	if errors.As(err, &m) {
+		return m.Record
+	}
+	return -1
+}
+
 var (
 	senderQueue    = [e2e.QueueSize]byte{0x01}
 	recipientQueue = [e2e.QueueSize]byte{0x02}
@@ -247,7 +272,7 @@ func Verify(p jcrypto.CryptoProvider, recipient *e2e.Identity, ev *Evidence, t *
 		return nil, errors.New("scenario: nothing to verify")
 	}
 	if !bytes.Equal(t.Recipient.Bytes(), recipient.Card().Bytes()) {
-		return nil, fmt.Errorf("%w: the transcript names another recipient", ErrMismatch)
+		return nil, &Mismatch{Record: -1, Reason: "the transcript names another recipient"}
 	}
 	s, err := e2e.NewSession(&injector{CryptoProvider: p, ev: ev}, recipient, t.Sender, e2e.Options{})
 	if err != nil {
@@ -257,7 +282,7 @@ func Verify(p jcrypto.CryptoProvider, recipient *e2e.Identity, ev *Evidence, t *
 	var said [][]byte
 	for i, r := range t.Records {
 		if err := r.check(); err != nil {
-			return nil, fmt.Errorf("%w: record %d: %v", ErrMismatch, i, err)
+			return nil, &Mismatch{Record: i, Reason: err.Error()}
 		}
 		if r.FromSender {
 			want := e2e.EventSession
@@ -265,7 +290,7 @@ func Verify(p jcrypto.CryptoProvider, recipient *e2e.Identity, ev *Evidence, t *
 				want = dataEvent(r.Dummy)
 			}
 			if err := expect(s, r.Bytes, want, r.Body); err != nil {
-				return nil, fmt.Errorf("%w: record %d of the sender: %v", ErrMismatch, i, err)
+				return nil, &Mismatch{Record: i, Reason: "the sender's record: " + err.Error()}
 			}
 			if want == e2e.EventMessage {
 				said = append(said, bytes.Clone(r.Body))
@@ -274,14 +299,14 @@ func Verify(p jcrypto.CryptoProvider, recipient *e2e.Identity, ev *Evidence, t *
 		}
 		made, err := remake(s, r)
 		if err != nil {
-			return nil, fmt.Errorf("%w: record %d of the recipient: %v", ErrMismatch, i, err)
+			return nil, &Mismatch{Record: i, Reason: "the recipient's record: " + err.Error()}
 		}
 		if !bytes.Equal(made, r.Bytes) {
-			return nil, fmt.Errorf("%w: record %d of the recipient comes out otherwise", ErrMismatch, i)
+			return nil, &Mismatch{Record: i, Reason: "the recipient's record comes out otherwise"}
 		}
 	}
 	if _, pending := s.Handshake(); pending || s.State() == e2e.StateHandshaking {
-		return nil, fmt.Errorf("%w: no whole handshake", ErrMismatch)
+		return nil, &Mismatch{Record: -1, Reason: "no whole handshake"}
 	}
 	return said, nil
 }
@@ -312,48 +337,88 @@ func (r Record) check() error {
 	return nil
 }
 
-// a forgery made with a fresh key in place of the recipient's must fail Verify
-// under the recipient's key while it passes under the key it was made with
-func Control(p jcrypto.CryptoProvider, recipient *e2e.Identity, sender e2e.Card, script []Line) (rejected bool, err error) {
+// a forgery made with a fresh key in place of the recipient's, of the
+// recipient's mailbox and queue and in its role, so that the key is the one
+// difference
+type ControlRun struct {
+	Stand *e2e.Identity
+	// names the stand as the recipient and verifies under its key
+	Transcript *Transcript
+	Evidence   *Evidence
+	// what Verify says of the same records named to the recipient, under the
+	// recipient's key
+	Refusal error
+}
+
+func (c *ControlRun) Close() {
+	if c == nil {
+		return
+	}
+	c.Evidence.Release()
+	if c.Stand != nil {
+		c.Stand.Close()
+	}
+}
+
+// the record at which the recipient's key refuses the control, -1 when it does
+// not or when it refuses the transcript as a whole, as for a name
+func (c *ControlRun) RefusedAt() int { return RefusedAt(c.Refusal) }
+
+func (c *ControlRun) Rejected() bool { return c.RefusedAt() >= 0 }
+
+// the forgery must verify under the key it was made with, or the control
+// shows nothing
+func Control(p jcrypto.CryptoProvider, recipient *e2e.Identity, sender e2e.Card, script []Line) (*ControlRun, error) {
 	if p == nil || recipient == nil {
-		return false, errors.New("scenario: no provider or identity")
+		return nil, errors.New("scenario: no provider or identity")
 	}
 	own := recipient.Card()
-	// the role of the recipient as well, so the key is the one difference
-	var stand *e2e.Identity
+	run := &ControlRun{}
 	for range 64 {
 		id, err := e2e.NewIdentity(p, own.Mailbox, own.Queue)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		if initiates(id.Card(), sender) == initiates(own, sender) {
-			stand = id
+			run.Stand = id
 			break
 		}
 		id.Close()
 	}
-	if stand == nil {
-		return false, errors.New("scenario: no fresh key took the recipient's role")
+	if run.Stand == nil {
+		return nil, errors.New("scenario: no fresh key took the recipient's role")
 	}
-	defer stand.Close()
-	t, ev, err := Forge(p, stand, sender, script)
-	if err != nil {
-		return false, err
+	var err error
+	if run.Transcript, run.Evidence, err = Forge(p, run.Stand, sender, script); err != nil {
+		run.Close()
+		return nil, err
 	}
-	defer ev.Release()
-	if _, err := Verify(p, stand, ev, t); err != nil {
-		return false, fmt.Errorf("scenario: the control does not verify under the key it was made with: %w", err)
+	if _, err := Verify(p, run.Stand, run.Evidence, run.Transcript); err != nil {
+		run.Close()
+		return nil, fmt.Errorf("scenario: the control does not verify under the key it was made with: %w", err)
 	}
-	t.Recipient = own
-	_, err = Verify(p, recipient, ev, t)
-	if err != nil && !errors.Is(err, ErrMismatch) {
-		return false, err
+	named := *run.Transcript
+	named.Recipient = own
+	if _, run.Refusal = Verify(p, recipient, run.Evidence, &named); run.Refusal != nil && !errors.Is(run.Refusal, ErrMismatch) {
+		err := run.Refusal
+		run.Close()
+		return nil, err
 	}
-	return err != nil, nil
+	return run, nil
 }
 
-// two transcripts of the same cards with the same records in the same order
-// by author, kind and length, claiming the same bodies
+// the clear part of a record, the one part that is not pseudorandom: the kind,
+// and in a data record the ratchet number after it (e2e, the data header)
+func clearHeader(r Record) []byte {
+	n := 1
+	if r.Kind == KindData {
+		n = 5
+	}
+	return r.Bytes[:min(n, len(r.Bytes))]
+}
+
+// two transcripts of the same cards with the same records in the same order by
+// author, kind, length and clear header, claiming the same bodies
 func SameShape(a, b *Transcript) bool {
 	if a == nil || b == nil || len(a.Records) != len(b.Records) ||
 		!bytes.Equal(a.Sender.Bytes(), b.Sender.Bytes()) || !bytes.Equal(a.Recipient.Bytes(), b.Recipient.Bytes()) {
@@ -362,7 +427,7 @@ func SameShape(a, b *Transcript) bool {
 	for i, x := range a.Records {
 		y := b.Records[i]
 		if x.FromSender != y.FromSender || x.Dummy != y.Dummy || x.Kind != y.Kind ||
-			len(x.Bytes) != len(y.Bytes) || !bytes.Equal(x.Body, y.Body) {
+			len(x.Bytes) != len(y.Bytes) || !bytes.Equal(clearHeader(x), clearHeader(y)) || !bytes.Equal(x.Body, y.Body) {
 			return false
 		}
 	}

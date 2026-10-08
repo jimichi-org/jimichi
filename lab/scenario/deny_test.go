@@ -2,8 +2,10 @@ package scenario
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"testing"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
@@ -137,12 +139,21 @@ func checkShape(t *testing.T, what string, tr *Transcript, role e2e.Role, lines 
 	if len(tr.Records) != len(want) {
 		t.Fatalf("%s: %d records, want %d", what, len(tr.Records), len(want))
 	}
+	// every direction numbers its data records from 0, in the clear after the kind
+	next := map[bool]uint32{}
 	for i, r := range tr.Records {
 		w := want[i]
 		if r.FromSender != w.FromSender || r.Dummy != w.Dummy || r.Kind != w.Kind || !bytes.Equal(r.Body, w.Body) ||
 			len(r.Bytes) != e2e.RecordSize || r.Bytes[0] != r.Kind {
 			t.Fatalf("%s: record %d is %+v (%d bytes, first %d), want %+v", what, i, r, len(r.Bytes), r.Bytes[0], w)
 		}
+		if r.Kind != KindData {
+			continue
+		}
+		if n := binary.BigEndian.Uint32(r.Bytes[1:5]); n != next[r.FromSender] {
+			t.Fatalf("%s: record %d has the number %d, want %d", what, i, n, next[r.FromSender])
+		}
+		next[r.FromSender]++
 	}
 }
 
@@ -214,19 +225,68 @@ func TestEvidenceIsTheKeyOfTheRecipientsHandshakeRecord(t *testing.T) {
 }
 
 // without the recipient's key there is no forgery that passes: one made with
-// a fresh key in its place verifies under that key and is refused under the
-// recipient's
+// a fresh key in its place verifies under that key, and the recipient's key
+// refuses its first record, which is cryptography and not a check of names
 func TestControlWithAFreshKeyIsRejected(t *testing.T) {
 	eachCase(t, func(t *testing.T, p jcrypto.CryptoProvider, role e2e.Role) {
-		sender, recipient := pair(t, p, role)
-		rejected, err := Control(p, recipient, sender.Card(), script)
+		spy := NewSpy(p)
+		sender, recipient := pair(t, spy, role)
+		run, err := Control(spy, recipient, sender.Card(), script)
 		if err != nil {
 			t.Fatalf("Control: %v", err)
 		}
-		if !rejected {
-			t.Fatal("a forgery without the recipient's key verified")
+		t.Cleanup(run.Close)
+
+		own, fresh := recipient.Card(), run.Stand.Card()
+		if bytes.Equal(fresh.Static, own.Static) || !spy.Drew(fresh.Static) {
+			t.Fatal("the control did not draw a fresh key")
+		}
+		if fresh.Mailbox != own.Mailbox || fresh.Queue != own.Queue || fresh.Suite != own.Suite {
+			t.Fatalf("the fresh card %v differs from the recipient's %v in more than the key", fresh, own)
+		}
+		if !bytes.Equal(run.Transcript.Recipient.Bytes(), fresh.Bytes()) || !bytes.Equal(run.Transcript.Sender.Bytes(), sender.Card().Bytes()) {
+			t.Fatal("the control names other cards")
+		}
+		checkShape(t, "control", run.Transcript, role, script)
+		said, err := Verify(p, run.Stand, run.Evidence, run.Transcript)
+		if err != nil {
+			t.Fatalf("the control does not verify under its own key: %v", err)
+		}
+		if !sameBodies(said, messages(script, true)) {
+			t.Fatalf("the control reads %q", said)
+		}
+
+		named := *run.Transcript
+		named.Recipient = own
+		_, err = Verify(p, recipient, run.Evidence, &named)
+		if RefusedAt(err) != 0 || RefusedAt(run.Refusal) != 0 || !run.Rejected() || run.RefusedAt() != 0 {
+			t.Fatalf("the recipient's key refuses the control with %v, the run says %v, want a refusal of record 0", err, run.Refusal)
+		}
+		if _, err := Verify(p, recipient, run.Evidence, run.Transcript); RefusedAt(err) != -1 || !errors.Is(err, ErrMismatch) {
+			t.Fatalf("the control under its own name: %v, want a refusal of the name", err)
 		}
 	})
+}
+
+// a refusal at a record counts, a refusal of the name or a run that verified
+// does not
+func TestControlRunRejectedOnlyAtARecord(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		at   int
+		want bool
+	}{
+		{nil, -1, false},
+		{&Mismatch{Record: -1, Reason: "the transcript names another recipient"}, -1, false},
+		{fmt.Errorf("wrapped: %w", &Mismatch{Record: 3}), 3, true},
+		{&Mismatch{Record: 0}, 0, true},
+		{errors.New("no session"), -1, false},
+	} {
+		run := &ControlRun{Refusal: c.err}
+		if run.RefusedAt() != c.at || run.Rejected() != c.want {
+			t.Fatalf("%v: at %d rejected %v, want %d and %v", c.err, run.RefusedAt(), run.Rejected(), c.at, c.want)
+		}
+	}
 }
 
 // a Static that shows the recipient's public key and agrees with a fresh one
@@ -245,6 +305,8 @@ func (i impostor) Agree(remote []byte, ctx jcrypto.Context) (*secmem.Buffer, err
 // every byte of every record: a change to any of them is refused
 func TestVerifyRefusesWhatTheRecipientCannotMakeAgain(t *testing.T) {
 	eachCase(t, func(t *testing.T, p jcrypto.CryptoProvider, role e2e.Role) {
+		// some thousands of Verify calls a case
+		t.Parallel()
 		sender, recipient := pair(t, p, role)
 		tr, ev := genuine(t, p, sender, recipient, script)
 		_, otherEv := forge(t, p, recipient, sender.Card(), script)
@@ -265,17 +327,22 @@ func TestVerifyRefusesWhatTheRecipientCannotMakeAgain(t *testing.T) {
 			return &c
 		}
 
+		refusedAt := func(what string, x *Transcript, want int) {
+			t.Helper()
+			if _, err := Verify(p, recipient, ev, x); RefusedAt(err) != want {
+				t.Fatalf("%s: %v, want a refusal of record %d", what, err, want)
+			}
+		}
+		rng := rand.New(rand.NewPCG(uint64(role), 19))
 		for i, r := range tr.Records {
-			for _, at := range []int{0, 1, 40, e2e.RecordSize - 1} {
+			for _, at := range flipped(p.Suite(), rng) {
 				x := clone()
 				x.Records[i].Bytes[at] ^= 0x01
-				refused(fmt.Sprintf("record %d, by the sender %v, with byte %d flipped", i, r.FromSender, at), recipient, ev, x)
+				refusedAt(fmt.Sprintf("record %d, by the sender %v, with byte %d flipped", i, r.FromSender, at), x, i)
 			}
-			if r.Kind == KindData && !r.Dummy {
-				x := clone()
-				x.Records[i].Body = append(x.Records[i].Body, '!')
-				refused(fmt.Sprintf("record %d claiming another body", i), recipient, ev, x)
-			}
+			x := clone()
+			x.Records[i].Body = append(x.Records[i].Body, []byte("I agree to the deal")...)
+			refusedAt(fmt.Sprintf("record %d (kind %d, dummy %v, by the sender %v) claiming another body", i, r.Kind, r.Dummy, r.FromSender), x, i)
 		}
 		x := clone()
 		x.Records = x.Records[:1]
@@ -323,6 +390,24 @@ func TestVerifyRefusesWhatTheRecipientCannotMakeAgain(t *testing.T) {
 	})
 }
 
+// every byte of a record on c25519. A GOST Verify costs twenty times more
+// and Verify is the same code on both suites, so GOST takes the clear header,
+// the edges and a seeded sample
+func flipped(s jcrypto.Suite, rng *rand.Rand) []int {
+	var out []int
+	if s == jcrypto.SuiteC25519 {
+		for at := range e2e.RecordSize {
+			out = append(out, at)
+		}
+		return out
+	}
+	out = []int{0, 1, 2, 3, 4, 5, 40, 200, e2e.RecordSize - 17, e2e.RecordSize - 1}
+	for range 16 {
+		out = append(out, rng.IntN(e2e.RecordSize))
+	}
+	return out
+}
+
 // the forger never holds the sender's private key, and the spy, which sees
 // every agreement, sees it in the genuine run and not in the forgery, nor
 // when either transcript is checked
@@ -350,9 +435,11 @@ func TestForgeryNeverUsesTheSendersKey(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if _, err := Control(spy, recipient, sender.Card(), script); err != nil {
+		run, err := Control(spy, recipient, sender.Card(), script)
+		if err != nil {
 			t.Fatal(err)
 		}
+		run.Close()
 		if spy.Used(sender.Card().Static) {
 			t.Fatal("the sender's private key reached an agreement while forging or checking")
 		}
@@ -454,4 +541,102 @@ func TestRecorderReleasesItsCopies(t *testing.T) {
 	if ev.Ephemeral.Bytes() == nil {
 		t.Fatal("the evidence went with the copies")
 	}
+}
+
+// SameShape tells apart two transcripts that differ in anything but the
+// pseudorandom bytes of their records
+func TestSameShapeSeesEveryDifferenceOutsideTheCiphertext(t *testing.T) {
+	eachCase(t, func(t *testing.T, p jcrypto.CryptoProvider, role e2e.Role) {
+		sender, recipient := pair(t, p, role)
+		gen, _ := genuine(t, p, sender, recipient, script)
+		fake, _ := forge(t, p, recipient, sender.Card(), script)
+		if !SameShape(gen, fake) || !SameShape(fake, gen) {
+			t.Fatal("the genuine and the forged transcript are shaped otherwise")
+		}
+		clone := func() *Transcript {
+			c := *fake
+			c.Records = make([]Record, len(fake.Records))
+			for i, r := range fake.Records {
+				r.Bytes, r.Body = bytes.Clone(r.Bytes), bytes.Clone(r.Body)
+				c.Records[i] = r
+			}
+			return &c
+		}
+		data := func(x *Transcript, fromSender, dummy bool) int {
+			for i, r := range x.Records {
+				if r.Kind == KindData && r.FromSender == fromSender && r.Dummy == dummy {
+					return i
+				}
+			}
+			t.Fatal("no such record")
+			return 0
+		}
+		for _, c := range []struct {
+			name   string
+			change func(x *Transcript)
+		}{
+			{"a record fewer", func(x *Transcript) { x.Records = x.Records[:len(x.Records)-1] }},
+			{"a record more", func(x *Transcript) { x.Records = append(x.Records, x.Records[len(x.Records)-1]) }},
+			{"another author", func(x *Transcript) { x.Records[3].FromSender = !x.Records[3].FromSender }},
+			{"a dummy that is not", func(x *Transcript) { x.Records[data(x, true, true)].Dummy = false }},
+			{"another kind", func(x *Transcript) { x.Records[0].Kind = KindKK2 }},
+			{"another body", func(x *Transcript) { x.Records[data(x, true, false)].Body = []byte("the meeting is off") }},
+			{"a shorter record", func(x *Transcript) { x.Records[4].Bytes = x.Records[4].Bytes[:e2e.RecordSize-1] }},
+			{"another first byte of kk1", func(x *Transcript) { x.Records[0].Bytes[0] ^= 0x80 }},
+			{"another first byte of kk2", func(x *Transcript) { x.Records[1].Bytes[0] ^= 0x80 }},
+			{"another ratchet number of the sender", func(x *Transcript) { x.Records[data(x, true, false)].Bytes[4]++ }},
+			{"another ratchet number of the recipient", func(x *Transcript) { x.Records[data(x, false, false)].Bytes[1] ^= 0x01 }},
+			{"another sender", func(x *Transcript) { x.Sender = recipient.Card() }},
+			{"another recipient", func(x *Transcript) { x.Recipient = sender.Card() }},
+		} {
+			x := clone()
+			c.change(x)
+			if SameShape(gen, x) || SameShape(x, gen) {
+				t.Errorf("%s: same shape", c.name)
+			}
+		}
+		// the ciphertext after the clear header is not compared
+		x := clone()
+		x.Records[data(x, true, false)].Bytes[5] ^= 0x01
+		x.Records[0].Bytes[1] ^= 0x01
+		if !SameShape(gen, x) {
+			t.Fatal("a change in the ciphertext changed the shape")
+		}
+		if SameShape(nil, gen) || SameShape(gen, nil) {
+			t.Fatal("a missing transcript has a shape")
+		}
+	})
+}
+
+// every forgery draws fresh ephemeral keys on both sides: two forgeries of one
+// script share neither a key nor a record, as two genuine conversations would
+func TestTwoForgeriesShareNoEphemeralKey(t *testing.T) {
+	eachCase(t, func(t *testing.T, p jcrypto.CryptoProvider, role e2e.Role) {
+		sender, recipient := pair(t, p, role)
+		one, oneEv := forge(t, p, recipient, sender.Card(), script)
+		two, twoEv := forge(t, p, recipient, sender.Card(), script)
+		if !SameShape(one, two) {
+			t.Fatal("two forgeries of one script are shaped otherwise")
+		}
+		size := len(sender.Card().Static)
+		var keys [2][]byte
+		for k, tr := range []*Transcript{one, two} {
+			for _, r := range tr.Records {
+				if r.FromSender && r.Kind != KindData {
+					keys[k] = r.Bytes[1 : 1+size]
+				}
+			}
+		}
+		if keys[0] == nil || bytes.Equal(keys[0], keys[1]) {
+			t.Fatal("the forged sender used one ephemeral key twice")
+		}
+		if bytes.Equal(oneEv.Public, twoEv.Public) || oneEv.Ephemeral.Equal(twoEv.Ephemeral) {
+			t.Fatal("the recipient used one ephemeral key twice")
+		}
+		for i := range one.Records {
+			if bytes.Equal(one.Records[i].Bytes, two.Records[i].Bytes) {
+				t.Fatalf("record %d is the same in both forgeries", i)
+			}
+		}
+	})
 }

@@ -47,15 +47,18 @@ type denyRow struct {
 	ForgedVerified    bool   `json:"forged_verified"`
 	StructureEqual    bool   `json:"structure_equal"`
 	ControlRejected   bool   `json:"control_rejected"`
+	// the record the recipient's key refuses in the control, -1 for none
+	ControlRefusedAt int `json:"control_refused_at_record"`
 	// whether the sender's private key reached an agreement while forging and
-	// while checking both transcripts; the spy that tells shows it did see the
-	// key in the genuine conversation
-	SenderPrivateKeyUsed    bool         `json:"sender_private_key_used"`
-	SenderKeySeenInGenuine  bool         `json:"sender_private_key_seen_in_genuine"`
-	GenuineRecords          []denyRecord `json:"genuine"`
-	ForgedRecords           []denyRecord `json:"forged"`
-	SenderMessagesInGenuine int          `json:"sender_messages_read_from_genuine"`
-	SenderMessagesInForged  int          `json:"sender_messages_read_from_forged"`
+	// while checking both transcripts. The spy that tells shows it sees keys:
+	// the sender's in the genuine conversation, the recipient's in the forgery
+	SenderPrivateKeyUsed      bool         `json:"sender_private_key_used"`
+	SenderKeySeenInGenuine    bool         `json:"sender_private_key_seen_in_genuine"`
+	RecipientKeySeenInForgery bool         `json:"recipient_private_key_seen_in_forgery"`
+	GenuineRecords            []denyRecord `json:"genuine"`
+	ForgedRecords             []denyRecord `json:"forged"`
+	SenderMessagesInGenuine   int          `json:"sender_messages_read_from_genuine"`
+	SenderMessagesInForged    int          `json:"sender_messages_read_from_forged"`
 }
 
 type denyRecord struct {
@@ -75,18 +78,35 @@ func (r denyRow) holds() error {
 		return errors.New("the forged transcript does not verify")
 	case !r.StructureEqual:
 		return errors.New("the forged transcript is shaped otherwise")
-	case !r.ControlRejected:
-		return errors.New("a forgery without the recipient's key verified")
+	case !r.ControlRejected || r.ControlRefusedAt < 0:
+		return errors.New("a forgery without the recipient's key was not refused at a record")
 	case r.SenderPrivateKeyUsed:
 		return errors.New("the sender's private key was used")
 	case !r.SenderKeySeenInGenuine:
 		return errors.New("the spy did not see the sender's key in the genuine conversation")
+	case !r.RecipientKeySeenInForgery:
+		return errors.New("the spy did not see the recipient's key in the forgery")
 	}
 	return nil
 }
 
+// the steps of the set; a test swaps one to show that the verdict follows it
+type denySteps struct {
+	identities func(jcrypto.CryptoProvider, e2e.Role) (sender, recipient *e2e.Identity, err error)
+	genuine    func(jcrypto.CryptoProvider, *e2e.Identity, *e2e.Identity, []scenario.Line) (*scenario.Transcript, *scenario.Evidence, error)
+	forge      func(jcrypto.CryptoProvider, *e2e.Identity, e2e.Card, []scenario.Line) (*scenario.Transcript, *scenario.Evidence, error)
+	control    func(jcrypto.CryptoProvider, *e2e.Identity, e2e.Card, []scenario.Line) (*scenario.ControlRun, error)
+}
+
+var scenarioSteps = denySteps{
+	identities: scenario.Identities,
+	genuine:    scenario.Genuine,
+	forge:      scenario.Forge,
+	control:    scenario.Control,
+}
+
 // writes the report even when a verdict fails, and then exits with 1
-func deny(suiteName, rev, out string, stdout, stderr io.Writer) int {
+func deny(steps denySteps, suiteName, rev, out string, stdout, stderr io.Writer) int {
 	if rev == "unknown" {
 		fmt.Fprintln(stderr, "warning: no -rev given, rows cannot be traced to a revision")
 	}
@@ -100,7 +120,7 @@ func deny(suiteName, rev, out string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	rep, err := runDeny(p, rev)
+	rep, err := runDeny(steps, p, rev)
 	if err != nil {
 		fmt.Fprintf(stderr, "deny: %v\n", err)
 		return 1
@@ -120,10 +140,10 @@ func deny(suiteName, rev, out string, stdout, stderr io.Writer) int {
 	return status
 }
 
-func runDeny(p jcrypto.CryptoProvider, rev string) (denyReport, error) {
+func runDeny(steps denySteps, p jcrypto.CryptoProvider, rev string) (denyReport, error) {
 	rep := denyReport{Set: "deny", Suite: p.Suite().String(), Rev: rev, Claim: denyClaim, Assumption: denyAssumption}
 	for _, role := range []e2e.Role{e2e.RoleInitiator, e2e.RoleResponder} {
-		row, err := denyRole(p, role)
+		row, err := denyRole(steps, p, role)
 		if err != nil {
 			return rep, fmt.Errorf("recipient %v: %w", role, err)
 		}
@@ -132,18 +152,18 @@ func runDeny(p jcrypto.CryptoProvider, rev string) (denyReport, error) {
 	return rep, nil
 }
 
-func denyRole(p jcrypto.CryptoProvider, role e2e.Role) (denyRow, error) {
+func denyRole(steps denySteps, p jcrypto.CryptoProvider, role e2e.Role) (denyRow, error) {
 	spy := scenario.NewSpy(p)
-	sender, recipient, err := scenario.Identities(spy, role)
+	sender, recipient, err := steps.identities(spy, role)
 	if err != nil {
 		return denyRow{}, err
 	}
 	defer sender.Close()
 	defer recipient.Close()
-	senderKey := sender.Card().Static
+	senderKey, recipientKey := sender.Card().Static, recipient.Card().Static
 
 	spy.Forget()
-	genuine, genuineEv, err := scenario.Genuine(spy, sender, recipient, denyScript)
+	genuine, genuineEv, err := steps.genuine(spy, sender, recipient, denyScript)
 	if err != nil {
 		return denyRow{}, err
 	}
@@ -152,11 +172,12 @@ func denyRole(p jcrypto.CryptoProvider, role e2e.Role) (denyRow, error) {
 
 	// from here on only the recipient's keys and the sender's card
 	spy.Forget()
-	forged, forgedEv, err := scenario.Forge(spy, recipient, sender.Card(), denyScript)
+	forged, forgedEv, err := steps.forge(spy, recipient, sender.Card(), denyScript)
 	if err != nil {
 		return denyRow{}, err
 	}
 	defer forgedEv.Release()
+	row.RecipientKeySeenInForgery = spy.Used(recipientKey)
 	said, err := scenario.Verify(spy, recipient, genuineEv, genuine)
 	row.GenuineVerified, row.SenderMessagesInGenuine = err == nil, len(said)
 	if err != nil && !errors.Is(err, scenario.ErrMismatch) {
@@ -167,9 +188,12 @@ func denyRole(p jcrypto.CryptoProvider, role e2e.Role) (denyRow, error) {
 	if err != nil && !errors.Is(err, scenario.ErrMismatch) {
 		return denyRow{}, err
 	}
-	if row.ControlRejected, err = scenario.Control(spy, recipient, sender.Card(), denyScript); err != nil {
+	control, err := steps.control(spy, recipient, sender.Card(), denyScript)
+	if err != nil {
 		return denyRow{}, err
 	}
+	defer control.Close()
+	row.ControlRejected, row.ControlRefusedAt = control.Rejected(), control.RefusedAt()
 	row.SenderPrivateKeyUsed = spy.Used(senderKey)
 	row.StructureEqual = scenario.SameShape(genuine, forged)
 
