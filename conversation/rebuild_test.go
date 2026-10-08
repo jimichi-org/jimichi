@@ -1,12 +1,14 @@
 package conversation
 
 import (
+	"bytes"
 	"errors"
 	"slices"
 	"testing"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/e2e"
+	"github.com/jimichi-org/jimichi/mailbox"
 )
 
 var errRefusedReply = errors.New("client: reply refused: did not open")
@@ -59,6 +61,80 @@ func TestRebuildKeepsTheSessionAndSendsTheBodiesAgain(t *testing.T) {
 			if req.Tag != uint16(i) {
 				t.Fatalf("request %d on the new circuit has tag %d", i, req.Tag)
 			}
+		}
+	})
+}
+
+// the circuit ends with the window full: the puts in flight end with it, so
+// the next circuit puts on each of its first W ticks and the window keeps
+// nothing back
+func TestTheWindowReopensAfterARebuild(t *testing.T) {
+	p := c25519(t)
+	n := newNet(t, p, nil)
+	pi, pr := parties(t, p)
+	a := n.join("a", pi, 10, 10, nil)
+	b := n.join("b", pr, 10, 10, nil)
+	n.start(t, a, b)
+	n.until("a full window", 40, func() bool { return a.c.inflight == DefaultWindow })
+	a.circ().closed = true
+	a.c.onEnd()
+	n.until("the rebuild", 10, func() bool { return a.c.circ != nil })
+
+	full := a.c.Stats().WindowFull
+	n.run(DefaultWindow)
+	puts := a.circ().puts()
+	if len(puts) != DefaultWindow || slices.IndexFunc(puts, func(rec []byte) bool { return rec == nil }) >= 0 {
+		t.Fatalf("the first %d requests of the new circuit: %d of them, a request without a put among them", DefaultWindow, len(puts))
+	}
+	if got := a.c.Stats().WindowFull; got != full {
+		t.Fatalf("the window kept %d puts back on the new circuit", got-full)
+	}
+}
+
+// the circuit ends in stall mode with a real probe in flight: the rebuilt
+// circuit puts the same bytes first and the epoch stays, so a copy the old
+// circuit may have left stored is never followed by the body sealed again,
+// and each message arrives once
+func TestTheProbeOutlivesTheCircuit(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		n := newNet(t, p, func(l *mailbox.Limits) { l.Depth = 2 })
+		pi, pr := parties(t, p)
+		a := n.join("a", pi, 1, 1, coverPuts(false))
+		b := n.join("b", pr, 1, 1, coverPuts(false))
+		n.start(t, a, b)
+		n.run(3)
+
+		b.paused = true
+		bodies := []string{"m1", "m2", "m3", "m4", "m5"}
+		a.send(t, bodies...)
+		n.until("a real probe", 10, func() bool { return a.c.stall && a.c.sticky != nil && a.c.sticky.body != nil })
+		probe, epoch := bytes.Clone(a.c.sticky.rec), a.c.epoch
+		a.circ().closed = true
+		a.c.onEnd()
+		n.until("the rebuild", 10, func() bool { return a.c.circ != nil })
+		if a.c.epoch != epoch || a.c.session.Epoch() != epoch {
+			t.Fatalf("epoch %d, session epoch %d after the rebuild, was %d", a.c.epoch, a.c.session.Epoch(), epoch)
+		}
+		if !a.c.stall || a.c.sticky == nil || !bytes.Equal(a.c.sticky.rec, probe) {
+			t.Fatalf("after the rebuild: stall %v, sticky %+v", a.c.stall, a.c.sticky)
+		}
+		n.step()
+		if puts := a.circ().puts(); len(puts) != 1 || !bytes.Equal(puts[0], probe) {
+			t.Fatal("the new circuit does not start with the probe")
+		}
+
+		b.paused = false
+		n.until("every message at b", 100, func() bool {
+			return slices.IndexFunc(bodies, func(s string) bool { return b.count(s) == 0 }) < 0
+		})
+		n.run(10)
+		for _, s := range bodies {
+			if b.count(s) != 1 {
+				t.Fatalf("b got %q", b.got)
+			}
+		}
+		if a.c.stall {
+			t.Fatal("a still in stall mode")
 		}
 	})
 }
@@ -178,6 +254,26 @@ func TestRefusalLimit(t *testing.T) {
 	refuse(a)
 	if !a.c.finished || a.c.Err() != ErrRefused {
 		t.Fatalf("finished %v, %v", a.c.finished, a.c.Err())
+	}
+
+	// a refusal exactly RebuildFor old no longer counts, one a tick younger
+	// still does
+	for _, last := range []struct {
+		tick int
+		ends bool
+	}{{99, true}, {100, false}} {
+		n := newNet(t, p, nil)
+		pi, _ := parties(t, p)
+		a := n.join("a", pi, 1, 1, func(c *Config) { c.RebuildFor = ticks(100) })
+		start := n.tick
+		refuse(a)
+		n.run(start + 45 - n.tick)
+		refuse(a)
+		n.run(start + last.tick - n.tick)
+		refuse(a)
+		if a.c.finished != last.ends {
+			t.Fatalf("refusals on ticks 0, 45 and %d of RebuildFor 100: finished %v, %v", last.tick, a.c.finished, a.c.Err())
+		}
 	}
 }
 
