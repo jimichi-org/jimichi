@@ -1173,8 +1173,9 @@ forged conversation with the assumption and the records in hex, without a byte o
 | cmd/jimichi | testbed CLI: certificate issuance | pki, crypto/suite, crypto/secmem |
 
 Rule: no package of the system knows about lab. The experiment harness depends on the system, not
-the other way round, and a test of lab walks every other package of the module, on Linux, Windows
-and macOS, tests included, and fails on an import of lab or cmd/lab. The seams lab/scenario uses
+the other way round, and a test of lab reads the imports of every .go file of every other package
+of the module, tests included and whatever its build constraints (system, architecture, cgo,
+tags), and fails on an import of lab or cmd/lab. The seams lab/scenario uses
 are the ones production takes as well: a CryptoProvider and the noise.Static interface.
 
 ## Client container

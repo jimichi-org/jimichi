@@ -567,7 +567,9 @@ it is taken.
 Claim: offline deniability for both parties. A session transcript (kk1, kk2 and every data
 record), even together with the recipient's private keys, does not prove to a third party that
 the sender took part in the session, unless the judge holds an independent trusted record of who
-transmitted these ciphertexts and when. The sender can be the initiator or the responder.
+transmitted these ciphertexts and when. The two parties are symmetric peers: the sender can be the
+initiator or the responder, so a forgery by either party in either role is the same procedure with
+the labels swapped, and the check below covers the forger in both roles.
 
 The perfect simulation argument:
 
@@ -612,13 +614,21 @@ The check: the lab/scenario package and `cmd/lab -set deny`.
   that half (step 3). A wrapper over the CryptoProvider records the recipient's ephemeral key and
   hands it back for the check; the production API cannot set an ephemeral key.
 - The check runs on both suites with the recipient in both roles. The genuine and the forged
-  transcript pass Verify and have the same structure. The negative control: a forgery made with a
-  fresh key in place of the recipient's passes Verify under that key and fails under the
-  recipient's. A provider wrapper that sees every agreement sees the sender's private key in the
-  genuine session and sees it neither in the forgery nor in the checks.
-- The report `artifacts/deny-<suite>-<time>.json` carries the verdicts, the assumption and the
-  records in hex (the handshake records hold the public ephemeral keys), and no byte of a secret
-  key. It is a demonstration on concrete keys, not a measurement.
+  transcript pass Verify and have the same structure: the same records by author, kind and size,
+  the same clear header (the kind and the record number) and the same claimed texts. Two
+  forgeries of one script share no ephemeral key and no record.
+- The negative control: a forgery made with a fresh key in place of the recipient's passes Verify
+  under that key, and under the recipient's key Verify refuses its first record, a cryptographic
+  mismatch and not a check of names.
+- A provider wrapper that sees every agreement sees the recipient's private key in the forgery,
+  so the forgery goes through it, and sees the sender's private key in the genuine session and
+  neither in the forgery nor in the checks. A test draws the sender outside lab/scenario and
+  wipes its private key before the first call: the forgery still passes Verify.
+- The report `artifacts/deny-<suite>-<time>.json` carries the verdicts with the record at which
+  the control is refused, the assumption and the records in hex (the handshake records hold the
+  public ephemeral keys), and no byte of a secret key: a test reads it as a closed schema and
+  searches it for every piece of every secret of the run. It is a demonstration on concrete keys,
+  not a measurement.
 
 Not claimed: online deniability, that is against a judge acting together with the recipient
 during the session; deniability of metadata (mailbox records, network observations, circuit
