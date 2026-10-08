@@ -246,6 +246,8 @@ func TestJudgeMirrorToKnownAnswers(t *testing.T) {
 		{"two hops, only the ends", []bool{y, n, n, n, y}, 0, 4, 2, 3, client.MirrorTaken, 3, 3},
 		{"an exit outside the list", []bool{y, y, y, y, y}, 0, 5, 3, 1, client.MirrorLacksExit, 0, 1},
 		{"an exit before the list", []bool{y, y, y, y, y}, 0, -1, 3, 1, client.MirrorLacksExit, 0, 1},
+		{"the exit is the entry", []bool{y, y, y, y, y}, 0, 0, 3, 1, client.MirrorLacksExit, 0, 1},
+		{"the exit is the entry, left out", []bool{n, y, y, y, y}, 0, 0, 3, 1, client.MirrorLacksEntry, 1, 1},
 	} {
 		verdict, absent, allowed := client.JudgeMirrorTo(c.served, c.entry, c.exit, c.hops, c.missing)
 		if verdict != c.want || absent != c.absent || allowed != c.allowed {
@@ -255,9 +257,10 @@ func TestJudgeMirrorToKnownAnswers(t *testing.T) {
 	}
 }
 
-// every mirror of five nodes, every entry and exit, every chain length and
-// bound: JudgeMirrorTo follows the rule as stated (the entry first, then the
-// count, then the exit) and differs from JudgeMirror only by MirrorLacksExit
+// every mirror of five nodes, every entry and exit, the exit equal to the
+// entry included, every chain length and bound: JudgeMirrorTo follows the rule
+// as stated (the entry first, then the count, then the exit) and differs from
+// JudgeMirror only by MirrorLacksExit
 func TestJudgeMirrorToEveryMirror(t *testing.T) {
 	const nodes = 5
 	for mask := range 1 << nodes {
@@ -271,9 +274,6 @@ func TestJudgeMirrorToEveryMirror(t *testing.T) {
 		}
 		for entry := range nodes {
 			for exit := range nodes {
-				if exit == entry {
-					continue
-				}
 				for hops := 2; hops <= nodes; hops++ {
 					for missing := 0; missing <= nodes; missing++ {
 						allowed := min(missing, nodes-hops)
@@ -283,7 +283,7 @@ func TestJudgeMirrorToEveryMirror(t *testing.T) {
 							want = client.MirrorLacksEntry
 						case absent > allowed:
 							want = client.MirrorLacksTooMany
-						case !served[exit]:
+						case exit == entry || !served[exit]:
 							want = client.MirrorLacksExit
 						}
 						got, gotAbsent, gotAllowed := client.JudgeMirrorTo(served, entry, exit, hops, missing)

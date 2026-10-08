@@ -111,7 +111,8 @@ const (
 	MirrorLacksEntry
 	// the mirror lacks more listed nodes than MaxAbsent allows
 	MirrorLacksTooMany
-	// the mirror passes JudgeMirror but lacks the fixed exit
+	// the mirror passes JudgeMirror but holds no exit a chain can end on: the
+	// fixed exit is left out, outside the list or the entry itself
 	MirrorLacksExit
 )
 
@@ -135,10 +136,11 @@ func JudgeMirror(served []bool, entry, hops, missing int) (verdict MirrorVerdict
 }
 
 // JudgeMirrorTo is JudgeMirror for a chain whose exit is fixed: a mirror it
-// takes is still refused when served[exit] is false
+// takes is still refused when served[exit] is false or the exit is the entry,
+// for which ChooseRestTo draws no chain
 func JudgeMirrorTo(served []bool, entry, exit, hops, missing int) (verdict MirrorVerdict, absent, allowed int) {
 	verdict, absent, allowed = JudgeMirror(served, entry, hops, missing)
-	if verdict == MirrorTaken && (exit < 0 || exit >= len(served) || !served[exit]) {
+	if verdict == MirrorTaken && (exit < 0 || exit >= len(served) || exit == entry || !served[exit]) {
 		verdict = MirrorLacksExit
 	}
 	return verdict, absent, allowed
