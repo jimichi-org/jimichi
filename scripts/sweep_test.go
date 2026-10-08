@@ -73,6 +73,10 @@ func sweepRev(t *testing.T, change func(t *testing.T, env []string, root string)
 		"docs/ru/ARCH.md":        "doc\n",
 		"docs/en/ARCH.md":        "doc\n",
 		"deploy/base/relay.yaml": "kind: x\n",
+		"lab/metrics/auc.go":     "package metrics\n",
+		"relay/relay.go":         "package relay\n",
+		// the patterns the repository once had: wide enough to hide sources
+		".gitignore": "artifacts/\n*.test\ncore.*\ncoverage.*\n",
 	} {
 		write(t, root, name, text)
 	}
@@ -110,8 +114,9 @@ func sweepRev(t *testing.T, change func(t *testing.T, env []string, root string)
 }
 
 // any change in the tree makes the revision dirty, staged or not, tracked or
-// new, in a directory the script never heard of as well; reports in artifacts
-// and the documentation in docs leave it clean
+// new, in a directory the script never heard of as well, and a Go file that
+// .gitignore hides; reports in artifacts, the documentation in docs and ignored
+// files that are not sources leave it clean
 func TestSweepMarksAnyChangeOutsideArtifactsAndDocsDirty(t *testing.T) {
 	edit := func(name string) func(t *testing.T, env []string, root string) {
 		return func(t *testing.T, env []string, root string) { write(t, root, name, "changed\n") }
@@ -132,6 +137,13 @@ func TestSweepMarksAnyChangeOutsideArtifactsAndDocsDirty(t *testing.T) {
 		{"the README changed", edit("README.md"), true},
 		{"a script changed", edit("scripts/x.sh"), true},
 		{"a manifest changed", edit("deploy/base/relay.yaml"), true},
+		{"a metric changed", edit("lab/metrics/auc.go"), true},
+		{"a new file in lab", edit("lab/scenario/deny.go"), true},
+		{"a relay file changed", edit("relay/relay.go"), true},
+		{"a Go file .gitignore hides", edit("lab/metrics/coverage.go"), true},
+		{"a Go file .gitignore hides in a new package", edit("relay/core/core.go"), true},
+		{"a test binary .gitignore hides", edit("relay/relay.test"), false},
+		{"a core dump .gitignore hides", edit("relay/core.1234"), false},
 		{"a change staged", func(t *testing.T, env []string, root string) {
 			write(t, root, "cmd/lab/main.go", "package main\n\nfunc main() {}\n")
 			git(t, env, root, "add", "cmd/lab/main.go")
@@ -156,5 +168,39 @@ func TestSweepMarksAnyChangeOutsideArtifactsAndDocsDirty(t *testing.T) {
 				t.Fatalf("-rev %s, want %s", got, want)
 			}
 		})
+	}
+}
+
+// the repository ignores build and run output, never a name a source could take
+func TestGitignoreHidesNoSource(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := gitEnv(t)
+	ignored := func(path string) bool {
+		cmd := exec.Command("git", "check-ignore", "-q", "--no-index", path)
+		cmd.Dir, cmd.Env = root, env
+		err := cmd.Run()
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("git check-ignore %s: %v", path, err)
+		}
+		return true
+	}
+	for _, path := range []string{"relay/core.go", "lab/metrics/coverage.go", "core/core.go", "crypto/secmem/core_linux.go", "lab/output.go", "client/test.go"} {
+		if ignored(path) {
+			t.Errorf("%s is ignored", path)
+		}
+	}
+	for _, path := range []string{"artifacts/summary.json", "core.1234", "relay/core.77", "dump.core", "coverage.out", "coverage.html", "relay.test", ".dev/DECISIONS.md", "CLAUDE.local.md"} {
+		if !ignored(path) {
+			t.Errorf("%s is not ignored", path)
+		}
 	}
 }
