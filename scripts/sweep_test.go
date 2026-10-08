@@ -2,6 +2,7 @@ package scripts
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,8 +56,9 @@ func write(t *testing.T, root, name, text string) {
 }
 
 // a committed tree with code, scripts, a README and documents, then the change
-// the case makes; returns the revision the script names
-func sweepRev(t *testing.T, change func(t *testing.T, env []string, root string)) (got, head string) {
+// the case makes; runs sweep.sh on it and returns the docker calls it made and
+// the revision HEAD names
+func sweep(t *testing.T, change func(t *testing.T, env []string, root string)) (calls []string, head, stderr string, err error) {
 	t.Helper()
 	shell := bash(t)
 	if _, err := exec.LookPath("git"); err != nil {
@@ -79,8 +81,9 @@ func sweepRev(t *testing.T, change func(t *testing.T, env []string, root string)
 		// the patterns the repository once had, wide enough to hide sources,
 		// and the notes kept out of it
 		".gitignore": "artifacts/\n*.test\ncore.*\ncoverage.*\n.dev/\n",
-		// deploy and scripts stay out of the image
-		".dockerignore": "*\n!go.mod\n!go.sum\n!cmd\n!e2e\n!internal\n!lab\n!pki\n!relay\n**/*.md\n**/*_test.go\n",
+		// deploy and scripts stay out of the image; Docker trims the blanks
+		// around lab and e2e
+		".dockerignore": "# the module only\n*\n!go.mod\n!go.sum\n!cmd\n!e2e\r\n!internal\n  ! lab \t\n!pki\n!relay\n**/*.md\n**/*_test.go\n",
 	} {
 		write(t, root, name, text)
 	}
@@ -93,35 +96,61 @@ func sweepRev(t *testing.T, change func(t *testing.T, env []string, root string)
 	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(dockerStandIn), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	calls := filepath.Join(bin, "calls")
+	recorded := filepath.Join(bin, "calls")
 	cmd := exec.Command(shell, script(t, "sweep.sh"), "-flows", "3")
 	cmd.Dir = root
-	cmd.Env = append(env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "DOCKER_CALLS="+filepath.ToSlash(calls))
+	cmd.Env = append(env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "DOCKER_CALLS="+filepath.ToSlash(recorded))
 	var errOut bytes.Buffer
 	cmd.Stderr = &errOut
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("sweep.sh: %v\n%s", err, errOut.String())
+	err = cmd.Run()
+	text, readErr := os.ReadFile(recorded)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
 	}
-	recorded, err := os.ReadFile(calls)
+	if trimmed := strings.TrimSpace(string(text)); trimmed != "" {
+		calls = strings.Split(trimmed, "\n")
+	}
+	return calls, head, errOut.String(), err
+}
+
+// the revision sweep.sh names after the change
+func sweepRev(t *testing.T, change func(t *testing.T, env []string, root string)) (got, head string) {
+	t.Helper()
+	calls, head, stderr, err := sweep(t, change)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("sweep.sh: %v\n%s", err, stderr)
 	}
-	lines := strings.Split(strings.TrimSpace(string(recorded)), "\n")
-	if len(lines) != 2 || lines[0] != "build -q --build-arg TARGET=lab -t jimichi/lab:dev ." {
-		t.Fatalf("docker calls:\n%s", recorded)
+	if len(calls) != 2 || calls[0] != "build -q --build-arg TARGET=lab -t jimichi/lab:dev ." {
+		t.Fatalf("docker calls:\n%s", strings.Join(calls, "\n"))
 	}
-	f := strings.Fields(lines[1])
+	f := strings.Fields(calls[1])
 	if len(f) < 4 || f[0] != "run" || f[len(f)-4] != "-rev" || f[len(f)-2] != "-flows" || f[len(f)-1] != "3" {
-		t.Fatalf("docker run: %s", lines[1])
+		t.Fatalf("docker run: %s", calls[1])
 	}
 	return f[len(f)-3], head
 }
 
+// without .dockerignore the image would take the whole tree and sweep.sh could
+// not tell which hidden files it holds
+func TestSweepStopsWithoutDockerignore(t *testing.T) {
+	calls, _, _, err := sweep(t, func(t *testing.T, _ []string, root string) {
+		if err := os.Remove(filepath.Join(root, ".dockerignore")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err == nil {
+		t.Error("sweep.sh succeeded")
+	}
+	if len(calls) != 0 {
+		t.Errorf("docker calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
 // any change in the tree makes the revision dirty, staged or not, tracked or
-// new, in a directory the script never heard of as well, and a Go file that
-// .gitignore hides inside a directory the image takes; reports in artifacts,
-// the documentation in docs, ignored files that are not sources and ignored Go
-// outside the image context leave it clean
+// new, in a directory the script never heard of as well, and a Go, assembly or
+// system object file that .gitignore hides inside a directory the image takes;
+// reports in artifacts, the documentation in docs, ignored files that are not
+// sources and ignored sources outside the image context leave it clean
 func TestSweepMarksAnyChangeOutsideArtifactsAndDocsDirty(t *testing.T) {
 	edit := func(name string) func(t *testing.T, env []string, root string) {
 		return func(t *testing.T, env []string, root string) { write(t, root, name, "changed\n") }
@@ -148,6 +177,10 @@ func TestSweepMarksAnyChangeOutsideArtifactsAndDocsDirty(t *testing.T) {
 		{"a Go file .gitignore hides", edit("lab/metrics/coverage.go"), true},
 		{"a Go file .gitignore hides in a new package", edit("relay/core/core.go"), true},
 		{"a Go file .gitignore hides in a directory named with a digit", edit("e2e/coverage.go"), true},
+		{"an assembly file .gitignore hides", edit("relay/core.s"), true},
+		{"a system object .gitignore hides", edit("cmd/lab/coverage.syso"), true},
+		{"an assembly file .gitignore hides outside the image", edit("deploy/core.s"), false},
+		{"a C file .gitignore hides, the module has no cgo", edit("relay/core.c"), false},
 		{"a test binary .gitignore hides", edit("relay/relay.test"), false},
 		{"a core dump .gitignore hides", edit("relay/core.1234"), false},
 		{"a Go file in an ignored .dev", edit(".dev/tools/e2eref/gocomp/main.go"), false},
@@ -208,7 +241,7 @@ func TestGitignoreHidesNoSource(t *testing.T) {
 		}
 		return true
 	}
-	for _, path := range []string{"relay/core.go", "lab/metrics/coverage.go", "core/core.go", "crypto/secmem/core_linux.go", "lab/output.go", "client/test.go"} {
+	for _, path := range []string{"relay/core.go", "lab/metrics/coverage.go", "core/core.go", "crypto/secmem/core_linux.go", "lab/output.go", "client/test.go", "relay/core_amd64.s", "cmd/relay/rsrc_windows_amd64.syso"} {
 		if ignored(path) {
 			t.Errorf("%s is ignored", path)
 		}
@@ -220,27 +253,75 @@ func TestGitignoreHidesNoSource(t *testing.T) {
 	}
 }
 
-// sweep.sh reads the directories of the image from .dockerignore as whole lines
-// of lowercase letters and digits; any other entry let in would escape its
-// check for hidden sources
-func TestDockerignoreLetsInOnlyWhatSweepReads(t *testing.T) {
-	text, err := os.ReadFile(filepath.Join("..", ".dockerignore"))
-	if err != nil {
-		t.Fatal(err)
-	}
+var byteOrderMark = string(rune(0xfeff))
+
+// sweep.sh checks for hidden sources only in the directories .dockerignore lets
+// back in, so the file has to stay an allow-list and name each of them as a
+// lowercase word; the lines are read as Docker reads them: a comment is a line
+// that starts with #, the rest is trimmed, and so is the pattern after !
+func dockerignoreFaults(text string) []string {
 	dir := regexp.MustCompile(`^[a-z0-9]+$`)
-	dirs := 0
-	for _, line := range strings.Split(string(text), "\n") {
+	var faults []string
+	patterns, dirs := 0, 0
+	for _, raw := range strings.Split(strings.TrimPrefix(text, byteOrderMark), "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(raw, "#") || line == "" {
+			continue
+		}
+		if patterns++; patterns == 1 && line != "*" {
+			faults = append(faults, fmt.Sprintf("the first pattern is %q, not *", line))
+		}
 		name, ok := strings.CutPrefix(line, "!")
+		name = strings.TrimSpace(name)
 		switch {
 		case !ok || name == "go.mod" || name == "go.sum":
 		case dir.MatchString(name):
 			dirs++
 		default:
-			t.Errorf("sweep.sh does not read %q", line)
+			faults = append(faults, fmt.Sprintf("sweep.sh does not read %q", raw))
 		}
 	}
+	if patterns == 0 {
+		faults = append(faults, "no pattern, the image takes everything")
+	}
 	if dirs == 0 {
-		t.Error("no directory let in")
+		faults = append(faults, "no directory let in")
+	}
+	return faults
+}
+
+func TestDockerignoreLetsInOnlyWhatSweepReads(t *testing.T) {
+	text, err := os.ReadFile(filepath.Join("..", ".dockerignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fault := range dockerignoreFaults(string(text)) {
+		t.Error(fault)
+	}
+}
+
+func TestDockerignoreFaults(t *testing.T) {
+	for _, c := range []struct {
+		name, text string
+		faults     int
+	}{
+		{"an allow-list", "*\n!go.mod\n!go.sum\n!lab\n**/*_test.go\n", 0},
+		{"blanks Docker trims", "# notes\n\n  *\t\n  !lab  \n!\trelay\r\n", 0},
+		{"a byte order mark", byteOrderMark + "*\n!lab\n", 0},
+		{"a commented directory", "*\n!lab\n#!relay\n", 0},
+		{"a directory with a slash", "*\n!lab\n!relay/\n", 1},
+		{"a nested directory", "*\n!lab\n!relay/core\n", 1},
+		{"a pattern", "*\n!lab\n!relay*\n", 1},
+		{"a file", "*\n!lab\n!Makefile\n", 1},
+		{"no directory", "*\n!go.mod\n", 1},
+		{"not an allow-list", "artifacts\n!lab\n", 1},
+		{"the allow-list after a comment that is not one", " #notes\n*\n!lab\n", 1},
+		{"nothing", "", 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := dockerignoreFaults(c.text); len(got) != c.faults {
+				t.Fatalf("faults %q, want %d", got, c.faults)
+			}
+		})
 	}
 }
