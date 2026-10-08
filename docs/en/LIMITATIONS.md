@@ -134,10 +134,11 @@ English | [Русский](../ru/LIMITATIONS.md)
   and goes on asking, with a 5 s pause between passes, for as long as the peer is missing or the
   entry stays due, which includes a peer that still serves the descriptor it has not signed
   again. A pass asks such peers in turn, each within the 5 s fetch timeout, so no roster address
-  is asked more often than once in 5 s. The bound is per address and not per host: a host named
-  by several roster addresses, which may differ in the port alone, or by several names that
-  resolve to it gets one request per such address in a pass, and an address whose answer does
-  not verify is asked in every pass. The addresses are IP literals and DNS names only, and an
+  is asked more often than once in 5 s. A roster names every host once, so the bound holds per
+  host as well, but only per spelling: a host reached under several names, or under a name and
+  an IP address, gets one request per such address in a pass. An address whose answer does not
+  verify is asked in every pass. A peer whose entry ended with its certificate is asked once a
+  minute from then on, until the node restarts. The addresses are IP literals and DNS names only, and an
   answer counts only if it verifies under the roster's anchor.
 - A link is covered by own-clock sending only if the node sending on it has the measure turned on.
   The client cannot check that the nodes of its chain do: a node without the measure carries the

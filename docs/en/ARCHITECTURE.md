@@ -690,7 +690,11 @@ transmitted.
 - The roster a node receives after its certificate: JSON
   `{"anchor":"<suite>:<base64>","nodes":[{"name":"<name>","addr":"<host:port>"},...]}`. Parsing
   accepts only the spelling Roster.Marshal writes, at most 4 KiB (pki.MaxRoster); names and
-  addresses are well formed and pairwise distinct (ErrFormat, ErrDuplicate).
+  addresses are well formed, and the names and the hosts of the addresses are pairwise distinct
+  (ErrFormat, ErrDuplicate). A node fetches every peer from the host of its address on the one
+  -peer-info-port, so a second address on a host would reach the node of the first, and on the
+  node's own host its own info port. Hosts are compared in their one spelling: one host under
+  two names, or under a name and an IP address, is not caught.
 - The descriptor mirror: JSON `[{"addr":"<host:port>","bundle":{...}},...]`, sorted by address,
   every bundle in its own canonical spelling; parsing accepts only that. The mirror carries no
   signature of its own: each bundle in it is verified like any other.
@@ -785,7 +789,8 @@ finds by the label of their deployments (app=relay).
    node signing key. The node prints this hash once at start, before any port serves
    (identity_hash=). scripts/enroll.sh reads it from the log of the pod's current container
    through the kube API (kubectl logs) and requires exactly one such line. Names, addresses, local
-   addresses and hashes must be well formed and pairwise distinct.
+   addresses and hashes must be well formed and pairwise distinct, and so must the hosts of the
+   addresses, since a node refuses a roster that names a host twice.
 2. The process sets the secmem policy (-keymem, -harden). If memory locking was requested and
    does not work, issuance does not start.
 3. Each node gets POST /csr with a fresh 16-byte nonce and answers with a request signed by its
@@ -857,8 +862,8 @@ finds by the label of their deployments (app=relay).
   lives in memory only.
 - The node fetches an entry again once its wall-clock age reaches half of its descriptor's
   lifetime: from then on the entry is due. Its timer sleeps until the nearest such moment, at
-  most 1 min and at least 5 s. A pass asks every peer that is missing or due and no other, one
-  after another, each with one request under the 5 s timeout, and while such a peer is left the
+  most 1 min and at least 5 s. A pass asks every peer that is missing or due, except one paused
+  after its certificate has expired (below), and no other, one after another, each with one request under the 5 s timeout, and while such a peer is left the
   next pass starts 5 s after this one ends. A due entry stays due until a fetch brings a
   descriptor signed later, so with a 5 s pause between passes the node keeps asking a peer that
   does not answer, a peer whose bundle does not verify and a peer that still serves the
@@ -867,11 +872,13 @@ finds by the label of their deployments (app=relay).
   again. The peer's timer does that within one period, min(ttl/4, 1 min), when the wall clocks
   of the two nodes agree, and a rotation of its onion key does it at once, whichever comes
   first (section "Key lifetime and revocation"). A descriptor whose expires is cut to the
-  certificate's not_after is due at half of the shortened lifetime, while its peer signs again
-  when its age reaches half of -descriptor-ttl or its onion key rotates: for such a descriptor
-  the window lasts until the peer's timer finds that age, until the peer rotates its onion key
-  or until the descriptor expires, whichever comes first, and once the certificate has expired
-  the peer answers 503 and is asked as a missing one. An entry ends at the expires of its
+  certificate's not_after is not due before it expires: the peer signs no descriptor that ends
+  later, and it holds a replaced onion key until every descriptor naming it has expired, so the
+  held one serves to its end. Once the certificate has expired the peer answers 503; when the
+  fetch of a peer whose entry ended with its certificate fails, the peer is asked again after
+  1 min instead of the 5 s pause, and so on while it fails: a node takes one certificate per
+  process and enroll discards the CA key, so no new bundle of that peer is expected to verify
+  under the roster's anchor. An entry ends at the expires of its
   descriptor. A bundle that cannot be fetched or does not verify is not taken, and the entry
   held so far stays until it expires. The log gets one line per kind of cause: no answer, the
   status code or the check that failed, and nothing the peer sent. No request and no circuit
@@ -923,10 +930,13 @@ finds by the label of their deployments (app=relay).
   and an altered bundle is as good as withheld.
 - A node run with -auth=false takes no roster. It lists itself in /descriptors under -advertise
   together with the unsigned bundles of the nodes named in -peers, read without verification,
-  and extends circuits to any address. It keeps those bundles by passes of the same kind: each
-  is fetched again one minute after its last fetch, with the same 5 s pause while a peer is
-  missing or its fetch fails, and these entries never expire. Without -advertise it answers
-  /descriptors with 503 and names the two flags.
+  and extends circuits to any address. -advertise and -peers name pairwise distinct hosts, as a
+  roster does. The node keeps those bundles by passes of the same kind: an unsigned bundle
+  carries no times, so an entry is due one minute after the pass that took it. A peer that is
+  missing, does not answer or serves no well-formed bundle of the node's suite is asked again
+  after the same 5 s pause, and the entry held so far stays, since these entries never expire:
+  a peer that went away stays in the mirror with its last bundle. Without -advertise the node
+  answers /descriptors with 503 and names the two flags.
 - scripts/e2e.sh checks that a client asks its entry alone. It waits until two passes in a row
   show every relay with all its roster peers and unchanged counts of descriptor_requests, then
   runs the clients. Between two readings of the counters mirror_requests must have grown at one
