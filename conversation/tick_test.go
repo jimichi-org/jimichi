@@ -214,6 +214,71 @@ func TestTheConfirmingRecordIsPutUntilStored(t *testing.T) {
 	})
 }
 
+// once its put got 01 the confirming record is the mailbox's to hand out, and
+// the mailbox removes it when it does: lost in a reply with the responder's
+// circuit it is gone, and without cover puts the responder seals its message
+// only once the initiator's keepalive opened. The initiator's round trip of a
+// tick has the 01 back before its next tick, so the mailbox stores one copy
+func TestAConfirmingRecordLostOnFetchWaitsForTheKeepalive(t *testing.T) {
+	keepalive := int(DefaultKeepalive / testRate)
+	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		n := newNet(t, p, nil)
+		pi, pr := parties(t, p)
+		ini := n.join("initiator", pi, 1, 0, coverPuts(false))
+		resp := n.join("responder", pr, 1, 1, coverPuts(false))
+		handedAt, end := 0, false
+		var data [][]byte
+		n.wrap(func(next deliverFunc) deliverFunc {
+			return func(circuit uint64, payload []byte) []byte {
+				if req, err := mailbox.ParseRequest(payload); err == nil && ini.circ() != nil && circuit == ini.circ().id && dataRecord(req) {
+					data = append(data, bytes.Clone(req.Record[:]))
+				}
+				reply := next(circuit, payload)
+				if f := resp.circ(); f == nil || circuit != f.id || handedAt > 0 {
+					return reply
+				}
+				if rep, err := mailbox.ParseReply(reply); err == nil && rep.Status&mailbox.StatusRecord != 0 && rep.Record[0] == 0x03 {
+					handedAt, end = n.tick, true
+				}
+				return reply
+			}
+		})
+		n.before = append(n.before, func() {
+			if end {
+				end = false
+				resp.circ().closed = true
+				resp.c.onEnd()
+			}
+		})
+		pair(t, ini, resp)
+		resp.send(t, "ping")
+		n.until("the confirming record handed out", 40, func() bool { return handedAt > 0 && !end })
+		if len(data) != 1 || resp.c.circ != nil {
+			t.Fatalf("%d data records put, the responder's circuit %v", len(data), resp.c.circ)
+		}
+		n.until("ping at the initiator", keepalive+10, func() bool {
+			if resp.c.session.Stats().Sent > 0 && resp.state() != e2e.StateConfirmed {
+				t.Fatalf("the responder sealed a message in %v", resp.state())
+			}
+			return ini.count("ping") == 1
+		})
+		if took := n.tick - handedAt; took < keepalive {
+			t.Fatalf("ping came %d ticks after the confirming record was lost, before the keepalive at %d", took, keepalive)
+		}
+
+		st, si, sr := resp.c.Stats(), ini.session(), resp.session()
+		if st.Rebuilds != 1 || st.Unanswered == 0 {
+			t.Fatalf("responder %+v", st)
+		}
+		if si.DummiesSent != 2 || si.Sent != 0 || len(data) != 2 || bytes.Equal(data[0], data[1]) {
+			t.Fatalf("the initiator sealed %d dummies and %d messages and put %d data records, want the confirming record and the keepalive once each", si.DummiesSent, si.Sent, len(data))
+		}
+		if sr.DummiesReceived != 1 || sr.Lost != 1 || sr.Copies+sr.Late+sr.Bad != 0 {
+			t.Fatalf("responder %+v, want the keepalive opened past the lost confirming record", sr)
+		}
+	})
+}
+
 // a round trip of three ticks and cover puts: after the session every request
 // of each side carries a put, and the other side takes one record per tick
 func TestPutOnEveryTickUnderThreeTickLatency(t *testing.T) {

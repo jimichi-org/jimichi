@@ -137,6 +137,13 @@ English | [Русский](../ru/LIMITATIONS.md)
   refused with 10 and the peer goes over to stall mode (a refused message is sent again, possibly
   out of order), so a record waits at most 16 ticks longer, 3.2 s at a rate of 200 ms. Without
   cover puts the queue drains between messages.
+- The mailbox removes a record when it hands it out, and the conversation driver does not put a
+  record again once a copy of it got 01: a record whose every stored copy is lost in fetch replies
+  with the receiver's circuit is gone (ARCHITECTURE, subsection "Conversation", Rebuild). A real
+  message is then lost; a lost kk1 or kk2 costs the 60 s wait for kk2 and a new handshake; after a
+  lost confirming record (the initiator's first record after kk2) the responder sends no real
+  message until the initiator's next record opens, without cover puts until the initiator's next
+  message or its keepalive, up to 30 s. The responder has no way to ask for that record.
 - There are no guard nodes: every circuit draws a fresh entry. One chain has a rogue entry and a
   rogue exit with probability p = k(k-1)/(N(N-1)), 0.1 for two rogue nodes of five (EXPERIMENT,
   block 3). Over c circuits with chains drawn independently the chance that at least one had

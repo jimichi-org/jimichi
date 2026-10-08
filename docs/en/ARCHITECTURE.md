@@ -476,7 +476,8 @@ Window and sticky record:
   first record of the initiator has arrived.
 - The initiator's first record after kk2 (the confirming record, real or a dummy) is also put as
   copies until 01: only it lets the responder seal real messages, and without CoverPuts nothing
-  else would follow it until the keepalive. In stall mode it is the probe.
+  else would follow it until the keepalive. In stall mode it is the probe. After 01 it is not put
+  again, like any record (Rebuild).
 - The outcome of a copy of a sticky record already taken off changes nothing.
 
 Reply:
@@ -524,6 +525,13 @@ Rebuild:
   oldest request has waited for its reply longer than 10 s (then the driver closes the circuit
   itself).
 - Unanswered requests get the outcome "unknown"; the sticky record stays.
+- A record the mailbox handed out in the reply to an unanswered request is gone: the mailbox
+  removes a record when it hands it out, and once a copy got 01 the sender does not put it again.
+  Unless another stored copy reaches the receiver (with a round trip shorter than the rate the
+  mailbox stores one), a real message is lost, a lost kk1 or kk2 costs the 60 s wait for kk2 and a
+  new handshake, and without the confirming record the responder seals real messages only after
+  the initiator's next record opens: with CoverPuts on the next tick, without them with the next
+  message of the initiator or its keepalive 30 s after the confirming record.
 - The caller's Dial builds the new circuit: the same entry, a fresh mirror from it, new middle
   hops, the same mailbox. The session, the identity, the fetch capability, the pin and the outbox
   live for the whole conversation, and a rebuild leaves them alone.
