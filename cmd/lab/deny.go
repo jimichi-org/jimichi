@@ -18,7 +18,7 @@ const (
 	denyAssumption = "the judge holds no independent trusted record of who transmitted the ciphertexts"
 )
 
-// opens with the sender, so as responder the recipient sends the confirming
+// opens with the sender, so as initiator the recipient sends the confirming
 // dummy first
 var denyScript = []scenario.Line{
 	{FromSender: true, Body: []byte("the meeting moves to thursday")},
