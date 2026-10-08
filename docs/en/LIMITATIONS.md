@@ -183,11 +183,20 @@ English | [Русский](../ru/LIMITATIONS.md)
 - Without own-clock sending the exit's reply leaves after the message is delivered, and at once for
   a cover cell. The delivery time enters the moment of the reply; on the testbed delivery is an
   echo taking microseconds, a real recipient would make it noticeable.
-- There is no recipient client and no end-to-end layer: the innermost layer ends at the exit,
-  which reads the payload in clear and, on the testbed, echoes it back. Whoever runs the exit
-  reads the messages, and nothing is delivered beyond it. A recipient and an end-to-end layer are
-  planned ([#18](https://github.com/jimichi-org/jimichi/issues/18)), deniable authentication
-  between clients after them ([#19](https://github.com/jimichi-org/jimichi/issues/19)).
+- There is no recipient client yet: on the testbed the innermost layer ends at the exit, which
+  reads the payload in clear and echoes it back. Whoever runs the exit reads the messages of the
+  testbed, and nothing is delivered beyond it. The end-to-end layer between clients (the noise
+  and e2e packages) and the mailbox at the exit (the mailbox package) exist in the code; the
+  client that uses them is planned ([#18](https://github.com/jimichi-org/jimichi/issues/18)).
+- Deniable authentication between clients is offline only (THREAT_MODEL, "Deniability"). Not
+  claimed: online deniability, against a judge acting together with the recipient during the
+  session; deniability of metadata: the mailbox sees which circuit puts a record into which queue
+  and when, the entry sees the client's address, an observer sees the timing; a transcript
+  witnessed by a mailbox or an observer of the sender's link colluding with the recipient; a
+  sender's device compromised before the session. The perfect simulation argument rests on the
+  symmetry of Agree under one context, which the provider tests and the vectors check, and on the
+  transcript holding no other random value; there is no formal model. `cmd/lab -set deny` shows a
+  forgery on concrete keys and measures nothing.
 - The circuit setup cell leaves at once, not on the node's clock. Together with the TCP connection
   opening it marks the start of the circuit on every link, which is the same signal as the moment
   the connection opens.

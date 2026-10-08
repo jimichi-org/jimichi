@@ -7,13 +7,14 @@
 artifacts/
 *.pcap
 *.core
-core.*
+core.[0-9]*
 
 # go
 /bin/
 *.test
 *.out
-coverage.*
+coverage.html
+coverage.txt
 go.work
 go.work.sum
 

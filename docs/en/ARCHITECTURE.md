@@ -1141,9 +1141,10 @@ those come from the nodes' agreement keys, which the CA never sees.
 Only cmd/lab writes to artifacts/, as JSON reports: rows that carry the run configuration, the
 seeds and the code revision (`correlation-*.json`, `paths-*.json`), the frame counts per window
 and the score matrix of the first repeat (`detail-*.json`), and the medians across the repeats
-in which no circuit closed and no node limit acted (`summary-*.json`). The logs and counters of
-the testbed pods are not stored: the logs stay in stdout (kubectl logs), and scripts/stats.sh
-prints the counters to the terminal.
+in which no circuit closed and no node limit acted (`summary-*.json`), and the verdicts of the
+forged conversation with the assumption and the records in hex, without a byte of a secret key
+(`deny-*.json`). The logs and counters of the testbed pods are not stored: the logs stay in stdout
+(kubectl logs), and scripts/stats.sh prints the counters to the terminal.
 
 ## Package layout
 
@@ -1165,13 +1166,17 @@ prints the counters to the terminal.
 | vault | planned: client container with two volumes ([#20](https://github.com/jimichi-org/jimichi/issues/20)); an empty package today | nothing yet |
 | lab | harness that runs one configuration in one process, the observer on two links, seeds, sampling of chains | client, relay, link, crypto, crypto/secmem, crypto/suite |
 | lab/metrics | correlation scores, AUC and its bootstrap interval, traffic multiplier and latency percentiles, share of compromised chains | standard library only |
-| lab/scenario, lab/report | empty packages reserved for scenarios and a report writer; today cmd/lab runs the sets and writes the reports | nothing yet |
+| lab/scenario | experiments that act on the system: a recipient forging a conversation of the end-to-end layer with the production session (Genuine, Forge, Verify, a recording and injecting provider wrapper), run by `cmd/lab -set deny` | crypto, crypto/secmem, e2e, noise |
+| lab/report | an empty package reserved for a report writer; today cmd/lab writes the reports | nothing yet |
 | web | planned: testbed dashboard ([#21](https://github.com/jimichi-org/jimichi/issues/21)); an empty package today | nothing yet |
 | cmd/relay, cmd/client, cmd/lab | entry points and configuration | the packages above |
 | cmd/jimichi | testbed CLI: certificate issuance | pki, crypto/suite, crypto/secmem |
 
-Rule: relay, client, wire and cmd/jimichi know nothing about lab. The experiment harness depends
-on the system, not the other way round.
+Rule: no package of the system knows about lab. The experiment harness depends on the system, not
+the other way round, and a test of lab reads the imports of every .go file of every other package
+of the module, tests included and whatever its build constraints (system, architecture, cgo,
+tags), and fails on an import of lab or cmd/lab. The seams lab/scenario uses
+are the ones production takes as well: a CryptoProvider and the noise.Static interface.
 
 ## Client container
 

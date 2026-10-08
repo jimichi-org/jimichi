@@ -156,7 +156,8 @@ pki/          node certificates, descriptors and requests, issuing and checking
 relay/        relay node
 client/       choice of the chain, sending, replies from the exit, cover traffic
 vault/        client container with two volumes, planned (#20), a placeholder package today
-lab/          run harness and observer, metrics/; scenario/ and report/ are placeholders
+lab/          run harness and observer, metrics/, scenario/ (a recipient forging a
+              conversation); report/ is a placeholder
 web/          testbed dashboard, planned (#21), a placeholder package today
 deploy/       kind/ cluster configurations and base/ manifests of the testbed
 docs/         documentation, en/ and ru/
