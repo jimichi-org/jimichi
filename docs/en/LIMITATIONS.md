@@ -128,6 +128,15 @@ English | [Русский](../ru/LIMITATIONS.md)
   honest nodes out of each mirror within -missing: over the rebuilds the middle hops come to be
   rogue, and with them the entry learns which mailbox the client uses. Closes by the far side and
   reply timeouts count toward no bound.
+- With cover puts (CoverPuts) each side of a conversation puts one record into the peer's queue
+  and fetches one from its own on every tick, so nothing works off a backlog: every tick on which
+  a side does not fetch (a rebuild of its circuit, a pause or a missed tick of its process) leaves
+  one more record of the peer in its queue, and every later record of the peer waits that many
+  ticks longer. A tick on which the peer puts nothing (its window full, its own rebuild) takes one
+  off. The backlog is bounded by the queue depth (-mailbox-depth, 16 by default): puts past it are
+  refused with 10 and the peer goes over to stall mode (a refused message is sent again, possibly
+  out of order), so a record waits at most 16 ticks longer, 3.2 s at a rate of 200 ms. Without
+  cover puts the queue drains between messages.
 - There are no guard nodes: every circuit draws a fresh entry. One chain has a rogue entry and a
   rogue exit with probability p = k(k-1)/(N(N-1)), 0.1 for two rogue nodes of five (EXPERIMENT,
   block 3). Over c circuits with chains drawn independently the chance that at least one had
