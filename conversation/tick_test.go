@@ -75,6 +75,55 @@ func TestSilentInitiatorConfirmsWithoutCoverPuts(t *testing.T) {
 	})
 }
 
+// the same over round trips up to longer than the window and the depth of a
+// queue, the one a starved runner gave the live test: four legs of a round
+// trip and a tick each. kk1 and kk2 go as no more copies than the window, the
+// mailbox refuses none, the peer drops every copy as one, and the one record
+// of the initiator confirms the session
+func TestSilentInitiatorOverLongRoundTrips(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		for _, half := range []int{1, 10, 17} {
+			rt := 2 * half
+			t.Run(fmt.Sprintf("round trip %d", rt), func(t *testing.T) {
+				n := newNet(t, p, nil)
+				pi, pr := parties(t, p)
+				ini := n.join("initiator", pi, half, half, coverPuts(false))
+				resp := n.join("responder", pr, half, half, coverPuts(false))
+				pair(t, ini, resp)
+				resp.send(t, "ping")
+				n.until("ping at the initiator", 4*(rt+1), func() bool { return ini.count("ping") == 1 })
+
+				kinds := func(pr *testPeer) map[byte]int {
+					m := map[byte]int{}
+					for _, rec := range pr.circ().puts() {
+						if rec != nil {
+							m[rec[0]]++
+						}
+					}
+					return m
+				}
+				ki, kr := kinds(ini), kinds(resp)
+				if ki[0x01] == 0 || ki[0x01] > DefaultWindow || ki[0x03] != 1 || len(ki) != 2 {
+					t.Fatalf("the initiator put %v", ki)
+				}
+				if kr[0x02] == 0 || kr[0x02] > DefaultWindow || kr[0x03] != 1 || len(kr) != 2 {
+					t.Fatalf("the responder put %v", kr)
+				}
+				if s := n.store.Stats(); s.PutFull != 0 || s.PutRefused != 0 {
+					t.Fatalf("mailbox %+v", s)
+				}
+				si, sr := ini.session(), resp.session()
+				if si.Copies != uint64(kr[0x02]-1) || sr.Copies != uint64(ki[0x01]-1) {
+					t.Fatalf("copies taken: initiator %d of %d, responder %d of %d", si.Copies, kr[0x02]-1, sr.Copies, ki[0x01]-1)
+				}
+				if si.DummiesSent != 1 || si.Sent != 0 || sr.DummiesReceived != 1 || sr.Sent != 1 || si.Lost+sr.Lost+si.Bad+sr.Bad != 0 {
+					t.Fatalf("initiator %+v, responder %+v", si, sr)
+				}
+			})
+		}
+	})
+}
+
 // a round trip of three ticks and cover puts: after the session every request
 // of each side carries a put, and the other side takes one record per tick
 func TestPutOnEveryTickUnderThreeTickLatency(t *testing.T) {
