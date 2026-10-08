@@ -611,7 +611,7 @@ The check: the lab/scenario package and `cmd/lab -set deny`.
   answers every agreement with the agreement of the recipient's key, static or ephemeral, with
   that half (step 3). A wrapper over the CryptoProvider records the recipient's ephemeral key and
   hands it back for the check; the production API cannot set an ephemeral key.
-- The set runs on both suites with the recipient in both roles. The genuine and the forged
+- The check runs on both suites with the recipient in both roles. The genuine and the forged
   transcript pass Verify and have the same structure. The negative control: a forgery made with a
   fresh key in place of the recipient's passes Verify under that key and fails under the
   recipient's. A provider wrapper that sees every agreement sees the sender's private key in the
