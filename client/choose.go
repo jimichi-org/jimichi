@@ -55,6 +55,47 @@ func ChooseRest(entry, n, hops int, rnd io.Reader) ([]int, error) {
 	return path, nil
 }
 
+// the entry of a chain whose exit is fixed: each of the other n-1 nodes with
+// the same chance
+func ChooseEntryExcept(n, except int, rnd io.Reader) (int, error) {
+	if n < 2 || except < 0 || except >= n {
+		return 0, fmt.Errorf("%w: an entry among %d nodes other than node %d", ErrChoice, n, except)
+	}
+	j, err := below(rnd, n-1)
+	if err != nil {
+		return 0, err
+	}
+	if j >= except {
+		j++
+	}
+	return j, nil
+}
+
+// the path from entry to a fixed exit: the middle hops are drawn among the
+// n-2 other nodes the way ChooseRest draws them, and exit comes last
+func ChooseRestTo(entry, exit, n, hops int, rnd io.Reader) ([]int, error) {
+	if hops < 2 || hops > n || entry < 0 || entry >= n || exit < 0 || exit >= n || entry == exit {
+		return nil, fmt.Errorf("%w: %d hops among %d nodes from node %d to node %d", ErrChoice, hops, n, entry, exit)
+	}
+	others := make([]int, 0, n-2)
+	for i := 0; i < n; i++ {
+		if i != entry && i != exit {
+			others = append(others, i)
+		}
+	}
+	path := make([]int, 1, hops)
+	path[0] = entry
+	for i := 0; i < hops-2; i++ {
+		j, err := below(rnd, len(others)-i)
+		if err != nil {
+			return nil, err
+		}
+		others[i], others[i+j] = others[i+j], others[i]
+		path = append(path, others[i])
+	}
+	return append(path, exit), nil
+}
+
 // how many of the n listed nodes the mirror of an entry may lack for a chain
 // of hops nodes: at most missing, and never so many that fewer than hops stay
 func MaxAbsent(n, hops, missing int) int {
@@ -70,6 +111,8 @@ const (
 	MirrorLacksEntry
 	// the mirror lacks more listed nodes than MaxAbsent allows
 	MirrorLacksTooMany
+	// the mirror passes JudgeMirror but lacks the fixed exit
+	MirrorLacksExit
 )
 
 // JudgeMirror is the rule by which a client that draws its chain takes or
@@ -89,6 +132,16 @@ func JudgeMirror(served []bool, entry, hops, missing int) (verdict MirrorVerdict
 		return MirrorLacksTooMany, absent, allowed
 	}
 	return MirrorTaken, absent, allowed
+}
+
+// JudgeMirrorTo is JudgeMirror for a chain whose exit is fixed: a mirror it
+// takes is still refused when served[exit] is false
+func JudgeMirrorTo(served []bool, entry, exit, hops, missing int) (verdict MirrorVerdict, absent, allowed int) {
+	verdict, absent, allowed = JudgeMirror(served, entry, hops, missing)
+	if verdict == MirrorTaken && (exit < 0 || exit >= len(served) || !served[exit]) {
+		verdict = MirrorLacksExit
+	}
+	return verdict, absent, allowed
 }
 
 // a 64-bit value reduced modulo m favours the low remainders unless the first
