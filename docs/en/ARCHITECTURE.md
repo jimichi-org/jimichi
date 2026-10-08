@@ -379,11 +379,22 @@ Handling one request:
 - A queue lives as long as its owner fetches. It is held while its last fetch, or its creation
   for a queue not fetched yet, is within the TTL, whether or not the circuit that did it is still
   open. Nobody evicts a held queue.
-- One circuit holds two queues for a TTL, even after it closes: the one its put created and the
-  one it fetched. Holding N queues therefore takes about N/2 circuit setups per TTL, not N live
-  circuits. Every node limits setups per source address, the mailbox too, where a preceding relay
-  is one source: at 0.2 per second and a TTL of 5 min one source brings about 60 setups, that is
-  about 120 held queues, and the default 1024 queues take about 9 sources.
+- A circuit is bound to one fetch queue and one put queue for its whole life, so it holds at most
+  two. A put does not extend the hold. The cost of holding N queues depends on how long the
+  circuits stay open:
+  - A circuit that closes after its requests holds the queue its put created for a TTL from the
+    creation and the queue it fetched for a TTL from its last fetch, after it closes as well. N
+    queues take about N/2 circuit setups per TTL. Every node limits setups per source address, the
+    mailbox too, where a preceding relay is one source: at 0.2 per second and a TTL of 5 min one
+    source brings about 60 setups, that is about 120 held queues, and the default 1024 queues take
+    about 9 sources.
+  - A circuit that stays open holds its fetch queue as long as it lives: every fetch restarts the
+    TTL and every request restarts the idle timeout of the circuit (-idle-timeout, 5 min; padding
+    does not count), so one request per 5 min keeps both until -circuit-lifetime, 24 h. A queue
+    its put created is held for a TTL from the creation and after that only by fetches. N queues
+    take N open circuits with one request per TTL each, that is N setups per 24 h. At the mailbox
+    every open circuit is one inbound link: at most 32 from one preceding relay and 512 in all
+    (-max-links-per-source, -max-links), shared with the honest circuits.
 - The binding table is bounded; when it is full, the binding seen least recently is evicted. An
   evicted honest circuit binds again to the same identifiers.
 - Every 30 s the expired records, the empty queues not fetched within the TTL and the bindings
