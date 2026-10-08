@@ -478,11 +478,13 @@ Reply:
 
 - A reply belongs to the oldest unanswered request by position, and the tag is a check; parsing
   is strict (subsection "Reply, 396 bytes").
-- 01: the sticky record is taken off; the real body of a record that is not sticky counts as
-  delivered to the mailbox.
+- 01: the sticky record is taken off; a real body, of the probe or of a record that is not
+  sticky, counts as delivered to the mailbox and is zeroed.
 - 10 and 11: stall mode; the sticky record stays and goes on being put.
 - A bad reply: the outcome of the put is unknown, which is handled as 10 but without turning
-  stall mode on; the record in the reply is dropped; the circuit is not closed.
+  stall mode on; the circuit is not closed. A record in a reply that parsed still goes to the
+  session: the mailbox has already taken it from the queue, and the session authenticates it and
+  drops a repeat.
 - A record in a reply is held before pinning (up to 16, the oldest pushed out) and goes to the
   session in order after pinning; after pinning it goes to the session at once.
 - After pinning, a parsed reply without a record that opened is an answered fetch for the
@@ -524,7 +526,8 @@ Rebuild:
   A circuit whose cell cannot carry a request is a failure.
 - The conversation ends when the rebuild fails for 10 min, when three circuits ended in a reply
   refused by the client within 10 min, or when another card arrives after pinning. The circuit is
-  then closed and the session keys are zeroed.
+  then closed, and the session keys, the message bodies the conversation still holds and the
+  records held before pinning are zeroed.
 - The caller learns only the class of a circuit end: a reply refused by the client, the wait for
   a reply ran out, a failed send, or a close by the far side. No node is named.
 
@@ -556,7 +559,8 @@ Parameter rule:
 What the mailbox sees: with CoverPuts a put on every tick while fewer than W requests with a put
 are in flight; without them the moment and number of real messages, the initiator's first record
 after kk2 and the keepalives. The copies of a sticky record are identical bytes, so the mailbox
-sees a repeat.
+sees a repeat. Before pinning the requests only fetch, so the first put shows when the contact
+was pinned: at once at the initiator (kk1), at the responder with kk2 once kk1 has come.
 
 ## Circuit setup
 

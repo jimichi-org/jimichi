@@ -496,7 +496,7 @@ data record), stale. The epoch grows with every change of session.
 
 An opened record clears staleness. A session in which each side puts a record more often than
 once in 90 s does not go stale; the schedule of records is set by the conversation driver
-(planned, #18).
+(ARCHITECTURE, subsection "Conversation").
 
 The payload security levels from the Noise table for the KK pattern, and what the rules do with
 them:
@@ -638,7 +638,7 @@ some of them live long:
 | gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys and the client identity key included | until the heap memory is reused, which can be after the key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
 | gogost, GOST R 34.10 signing | the CA or node signing scalar and the one-time number k as math/big, intermediate points; k and the signature give back the key | until the heap memory is reused; the copies reappear at every signature: the request, the certificate, every descriptor refresh |
 | end-to-end layer | plaintexts: the body passed to Seal and the body Receive returns (e2e zeroes its own record buffer) | with the caller, never wiped |
-| client and mailbox (planned, #18) | the outgoing queue, held records and request buffers with the fetch capability F; at the mailbox a copy of the request with F in the cell body and in the link buffer after it zeroes its own slice | until the heap memory is reused |
+| client and mailbox (the -peer client planned, #18) | message bodies and the records held before pinning, which the conversation driver zeroes only once the mailbox has stored a record or the conversation ends; the copies of a request with the fetch capability F that the circuit keeps after Send, while the driver zeroes its own: in client.Client the queue of the fixed schedule and the plaintext buffer wire.Circuit.Seal wraps in the layers; at the mailbox a copy of the request with F in the cell body and in the link buffer after it zeroes its own slice | until the heap memory is reused |
 
 gogost arithmetic on math/big is not constant time. The node's link and onion keys could leak
 through VKO timing to an adversary who times the node's responses; side-channel attacks are

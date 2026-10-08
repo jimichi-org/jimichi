@@ -120,6 +120,14 @@ English | [Русский](../ru/LIMITATIONS.md)
   client exits on a failure, draws a new chain at its next start and keeps no account of
   failures, so rogue nodes can raise the share of surviving chains that run through them. This
   selective denial of service is neither prevented nor measured.
+- The conversation driver (ARCHITECTURE, subsection "Conversation"), which the -peer client is to
+  use ([#18](https://github.com/jimichi-org/jimichi/issues/18)), does not exit when a circuit
+  ends: it builds a new one through the same entry, from a fresh mirror of that entry, with new
+  middle hops to the same mailbox, and bounds only the replies the client refuses. A rogue entry
+  can close, as the far side, every circuit whose middle hops are honest, and leave different
+  honest nodes out of each mirror within -missing: over the rebuilds the middle hops come to be
+  rogue, and with them the entry learns which mailbox the client uses. Closes by the far side and
+  reply timeouts count toward no bound.
 - There are no guard nodes: every circuit draws a fresh entry. One chain has a rogue entry and a
   rogue exit with probability p = k(k-1)/(N(N-1)), 0.1 for two rogue nodes of five (EXPERIMENT,
   block 3). Over c circuits with chains drawn independently the chance that at least one had
