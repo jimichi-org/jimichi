@@ -55,11 +55,15 @@ type CryptoProvider interface {
 	KeySize() int
 
 	// an agreement pair that is a function of secret and ctx, laid out as
-	// GenerateEphemeral lays it out; never a signing key
+	// GenerateEphemeral lays it out; never a signing key, though in GOST Sign
+	// would take it, so keeping it from Sign is the caller's
 	DerivePair(secret *secmem.Buffer, ctx Context) (priv *secmem.Buffer, pub []byte, err error)
 
 	// the cost is fixed by the suite under the purpose password/1, so a caller
-	// has no way to ask for a cheaper one
+	// has no way to ask for a cheaper one. The salt is the transcript hash of
+	// ctx, whose parts the provider cannot see: the caller puts a fresh random
+	// part of at least 16 bytes per container and per volume into it. Password
+	// strength and the rate of attempts are the caller's too
 	PasswordKey(password *secmem.Buffer, ctx Context) (*secmem.Buffer, error)
 
 	NewAEAD(key *secmem.Buffer) (AEAD, error)

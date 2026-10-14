@@ -144,13 +144,25 @@ Decisions taken:
 - A password is 1 to PasswordMax = 256 bytes, taken as typed, without normalisation; 0x00, \r and
   \n are refused (ValidPassword), so that the command line, the admin port and the provider read
   one string. Otherwise ErrBadPassword. The call leaves the password buffer as it is.
+- The salt of PasswordKey is the transcript hash of ctx, and the provider does not see the parts
+  of a context, so it cannot check them. The caller puts a fresh random part of at least 16 bytes
+  (RFC 9106, 3.1; SP 800-132, 5.1) into the context of every container and every volume and keeps
+  it with the container. A fixed context would give every container of a suite one salt, and one
+  computation per guessed password would test it against all of them.
+- The strength of a password, the rate of attempts and reading a password without a string copy
+  are the caller's. Under zeroing PasswordKey ends with a forced collection (section "Known
+  gaps"), a pause of the whole process, so the caller opens the container before the link and the
+  fixed schedule of cells start, and the pause does not show in the timing of cells.
 - The GOST suite stretches with PBKDF2 and HMAC_GOSTR3411_2012_512 rather than Argon2id: Argon2id
   has BLAKE2b inside, the GOST suite consists of GOST algorithms only, and the TC26
   recommendations have no memory-hard function. The iteration count C_GOST = 2600 comes from a
   one-off measurement on the testbed host, chosen so that the processor time per guess
-  (core-seconds, user + sys from getrusage) is within 0.8-1.25 of Argon2id in the c25519 suite. On
-  GPUs and dedicated hardware PBKDF2, which needs no memory, is cheaper than Argon2id; that cost
-  has not been measured.
+  (core-seconds, user + sys from getrusage) is within 0.8-1.25 of Argon2id in the c25519 suite.
+  The band holds only for gogost's Streebog in the Linux containers of the testbed, where it was
+  measured: the same code outside a container and an optimised Streebog on an ordinary processor
+  compute a guess faster, and GPUs and dedicated hardware, where PBKDF2 needs no memory, faster
+  still. For an adversary a guess against the GOST suite therefore costs less than against
+  Argon2id, by a factor that has not been measured (LIMITATIONS).
 
 ## Key derivation
 
@@ -340,7 +352,8 @@ not a bad pair.
 
 DerivePair and PasswordKey are meant for the client container
 ([#20](https://github.com/jimichi-org/jimichi/issues/20)); the end-to-end packages and the
-conversation driver do not call them.
+conversation driver do not call them, and the source checks of noise, e2e and conversation hold
+this.
 
 ### Rules for changes
 
@@ -418,8 +431,9 @@ and has no primitives of its own.
   to the neutral point. GOST rejects points off the curve and points of order 2 and 4; the neutral
   point has no affine encoding. providertest checks small-order keys for both suites.
 - A rule for callers: in GOST the signing key comes from the same generator on the same curve as
-  the ephemeral pair, so a signing key must never be used for key agreement, nor an agreement key
-  for signing. The interface does not check this.
+  the ephemeral pair, so a signing key must never be used for key agreement, nor an agreement key,
+  a DerivePair key included, for signing. The interface does not check this: Sign takes any scalar
+  of the right size.
 - Identity signatures never authenticate client messages. A client has no signing key: its
   identity key is an agreement key and never goes into Sign. A sender's signature over a message
   or a transcript would prove to a third party who sent it. The packages of the end-to-end layer
@@ -797,11 +811,22 @@ transcript holding no other value.
   golang.org/x/crypto/pbkdf2 is a frozen wrapper over the same function that panics on an error.
   With GODEBUG=fips140=only crypto/pbkdf2 refuses a hash outside SHA-2 and SHA-3, and PasswordKey
   of the GOST suite returns an error. An internal test checks the function against the examples
-  of R 50.1.111-2016 (c = 1, 2 and 4096, password and salt with zero bytes, dkLen 100).
+  of R 50.1.111-2016 (c = 1, 2 and 4096, password and salt with zero bytes, dkLen 100). The
+  password goes in as a string that views the bytes of the secmem buffer (unsafe.String) rather
+  than as a copy: crypto/pbkdf2 uses it only during the call, to key HMAC. The library returns the
+  start of the whole 64-byte block T_1, and the provider clears the whole block.
 - DerivePair in GOST keeps one gogost KDF state (gost34112012256.NewKDF) per call rather than per
   candidate; the public key is computed as for an ephemeral pair. Internal tests check the
   sampling against a stream of candidates of their own, and the composition against a direct
   call of the KDF and gost3410.
+- Internal tests of both suites check the steps that keep key material off the heap: the KDF of
+  DerivePair is keyed with the secmem bytes of the secret and every candidate it hands out is
+  cleared, and the stretch of PasswordKey takes the password bytes of the buffer and its whole
+  output is cleared, with zeroing on and not with it off. Source checks cover what such tests
+  cannot see, a copy kept on the heap: a library output goes only into a secmem buffer, a copy
+  into one and the clearing of its own slice, every private key number of gogost is wiped by a
+  deferred wipe, and X25519 takes every private key as the bytes of its buffer. providertest
+  checks that under zeroing PasswordKey forces one collection and without it none.
 
 ## Known gaps
 
@@ -818,7 +843,7 @@ some of them live long:
 | gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys, and the DerivePair secret, one state per call; the Streebog message buffer holding the second secret of MixKey; the last block Streebog computed, kept in the working buffer of the hash and in a temporary block after Sum, half of which is the output: a copy of the KEK, of every Agree, MixKey and DeriveKey output and of every DerivePair candidate, the last of which is the private key taken | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer and, unless zeroing is off (-keymem none or a list without zero), zeroes the slices the library returns, not the buffers inside it |
 | gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys, the client identity key and the DerivePair private key while its public key is computed included | until the heap memory is reused, which can be after the key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
 | x/crypto argon2 (PasswordKey c25519) | the BLAKE2b state with the password and the 64 MiB matrix, derived from the password, never wiped; a block of the matrix checks a password guess for less than the full cost | until the heap memory is reused; with zeroing on, PasswordKey calls debug.FreeOSMemory after the stretch, and the collector returns the freed pages to the kernel, so a process dump no longer holds them. It is a heuristic, not a wipe: physical memory and swap the pages may have reached before are not cleared this way. Locking all memory ([#36](https://github.com/jimichi-org/jimichi/issues/36)) and runtime/secret ([#37](https://github.com/jimichi-org/jimichi/issues/37)) are planned |
-| crypto/pbkdf2 (PasswordKey GOST) | the password as an immutable string and as a copy in the HMAC key, the HMAC-Streebog-512 states with the password XOR ipad and opad, the blocks U and T, equivalent to the output | until the heap memory is reused; FreeOSMemory as in c25519 |
+| crypto/pbkdf2 (PasswordKey GOST) | a copy of the password made for the HMAC key, the HMAC-Streebog-512 states with the password XOR ipad and opad, the last block U, equivalent to the output | until the heap memory is reused; the provider passes the password as a view of the secmem bytes and clears the whole block T_1 it gets back; FreeOSMemory as in c25519 |
 | gogost, GOST R 34.10 signing | the CA or node signing scalar and the one-time number k as math/big, intermediate points; k and the signature give back the key | until the heap memory is reused; the copies reappear at every signature: the request, the certificate, every descriptor refresh |
 | end-to-end layer | plaintexts: the body passed to Seal and the body Receive returns (e2e zeroes its own record buffer) | with the caller, never wiped |
 | -peer client and mailbox | message bodies and the records held before pinning, which the conversation driver zeroes only once the mailbox has stored a record or the conversation ends; the copies of a request with the fetch capability F that the circuit keeps after Send, while the driver zeroes its own: in client.Client the queue of the fixed schedule and the plaintext buffer wire.Circuit.Seal wraps in the layers; at the mailbox a copy of the request with F in the cell body and in the link buffer after it zeroes its own slice | until the heap memory is reused |

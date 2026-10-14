@@ -366,12 +366,14 @@ time of the whole process (core-seconds, user + sys from getrusage; the wall tim
 systems without getrusage). Argon2id runs four lanes in goroutines of their own, so its processor
 time is about four times its wall time, while PBKDF2 runs on one thread. The iteration count
 C_GOST of the GOST suite comes from a one-off measurement on the testbed host, chosen so that the
-core-seconds per guess match Argon2id within 0.8-1.25. This equates the cost on our code, not for
-an adversary: on GPUs and dedicated hardware PBKDF2, which needs no memory, is cheaper than
-Argon2id, and that cost has not been measured. The number of candidates of DerivePair in the
-GOST suite depends on the secret, so the benchmark cycles through 64 secrets and gives the mean;
-the worst case, 128 refused candidates, is timed by a separate benchmark in crypto/gost. No
-measurement is recorded yet, and the numbers are published only from a recorded run.
+core-seconds per guess match Argon2id within 0.8-1.25. This equates the cost on our code in the
+Linux containers of the testbed, not for an adversary: the same code outside a container, an
+optimised Streebog and above all GPUs and dedicated hardware, where PBKDF2 needs no memory,
+compute a guess faster, and that cost has not been measured. The number of candidates of
+DerivePair in the GOST suite depends on the secret, so the benchmark cycles through 64 secrets and
+gives the mean; the worst case, 128 refused candidates, is timed by a separate benchmark in
+crypto/gost. No measurement is recorded yet, and the numbers are published only from a recorded
+run.
 
 ## Statistics
 
