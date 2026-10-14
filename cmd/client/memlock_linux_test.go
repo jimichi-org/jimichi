@@ -95,12 +95,13 @@ func TestPeersTalkAtTheMemlockMinimum(t *testing.T) {
 		t.Run(s.String(), func(t *testing.T) {
 			bed := newPeerBed(t, s)
 			env := []string{asBoundClient + "=" + strconv.Itoa(minPeerMemlock)}
-			a := bed.start(t, "a", env, "-interval", "100ms", "-count", "3", "-respond")
-			b := bed.start(t, "b", env, "-interval", "100ms", "-count", "3", "-respond")
-			introduce(t, bed.p, a, b)
-			for _, pr := range []*peerProc{a, b} {
-				pr.await(t, "three round trips", func(out string) bool { return roundTrips(out) >= 3 })
-			}
+			interval := (messageTicks * bed.rate).String()
+			a := bed.start(t, "a", env, "-interval", interval, "-count", "3", "-respond")
+			b := bed.start(t, "b", env, "-interval", interval, "-count", "3", "-respond")
+			bed.introduce(t, a, b)
+			bed.wait(t, "three round trips each", bed.legs(handshakeLegs+2)+3*messageTicks, func() bool {
+				return roundTrips(a.out.String()) >= 3 && roundTrips(b.out.String()) >= 3
+			})
 			time.Sleep(200 * time.Millisecond)
 			for _, pr := range []*peerProc{a, b} {
 				out := pr.out.String()

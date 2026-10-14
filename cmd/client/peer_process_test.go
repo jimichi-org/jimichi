@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jimichi-org/jimichi/client"
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/e2e"
 	"github.com/jimichi-org/jimichi/link"
@@ -52,19 +54,50 @@ func init() {
 // server hands out the unsigned bundles of all three for whichever entry a
 // client draws
 
+// GOST under the race detector costs tens of times more per request than
+// X25519, so the rate follows a measured round trip and waits count ticks
+const (
+	probes = 5
+	// two clients, each request about a round trip of work: a rate of four
+	// round trips keeps the bed at half a core
+	rateOverRoundTrip = 4
+	// above conversation.MinRate of the client's reply timeout
+	minPeerRate = 50 * time.Millisecond
+	// a message every this many ticks leaves the ticks between to the answers
+	// to the other client and the copies of sticky records
+	messageTicks = 4
+	// kk1, kk2 and the initiator's confirming record
+	handshakeLegs = 3
+	// how many times the ticks a wait needs the test gives it before it calls
+	// the clients stuck, and the wall time no wait goes past
+	slack   = 5
+	maxWait = 2 * time.Minute
+)
+
 type peerBed struct {
 	p        jcrypto.CryptoProvider
 	addrs    []string
+	nodes    []client.Node
 	store    *mailbox.Store
 	infoPort string
 	info     *infoServer
 	relays   []*relay.Relay
 	lns      []net.Listener
+	// the slowest round trip of the probe, the build of its circuit, and the
+	// request period they give
+	roundTrip, build, rate time.Duration
+	// the introduced clients, whose fetches at the mailbox count their ticks
+	talkers []talker
 
 	mu sync.Mutex
 	// requests that fetch, per queue, and every fetch capability the mailbox saw
 	fetches map[[mailbox.IDSize]byte]int
 	caps    map[[mailbox.CapSize]byte]bool
+}
+
+type talker struct {
+	pr    *peerProc
+	queue [mailbox.IDSize]byte
 }
 
 func newPeerBed(t *testing.T, s jcrypto.Suite) *peerBed {
@@ -108,6 +141,7 @@ func newPeerBed(t *testing.T, s jcrypto.Suite) *peerBed {
 			t.Fatal(err)
 		}
 		bed.addrs = append(bed.addrs, ln.Addr().String())
+		bed.nodes = append(bed.nodes, client.Node{Addr: ln.Addr().String(), StaticPub: pub})
 		bed.relays = append(bed.relays, r)
 		bed.lns = append(bed.lns, ln)
 		bundles = append(bundles, b)
@@ -120,7 +154,95 @@ func newPeerBed(t *testing.T, s jcrypto.Suite) *peerBed {
 		t.Fatal(err)
 	}
 	bed.info, bed.infoPort = info, port
+	bed.measure(t)
+	t.Cleanup(func() { t.Logf("bed: %s", bed.report()) })
 	return bed
+}
+
+// a probe circuit through the chain of the listed order sends one request at a
+// time; a request that asks for nothing costs the mailbox the same hash as any
+// other and counts as no fetch
+func (bed *peerBed) measure(t *testing.T) {
+	t.Helper()
+	start := time.Now()
+	cl, err := client.Dial(client.Config{Provider: bed.p, Chain: bed.nodes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	bed.build = time.Since(start)
+	for i := range probes {
+		req := mailbox.Request{Tag: uint16(i)}
+		start := time.Now()
+		if err := cl.Send(req.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case _, ok := <-cl.Replies():
+			if !ok {
+				t.Fatalf("the probe circuit ended: %v", cl.Refused())
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("no reply to the probe")
+		}
+		bed.roundTrip = max(bed.roundTrip, time.Since(start))
+	}
+	bed.rate = max(minPeerRate, rateOverRoundTrip*bed.roundTrip)
+}
+
+// the counter lines of a client every two ticks
+func (bed *peerBed) reportEvery() time.Duration { return 2 * bed.rate }
+
+func ticksOf(d, rate time.Duration) uint64 { return uint64((d + rate - 1) / rate) }
+
+// a leg takes a record from one client to the other: a tick for its sender to
+// put it, a round trip, and a tick for the first fetch of the other one to
+// pass it at the mailbox
+func (bed *peerBed) legs(n int) uint64 {
+	return uint64(n) * (2 + ticksOf(bed.roundTrip, bed.rate))
+}
+
+// counts ticks at the mailbox, since a starved runner slows the clients'
+// tickers with the bed; for a slow suite maxWait is the bound that fires first
+func (bed *peerBed) wait(t *testing.T, what string, need uint64, done func() bool) {
+	t.Helper()
+	from := make([]int, len(bed.talkers))
+	for i, tk := range bed.talkers {
+		from[i] = bed.fetchesOf(tk.queue)
+	}
+	start := time.Now()
+	deadline := start.Add(min(time.Duration(slack*slack*need)*bed.rate, maxWait))
+	poll := time.NewTicker(min(bed.rate, 100*time.Millisecond))
+	defer poll.Stop()
+	for {
+		var n uint64
+		for i, tk := range bed.talkers {
+			n = max(n, uint64(bed.fetchesOf(tk.queue)-from[i]))
+		}
+		if done() {
+			t.Logf("%s: %d ticks of %d allowed, %v", what, n, slack*need, time.Since(start).Round(time.Millisecond))
+			return
+		}
+		for _, tk := range bed.talkers {
+			if tk.pr.exited() {
+				t.Fatalf("%s exited before %s", tk.pr.name, what)
+			}
+		}
+		if n > slack*need || time.Now().After(deadline) {
+			t.Fatalf("%s: not in %d ticks and %v, %d ticks needed", what, n, time.Since(start).Round(time.Millisecond), need)
+		}
+		<-poll.C
+	}
+}
+
+func (bed *peerBed) report() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "rate %v, round trip %v, build %v", bed.rate, bed.roundTrip, bed.build)
+	for _, tk := range bed.talkers {
+		fmt.Fprintf(&b, "\nrequests of %s at the mailbox: %d", tk.pr.name, bed.fetchesOf(tk.queue))
+	}
+	fmt.Fprintf(&b, "\nmailbox: %+v", bed.store.Stats())
+	return b.String()
 }
 
 // the mailbox of the last relay, with the fetches counted on the way in: the
@@ -161,21 +283,14 @@ func (bed *peerBed) down() {
 	}
 }
 
-// the relays here forward at once, so a request costs the cryptography of three
-// hops each way; GOST in pure Go under the race detector, with the other
-// packages testing alongside, needs a slower period than that to keep up
-func peerRate(p jcrypto.CryptoProvider) time.Duration {
-	if p.Suite() == jcrypto.SuiteGOST {
-		return 250 * time.Millisecond
-	}
-	return 50 * time.Millisecond
-}
-
 type peerProc struct {
 	name string
 	cmd  *exec.Cmd
 	out  *logBuffer
 	done chan struct{}
+	// how long a line of the process may take in wall time: one written at
+	// once, or a counter line of its report period
+	patience time.Duration
 }
 
 var (
@@ -189,10 +304,12 @@ func (bed *peerBed) start(t *testing.T, name string, env []string, extra ...stri
 	t.Helper()
 	args := []string{
 		"-peer", "-nodes", strings.Join(bed.addrs, ","), "-mailbox", bed.addrs[2], "-hops", "3",
-		"-mode", "fixed", "-rate", peerRate(bed.p).String(), "-info-port", bed.infoPort, "-suite", bed.p.Suite().String(),
+		"-mode", "fixed", "-rate", bed.rate.String(), "-info-port", bed.infoPort, "-suite", bed.p.Suite().String(),
 		"-auth=false", "-admin", "127.0.0.1:0",
 	}
-	return startClient(t, name, env, append(args, extra...)...)
+	pr := startClient(t, name, env, append(args, extra...)...)
+	pr.patience = max(pr.patience, 4*bed.reportEvery())
+	return pr
 }
 
 func startClient(t *testing.T, name string, env []string, args ...string) *peerProc {
@@ -203,7 +320,7 @@ func startClient(t *testing.T, name string, env []string, args ...string) *peerP
 	}
 	cmd := exec.Command(self, args...)
 	cmd.Env = append(append(os.Environ(), asClient+"=1"), env...)
-	pr := &peerProc{name: name, cmd: cmd, out: &logBuffer{}, done: make(chan struct{})}
+	pr := &peerProc{name: name, cmd: cmd, out: &logBuffer{}, done: make(chan struct{}), patience: time.Minute}
 	cmd.Stdout, cmd.Stderr = pr.out, pr.out
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -213,14 +330,17 @@ func startClient(t *testing.T, name string, env []string, args ...string) *peerP
 		close(pr.done)
 	}()
 	t.Cleanup(func() {
+		ended := "killed by the test"
 		select {
 		case <-pr.done:
+			ended = cmd.ProcessState.String()
 		default:
 			_ = cmd.Process.Kill()
 			<-pr.done
 		}
 		if t.Failed() {
-			t.Logf("%s:\n%s", name, pr.out.String())
+			out := pr.out.String()
+			t.Logf("%s, %s, %d bytes of output:\n%s", name, ended, len(out), out)
 		}
 	})
 	return pr
@@ -238,7 +358,7 @@ func (pr *peerProc) exited() bool {
 // waits for the output to satisfy found
 func (pr *peerProc) await(t *testing.T, what string, found func(string) bool) string {
 	t.Helper()
-	for limit := time.Now().Add(60 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+	for limit := time.Now().Add(pr.patience); ; time.Sleep(20 * time.Millisecond) {
 		out := pr.out.String()
 		if found(out) {
 			return out
@@ -330,11 +450,13 @@ func (pr *peerProc) card(t *testing.T, p jcrypto.CryptoProvider) (string, string
 
 func roundTrips(out string) int { return strings.Count(out, " e2e round trip in ") }
 
-// introduces two clients the way scripts/introduce.sh does
-func introduce(t *testing.T, p jcrypto.CryptoProvider, a, b *peerProc) (cardA, hashA, cardB, hashB string) {
+// introduces two clients the way scripts/introduce.sh does; from here on the
+// waits of the bed count their ticks
+func (bed *peerBed) introduce(t *testing.T, a, b *peerProc) (cardA, hashA, cardB, hashB string) {
 	t.Helper()
-	cardA, hashA = a.card(t, p)
-	cardB, hashB = b.card(t, p)
+	cardA, hashA = a.card(t, bed.p)
+	cardB, hashB = b.card(t, bed.p)
+	bed.talkers = []talker{{a, queueOf(t, cardA)}, {b, queueOf(t, cardB)}}
 	for _, put := range []struct {
 		to   *peerProc
 		card string
@@ -393,17 +515,23 @@ func TestPeersTalkAsProcesses(t *testing.T) {
 	for _, s := range suites {
 		t.Run(s.String(), func(t *testing.T) {
 			bed := newPeerBed(t, s)
-			rate := peerRate(bed.p)
 			plain := []string{"-harden=false", "-keymem", "none", "-message", "secret text"}
-			env := []string{reportEveryVar + "=" + (5 * rate).String()}
-			a := bed.start(t, "a", env, append(plain, "-interval", "100ms", "-count", "2", "-respond")...)
-			b := bed.start(t, "b", env, append(plain, "-interval", "100ms", "-count", "0", "-respond")...)
-			cardA, hashA, cardB, _ := introduce(t, bed.p, a, b)
+			interval := (messageTicks * bed.rate).String()
+			env := []string{reportEveryVar + "=" + bed.reportEvery().String()}
+			a := bed.start(t, "a", env, append(plain, "-interval", interval, "-count", "2", "-respond")...)
+			b := bed.start(t, "b", env, append(plain, "-interval", interval, "-count", "0", "-respond")...)
+			cardA, hashA, cardB, _ := bed.introduce(t, a, b)
 
-			a.await(t, "two round trips", func(out string) bool { return roundTrips(out) >= 2 })
+			// the handshake, a's first message and b's answer; the second message
+			// goes a tick later, and an answer may wait for a message of b's own
+			bed.wait(t, "two round trips of a", bed.legs(handshakeLegs+2)+1+messageTicks, func() bool {
+				return roundTrips(a.out.String()) >= 2
+			})
 			seen := roundTrips(b.out.String())
-			b.await(t, "round trips past a's count", func(out string) bool { return roundTrips(out) >= seen+3 })
-			time.Sleep(300 * time.Millisecond)
+			bed.wait(t, "round trips of b past a's count", bed.legs(2)+3*messageTicks, func() bool {
+				return roundTrips(b.out.String()) >= seen+3
+			})
+			// a third message of a would have come back meanwhile
 			if got := roundTrips(a.out.String()); got != 2 {
 				t.Fatalf("a logged %d round trips with -count 2", got)
 			}
@@ -430,12 +558,13 @@ func TestPeersTalkAsProcesses(t *testing.T) {
 			}
 			queueA, queueB := queueOf(t, cardA), queueOf(t, cardB)
 			fetchedA, fetchedB := bed.fetchesOf(queueA), bed.fetchesOf(queueB)
-			time.Sleep(10 * rate)
+			// requests of a, so that the count of b proves something
+			const ticks = 10
+			bed.wait(t, "requests of a beside the stopped b", ticks, func() bool {
+				return bed.fetchesOf(queueA) >= fetchedA+ticks
+			})
 			if got := bed.fetchesOf(queueB); got != fetchedB {
 				t.Fatalf("the mailbox took %d more requests for the queue of the stopped client", got-fetchedB)
-			}
-			if bed.fetchesOf(queueA) == fetchedA {
-				t.Fatal("no request for the queue of a, so the count proves nothing")
 			}
 			if b.exited() {
 				t.Fatal("the stopped client exited")
@@ -488,7 +617,7 @@ func TestPeerFlagRefusalIsCodeTwoBeforeTheNetwork(t *testing.T) {
 		{"one hop", []string{"-hops", "1"}},
 		{"admin on all addresses", []string{"-admin", "0.0.0.0:9201"}},
 		{"immediate mode", []string{"-mode", "immediate"}},
-		{"jitter as long as the rate", []string{"-jitter", "50ms"}},
+		{"jitter as long as the rate", []string{"-jitter", bed.rate.String()}},
 		{"a mailbox off the list", []string{"-mailbox", "127.0.0.1:1"}},
 		{"a long message", []string{"-message", strings.Repeat("m", maxText+1)}},
 		{"a bad keymem", []string{"-keymem", "everything"}},
