@@ -54,15 +54,8 @@ func init() {
 // server hands out the unsigned bundles of all three for whichever entry a
 // client draws
 
-// the relays forward at once, so the round trip of one request on an idle bed
-// is the work it costs along the chain, tens of times more with GOST in pure
-// Go than with X25519 under the race detector, which the clients run under as
-// well, beside the tests of other packages. Clients that ask faster than the
-// bed works queue their requests in the relays until replies time out, and a
-// client whose messages come faster than its requests carry them queues them
-// in its outbox ahead of its answers to the other one. So the rate follows a
-// measured round trip, a message takes several ticks, and a wait counts the
-// requests the clients made against the ticks the protocol needs
+// GOST under the race detector costs tens of times more per request than
+// X25519, so the rate follows a measured round trip and waits count ticks
 const (
 	probes = 5
 	// two clients, each request about a round trip of work: a rate of four
@@ -209,13 +202,8 @@ func (bed *peerBed) legs(n int) uint64 {
 	return uint64(n) * (2 + ticksOf(bed.roundTrip, bed.rate))
 }
 
-// polls until done, counting the most requests either client made meanwhile
-// at the mailbox, by the queue each fetches. A starved runner drops ticks of
-// the clients' tickers as it slows the bed, so wall time says little about the
-// protocol, while a client that keeps asking past slack times the ticks a wait
-// needs is stuck. A wait in which neither client asks ends at slack squared
-// times the ticks it needs in wall time, and none goes past maxWait, so a
-// stuck pair fails with the logs and the report before the test times out
+// counts ticks at the mailbox, since a starved runner slows the clients'
+// tickers with the bed; for a slow suite maxWait is the bound that fires first
 func (bed *peerBed) wait(t *testing.T, what string, need uint64, done func() bool) {
 	t.Helper()
 	from := make([]int, len(bed.talkers))
@@ -629,7 +617,7 @@ func TestPeerFlagRefusalIsCodeTwoBeforeTheNetwork(t *testing.T) {
 		{"one hop", []string{"-hops", "1"}},
 		{"admin on all addresses", []string{"-admin", "0.0.0.0:9201"}},
 		{"immediate mode", []string{"-mode", "immediate"}},
-		{"jitter as long as the rate", []string{"-jitter", "50ms"}},
+		{"jitter as long as the rate", []string{"-jitter", bed.rate.String()}},
 		{"a mailbox off the list", []string{"-mailbox", "127.0.0.1:1"}},
 		{"a long message", []string{"-message", strings.Repeat("m", maxText+1)}},
 		{"a bad keymem", []string{"-keymem", "everything"}},
