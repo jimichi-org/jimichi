@@ -18,7 +18,11 @@ const (
 // Argon2id with the label, a zero byte and the transcript hash as the salt,
 // the bytes info gives the other derivations
 func (p *Provider) PasswordKey(password *secmem.Buffer, ctx jcrypto.Context) (*secmem.Buffer, error) {
-	if password == nil || !jcrypto.ValidPassword(password.Bytes()) {
+	var pw []byte
+	if password != nil {
+		pw = password.Bytes()
+	}
+	if !jcrypto.ValidPassword(pw) {
 		return nil, jcrypto.ErrBadPassword
 	}
 	if !p.owns(ctx) {
@@ -28,16 +32,14 @@ func (p *Provider) PasswordKey(password *secmem.Buffer, ctx jcrypto.Context) (*s
 	if err != nil {
 		return nil, err
 	}
-	key := argon2id(password.Bytes(), info(label, ctx.Sum()), argonTime, argonMemory, argonThreads, keySize)
 	defer secmem.ReturnFreed()
-	out, err := secmem.NewFrom(key)
-	if err != nil {
-		secmem.Zero(key)
-		return nil, err
-	}
-	return out, nil
+	key := argon2id(pw, info(label, ctx.Sum()), argonTime, argonMemory, argonThreads, keySize)
+	defer secmem.Zero(key[:cap(key)])
+	return secmem.NewFrom(key)
 }
 
-func argon2id(password, salt []byte, time, memory uint32, threads uint8, size uint32) []byte {
+// a variable so an internal test can see what goes into the stretch and what
+// is left of its output
+var argon2id = func(password, salt []byte, time, memory uint32, threads uint8, size uint32) []byte {
 	return argon2.IDKey(password, salt, time, memory, threads, size)
 }

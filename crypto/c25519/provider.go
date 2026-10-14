@@ -112,7 +112,11 @@ func (p *Provider) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.
 // anyway, so the public key and every agreement are those of the raw output,
 // and the stored private key has one encoding
 func (p *Provider) DerivePair(secret *secmem.Buffer, ctx jcrypto.Context) (*secmem.Buffer, []byte, error) {
-	if secret == nil || secret.Len() != keySize {
+	var s []byte
+	if secret != nil {
+		s = secret.Bytes()
+	}
+	if len(s) != keySize {
 		return nil, nil, jcrypto.ErrBadKeySize
 	}
 	if !p.owns(ctx) {
@@ -122,7 +126,7 @@ func (p *Provider) DerivePair(secret *secmem.Buffer, ctx jcrypto.Context) (*secm
 	if err != nil {
 		return nil, nil, err
 	}
-	priv, err := expand(secret.Bytes(), info(label, ctx.Sum()), privSize)
+	priv, err := expand(s, info(label, ctx.Sum()), privSize)
 	if err != nil {
 		return nil, nil, err
 	}

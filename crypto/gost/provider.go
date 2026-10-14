@@ -86,7 +86,11 @@ const pairDraws = 128
 // candidate i is KDF(secret, label, th || u8(i)): one KDF state for the whole
 // call, the number in the seed as TLSTREE and ESPTREE number their keys
 func (p *Provider) DerivePair(secret *secmem.Buffer, ctx jcrypto.Context) (*secmem.Buffer, []byte, error) {
-	if secret == nil || secret.Len() != keySize {
+	var s []byte
+	if secret != nil {
+		s = secret.Bytes()
+	}
+	if len(s) != keySize {
 		return nil, nil, jcrypto.ErrBadKeySize
 	}
 	if !p.owns(ctx) {
@@ -101,14 +105,7 @@ func (p *Provider) DerivePair(secret *secmem.Buffer, ctx jcrypto.Context) (*secm
 	if err != nil {
 		return nil, nil, err
 	}
-	kdf := gost34112012256.NewKDF(secret.Bytes())
-	seed := append(ctx.Sum(), 0)
-	err = pickScalar(c.Q, priv.Bytes(), func(i int, dst []byte) {
-		seed[jcrypto.ContextSize] = byte(i)
-		out := kdf.Derive(nil, label, seed)
-		copy(dst, out)
-		secmem.Zero(out)
-	})
+	err = pickScalar(c.Q, priv.Bytes(), drawFrom(pairKDF(s), label, append(ctx.Sum(), 0)))
 	if err != nil {
 		priv.Release()
 		return nil, nil, err
@@ -125,6 +122,24 @@ func (p *Provider) DerivePair(secret *secmem.Buffer, ctx jcrypto.Context) (*secm
 		return nil, nil, fmt.Errorf("gost: public key: %w", err)
 	}
 	return priv, pub.Raw(), nil
+}
+
+type deriver interface {
+	Derive(dst, label, seed []byte) []byte
+}
+
+// a variable so an internal test can keep the slices the KDF hands out
+var pairKDF = func(key []byte) deriver { return gost34112012256.NewKDF(key) }
+
+// the last byte of seed is the candidate number; the slice the library
+// returns is cleared at once
+func drawFrom(kdf deriver, label, seed []byte) func(i int, dst []byte) {
+	return func(i int, dst []byte) {
+		seed[len(seed)-1] = byte(i)
+		out := kdf.Derive(nil, label, seed)
+		copy(dst, out)
+		secmem.Zero(out)
+	}
 }
 
 // rejection sampling without reduction: bit 255 is cleared since q has 255
