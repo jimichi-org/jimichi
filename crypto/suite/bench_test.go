@@ -2,8 +2,10 @@ package suite_test
 
 import (
 	"testing"
+	"time"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 )
 
@@ -204,5 +206,74 @@ func BenchmarkVerify(b *testing.B) {
 				b.Fatal("signature did not verify")
 			}
 		}
+	})
+}
+
+// next to the wall time, the processor time of the whole process per call,
+// where the system reports it
+func reportCPU(b *testing.B, start time.Duration, ok bool) {
+	end, endOK := processCPU()
+	if ok && endOK && b.N > 0 {
+		b.ReportMetric(float64(end-start)/float64(b.N), "cpu-ns/op")
+	}
+}
+
+// what opening a container costs: one password stretch. Argon2id runs four
+// lanes at once and PBKDF2 one thread, so only the processor time compares the
+// cost per guess
+func BenchmarkPasswordKey(b *testing.B) {
+	each(b, func(b *testing.B, p jcrypto.CryptoProvider) {
+		pw, err := secmem.NewFrom([]byte("jimichi vault password"))
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer pw.Release()
+		ctx, err := jcrypto.NewContext(p, "vault/password", make([]byte, 32))
+		if err != nil {
+			b.Fatal(err)
+		}
+		start, ok := processCPU()
+		for b.Loop() {
+			key, err := p.PasswordKey(pw, ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			key.Release()
+		}
+		reportCPU(b, start, ok)
+	})
+}
+
+// the identity of a container is derived at every opening; on GOST the number
+// of candidates depends on the secret, so 64 secrets take turns and the result
+// is their mean
+func BenchmarkDerivePair(b *testing.B) {
+	each(b, func(b *testing.B, p jcrypto.CryptoProvider) {
+		secrets := make([]*secmem.Buffer, 64)
+		for i := range secrets {
+			raw := make([]byte, p.KeySize())
+			raw[0] = byte(i)
+			s, err := secmem.NewFrom(raw)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer s.Release()
+			secrets[i] = s
+		}
+		ctx, err := jcrypto.NewContext(p, "vault/identity", make([]byte, 32), []byte{0})
+		if err != nil {
+			b.Fatal(err)
+		}
+		start, ok := processCPU()
+		i := 0
+		for b.Loop() {
+			priv, _, err := p.DerivePair(secrets[i%len(secrets)], ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			priv.Release()
+			i++
+		}
+		reportCPU(b, start, ok)
 	})
 }
