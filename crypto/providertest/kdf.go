@@ -175,6 +175,8 @@ func testDeriveKeyBadInput(t *testing.T, p jcrypto.CryptoProvider) {
 		{"purpose of Agree", secret, "agree", ctx, p.KeySize(), jcrypto.ErrBadLabel},
 		{"purpose of MixKey", secret, "mix", ctx, p.KeySize(), jcrypto.ErrBadLabel},
 		{"transcript prefix", secret, "transcript/test", ctx, p.KeySize(), jcrypto.ErrBadLabel},
+		{"purpose of DerivePair", secret, "pair/1", ctx, p.KeySize(), jcrypto.ErrBadLabel},
+		{"name of DerivePair", secret, "pair", ctx, p.KeySize(), jcrypto.ErrBadLabel},
 		{"empty purpose", secret, "", ctx, p.KeySize(), jcrypto.ErrBadLabel},
 		{"upper case", secret, "Cell", ctx, p.KeySize(), jcrypto.ErrBadLabel},
 		{"zero byte", secret, "cell\x00", ctx, p.KeySize(), jcrypto.ErrBadLabel},

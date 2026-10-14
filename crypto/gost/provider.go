@@ -61,10 +61,7 @@ func generate(c *gost3410.Curve) (*secmem.Buffer, []byte, error) {
 			priv.Release()
 			return nil, nil, fmt.Errorf("gost: read random: %w", err)
 		}
-		k := littleEndian(priv.Bytes())
-		ok := k.Sign() > 0 && k.Cmp(c.Q) < 0
-		wipe(k)
-		if ok {
+		if scalarInRange(c.Q, priv.Bytes()) {
 			break
 		}
 	}
@@ -80,6 +77,76 @@ func generate(c *gost3410.Curve) (*secmem.Buffer, []byte, error) {
 		return nil, nil, fmt.Errorf("gost: public key: %w", err)
 	}
 	return priv, pub.Raw(), nil
+}
+
+// with about every second candidate taken, all of them refused has
+// probability below 2^-128, the security level, and the number fits a byte
+const pairDraws = 128
+
+// candidate i is KDF(secret, label, th || u8(i)): one KDF state for the whole
+// call, the number in the seed as TLSTREE and ESPTREE number their keys
+func (p *Provider) DerivePair(secret *secmem.Buffer, ctx jcrypto.Context) (*secmem.Buffer, []byte, error) {
+	if secret == nil || secret.Len() != keySize {
+		return nil, nil, jcrypto.ErrBadKeySize
+	}
+	if !p.owns(ctx) {
+		return nil, nil, jcrypto.ErrBadContext
+	}
+	label, err := jcrypto.Label(p.Suite(), "pair/1")
+	if err != nil {
+		return nil, nil, err
+	}
+	c := curve()
+	priv, err := secmem.New(c.PointSize())
+	if err != nil {
+		return nil, nil, err
+	}
+	kdf := gost34112012256.NewKDF(secret.Bytes())
+	seed := append(ctx.Sum(), 0)
+	err = pickScalar(c.Q, priv.Bytes(), func(i int, dst []byte) {
+		seed[jcrypto.ContextSize] = byte(i)
+		out := kdf.Derive(nil, label, seed)
+		copy(dst, out)
+		secmem.Zero(out)
+	})
+	if err != nil {
+		priv.Release()
+		return nil, nil, err
+	}
+	prv, err := gost3410.NewPrivateKey(c, priv.Bytes())
+	if err != nil {
+		priv.Release()
+		return nil, nil, fmt.Errorf("gost: private key: %w", err)
+	}
+	defer wipe(prv.Key)
+	pub, err := prv.PublicKey()
+	if err != nil {
+		priv.Release()
+		return nil, nil, fmt.Errorf("gost: public key: %w", err)
+	}
+	return priv, pub.Raw(), nil
+}
+
+// rejection sampling without reduction: bit 255 is cleared since q has 255
+// bits, so a candidate is uniform below 2^255 and the one taken uniform on
+// [1, q-1]; the tests drive draw with a stream of their own
+func pickScalar(q *big.Int, dst []byte, draw func(i int, dst []byte)) error {
+	for i := 0; i < pairDraws; i++ {
+		draw(i, dst)
+		dst[len(dst)-1] &= 0x7f
+		if scalarInRange(q, dst) {
+			return nil
+		}
+	}
+	return jcrypto.ErrNoScalar
+}
+
+// raw is little endian, as gogost reads a private key
+func scalarInRange(q *big.Int, raw []byte) bool {
+	k := littleEndian(raw)
+	ok := k.Sign() > 0 && k.Cmp(q) < 0
+	wipe(k)
+	return ok
 }
 
 // the transcript hash goes in twice: its first 8 bytes as the VKO factor, which
