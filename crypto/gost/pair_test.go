@@ -77,6 +77,9 @@ func TestPickScalarStream(t *testing.T) {
 			if i != calls {
 				t.Fatalf("%s: draw %d called with number %d", tc.name, calls, i)
 			}
+			if i >= len(tc.stream) {
+				t.Fatalf("%s: draw %d past the %d candidates of the stream", tc.name, i, len(tc.stream))
+			}
 			copy(d, tc.stream[i])
 			calls++
 		})
@@ -87,8 +90,11 @@ func TestPickScalarStream(t *testing.T) {
 
 	calls := 0
 	err := pickScalar(q, make([]byte, 32), func(_ int, d []byte) {
-		clear(d)
 		calls++
+		if calls > 128 {
+			t.Fatalf("a stream of zeros: draw %d, past the bound of 128", calls)
+		}
+		clear(d)
 	})
 	if !errors.Is(err, jcrypto.ErrNoScalar) || calls != pairDraws || pairDraws != 128 {
 		t.Fatalf("a stream of zeros: %v after %d draws, want ErrNoScalar after 128", err, calls)
@@ -198,12 +204,11 @@ func TestDerivePairFirstCandidateShare(t *testing.T) {
 	for j := 0; j < 2000; j++ {
 		secret := make([]byte, 32)
 		binary.BigEndian.PutUint32(secret, uint32(j))
-		kdf := gost34112012256.NewKDF(secret)
+		draw := drawFrom(gost34112012256.NewKDF(secret), label, seed)
 		dst := make([]byte, 32)
 		draws := 0
 		err := pickScalar(c.Q, dst, func(i int, d []byte) {
-			seed[jcrypto.ContextSize] = byte(i)
-			copy(d, kdf.Derive(nil, label, seed))
+			draw(i, d)
 			draws++
 		})
 		if err != nil {
@@ -229,13 +234,12 @@ func BenchmarkPickScalarWorstCase(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	kdf := gost34112012256.NewKDF(seqBytes(0x40, 32))
-	seed := append(make([]byte, jcrypto.ContextSize), 0)
+	seed := make([]byte, jcrypto.ContextSize+1)
+	draw := drawFrom(gost34112012256.NewKDF(seqBytes(0x40, 32)), label, seed)
 	dst := make([]byte, 32)
 	for b.Loop() {
 		err := pickScalar(c.Q, dst, func(i int, d []byte) {
-			seed[jcrypto.ContextSize] = byte(i)
-			copy(d, kdf.Derive(nil, label, seed))
+			draw(i, d)
 			for k := range d {
 				d[k] = 0xff
 			}
