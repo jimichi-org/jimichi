@@ -384,7 +384,7 @@ this.
   cost gets a new purpose (`pair/2`, `password/2`), not a new scheme version.
 - The DerivePair vectors (both suites: th, priv, pub; in the internal tests also the unclamped raw
   on c25519, and the number of the candidate taken and every refused candidate with its reason on
-  GOST) and the PasswordKey values (both suites, outside -short) were computed by separate Python
+  GOST) and the PasswordKey values (both suites, -short included) were computed by separate Python
   implementations that are not part of the repository. On c25519 these are hashlib, hmac and the
   X25519 of the cryptography package, with the clamping and Argon2id written in the script;
   Argon2id first reproduces the example of RFC 9106 (5.3) and the vectors of the PHC reference
@@ -821,12 +821,13 @@ transcript holding no other value.
   call of the KDF and gost3410.
 - Internal tests of both suites check the steps that keep key material off the heap: the KDF of
   DerivePair is keyed with the secmem bytes of the secret and every candidate it hands out is
-  cleared, and the stretch of PasswordKey takes the password bytes of the buffer and its whole
-  output is cleared, with zeroing on and not with it off. Source checks cover what such tests
-  cannot see, a copy kept on the heap: a library output goes only into a secmem buffer, a copy
-  into one and the clearing of its own slice, every private key number of gogost is wiped by a
-  deferred wipe, and X25519 takes every private key as the bytes of its buffer. providertest
-  checks that under zeroing PasswordKey forces one collection and without it none.
+  cleared, and the stretch of PasswordKey takes the password bytes of the buffer, the salt and the
+  cost of the formula, and its whole output is cleared, with zeroing on and not with it off. Source
+  checks cover what such tests cannot see, a copy kept on the heap: a library output goes only into
+  a secmem buffer, a copy into one and the clearing of its own slice, every private key number of
+  gogost is wiped by a deferred wipe, and X25519 takes every private key as the bytes of its
+  buffer. providertest checks that under zeroing PasswordKey forces one collection and without it
+  none.
 
 ## Known gaps
 
