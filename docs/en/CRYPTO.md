@@ -17,6 +17,8 @@ next to its key, and a client on another suite refuses to start.
 | AEAD | Kuznyechik-MGM (R 1323565.1.026-2019), 16-byte nonce, 16-byte tag | XChaCha20-Poly1305, 24-byte nonce, 16-byte tag |
 | Signature | GOST R 34.10-2012, 256 bit | Ed25519 |
 | Hash | Streebog-256 | SHA-256 |
+| Pair from a secret | KDF_GOSTR3411_2012_256 with the candidate number in the seed, rejection sampling of the scalar in [1, q-1] | HKDF-SHA-256 (the DeriveKey formula), scalar clamping of RFC 7748 |
+| Key from a password | PBKDF2 (R 50.1.111-2016; RFC 8018) with HMAC_GOSTR3411_2012_512 | Argon2id (RFC 9106), t = 3, 64 MiB, p = 4 |
 
 Different nonce sizes and overheads are visible through the interface: wire hardcodes no sizes.
 
@@ -33,6 +35,9 @@ type CryptoProvider interface {
 	MixKey(chain, secret *secmem.Buffer, ctx Context) (*secmem.Buffer, error)
 	DeriveKey(secret *secmem.Buffer, purpose string, ctx Context, size int) (*secmem.Buffer, error)
 	KeySize() int
+
+	DerivePair(secret *secmem.Buffer, ctx Context) (priv *secmem.Buffer, pub []byte, err error)
+	PasswordKey(password *secmem.Buffer, ctx Context) (*secmem.Buffer, error)
 
 	NewAEAD(key *secmem.Buffer) (AEAD, error)
 
@@ -64,6 +69,17 @@ func (c Context) Valid() bool
 func TranscriptBytes(s Suite, exchange string, parts ...[]byte) ([]byte, error)
 func Label(s Suite, purpose string) ([]byte, error)
 func DeriveLabel(s Suite, purpose string) ([]byte, error)
+
+const PasswordMax = 256
+
+func ValidPassword(p []byte) bool
+
+var (
+	ErrBadKeySize, ErrOpen, ErrBadPublicKey error
+	ErrBadLabel, ErrBadContext             error
+	ErrNoScalar                            error // DerivePair on GOST: all 128 candidates out of range
+	ErrBadPassword                         error
+)
 ```
 
 Decisions taken:
@@ -95,6 +111,46 @@ Decisions taken:
   one.
 - crypto/rand is the only standard-library crypto package used outside crypto/: randomness for
   identifiers, serial numbers and padding. It is not counted as a primitive.
+- DerivePair gives an agreement pair of the same shape as GenerateEphemeral, but as a function of
+  a secret of exactly KeySize bytes and a Context: one secret and ctx give one pair, others an
+  independent one. It is a provider method rather than caller code: each suite samples its scalar
+  its own way, the private key never appears outside the provider as a plain slice, and the label
+  `pair/1` is built by the provider, as for Agree and MixKey. A caller passes no purpose and
+  separates pairs through the Context (the exchange name and the parts). The pair serves
+  agreement only and is never passed to Sign (section "Signatures").
+- In the GOST suite a candidate is the output of KDF_GOSTR3411_2012_256 with the number i from 0
+  to 127 at the end of the seed, with bit 255 cleared; the first one with 0 < k < q is taken.
+  q = 2^254 + δ, δ about 2^124, so a candidate is taken with probability slightly above 1/2: 2
+  candidates on average, more than 8 with probability about 2^-8, and all 128 are refused with
+  probability below 2^-128. DerivePair then returns ErrNoScalar, the buffer released and no pair;
+  secmem memory errors are returned as they are. The bound of 128 equals the security level and
+  fits the byte of the number.
+- The candidate number goes into the seed rather than KDF_TREE_GOSTR3411_2012_256 (RFC 7836,
+  4.5): gogost has no KDF_TREE, and a loop of our own over HMAC would be an implementation of a
+  KDF of our own. A number in the seed of KDF_GOSTR3411_2012_256 is what the TC26
+  recommendations do themselves: TLSTREE (RFC 9189) and ESPTREE (RFC 9227) put the key number in
+  the seed. Each candidate is one library KDF call, the same one DeriveKey makes.
+- Rejection sampling rather than extra bits (FIPS 186-5, A.2.1: k = (c mod (q-1)) + 1 from 512
+  bits). Extra bits give a negligible bias and a constant number of calls, but the division on
+  math/big leaves the quotient and working words, equivalent to the key, on the heap with no way
+  to wipe them, and needs two KDF blocks. Rejection sampling only compares, the number made from
+  a candidate is wiped, and the range check is shared with the ephemeral pair. It is the testing
+  candidates technique (FIPS 186-5, A.2.2; SP 800-56A rev. 3, 5.6.1.2.2) with a candidate of
+  bitlen(q) = 255 bits: the scalar taken is uniform on [1, q-1], with no bias. The ephemeral pair
+  takes 256-bit candidates from crypto/rand: the same distribution with twice as many candidates.
+- PasswordKey stretches a password into a key of KeySize bytes. The suite fixes the cost under the
+  purpose `password/1`, and a caller has no cost parameter, so there is no cheap way to the same
+  key. Another cost is the purpose `password/2`; the scheme version stays as it is.
+- A password is 1 to PasswordMax = 256 bytes, taken as typed, without normalisation; 0x00, \r and
+  \n are refused (ValidPassword), so that the command line, the admin port and the provider read
+  one string. Otherwise ErrBadPassword. The call leaves the password buffer as it is.
+- The GOST suite stretches with PBKDF2 and HMAC_GOSTR3411_2012_512 rather than Argon2id: Argon2id
+  has BLAKE2b inside, the GOST suite consists of GOST algorithms only, and the TC26
+  recommendations have no memory-hard function. The iteration count C_GOST = 2600 comes from a
+  one-off measurement on the testbed host, chosen so that the processor time per guess
+  (core-seconds, user + sys from getrusage) is within 0.8-1.25 of Argon2id in the c25519 suite. On
+  GPUs and dedicated hardware PBKDF2, which needs no memory, is cheaper than Argon2id; that cost
+  has not been measured.
 
 ## Key derivation
 
@@ -121,11 +177,14 @@ A label holds no 0x00 byte and is at most 50 bytes long.
 | `noise/split/i2r`, `noise/split/r2i` | 33 / 31 | noise, the direction keys after the handshake | 32 |
 | `e2e/step/key` | 30 / 28 | e2e, the record key | 32 |
 | `e2e/step/next` | 31 / 29 | e2e, the next key of the ratchet chain | 32 |
+| `pair/1` | 24 / 22 | the provider, inside DerivePair | 32 |
+| `password/1` | 28 / 26 | the provider, inside PasswordKey | 32 |
 
 - A purpose and an exchange name: `[a-z0-9]+(/[a-z0-9]+)*`, 1 to 32 bytes.
-- `agree`, `mix` and anything that starts with `transcript/` are reserved to the provider:
-  DeriveKey with such a purpose returns an error, so a caller cannot reproduce the output of
-  Agree or MixKey.
+- `agree`, `mix`, `pair`, `password` and anything that starts with `transcript/`, `pair/` or
+  `password/` are reserved to the provider: DeriveKey with such a purpose returns an error, so a
+  caller cannot reproduce the output of Agree, MixKey, DerivePair or PasswordKey. A provider
+  method with a new label reserves its name and its prefix.
 - The signature domain strings (section "Signatures") are versioned on their own and are not
   part of this scheme.
 
@@ -208,6 +267,14 @@ block), `info(p) = label(p) || 0x00 || th`.
 | Agree | `Z = X25519(priv, pub)`; `PRK = HMAC(key = th, Z)`; `HMAC(PRK, info(agree) \|\| 0x01)` |
 | MixKey | `PRK = HMAC(key = chain, secret)`; `HMAC(PRK, info(mix) \|\| 0x01)` |
 | DeriveKey | `HMAC(secret, info(purpose) \|\| 0x01)[0:size]` |
+| DerivePair | `raw = HMAC(secret, info(pair/1) \|\| 0x01)`; `priv = raw` clamped as in RFC 7748 (section 5): `priv[0] &= 0xf8`, `priv[31] &= 0x7f`, `priv[31] \|= 0x40`; `pub = X25519(priv, 9)` |
+| PasswordKey | `Argon2id(P = password, S = label(password/1) \|\| 0x00 \|\| th, t = 3, m = 65536 KiB, p = 4, T = 32)`, the second recommended option of RFC 9106 (section 4) |
+
+- DerivePair stores the clamped scalar. X25519 clamps the scalar itself, so the public key and
+  every agreement are those the raw output would give, and the private key in the vectors is
+  unambiguous. GenerateEphemeral puts 32 random bytes in its buffer without clamping; the public
+  keys of both are distributed alike.
+- S of PasswordKey is 61 bytes long on c25519 and 59 on GOST.
 
 GOST: VKO_GOSTR3410_2012_256 and KDF_GOSTR3411_2012_256 (RFC 7836, sections 4.3.1 and 4.5),
 `KDF(K, label, seed) = HMAC_Streebog256(K, 0x01 || label || 0x00 || seed || 0x01 || 0x00)`.
@@ -217,11 +284,18 @@ GOST: VKO_GOSTR3410_2012_256 and KDF_GOSTR3411_2012_256 (RFC 7836, sections 4.3.
 | Agree | `UKM = th[0:8]` as a little-endian number, zero replaced by one; `KEK = VKO(priv, pub, UKM)` after the point checks; `KDF(KEK, label(agree), th)` |
 | MixKey | `KDF(chain, label(mix), th \|\| secret)` |
 | DeriveKey | `KDF(secret, label(purpose), th)[0:size]` |
+| DerivePair | for i = 0, 1, ..., 127: `c_i = KDF(secret, label(pair/1), th \|\| u8(i))`, `c_i[31] &= 0x7f`; priv is the first c_i with `0 < LE(c_i) < q`; `pub = LE(x) \|\| LE(y)` of the point `LE(priv)·P`, as for an ephemeral pair; all 128 refused: ErrNoScalar |
+| PasswordKey | `PBKDF2(PRF = HMAC_GOSTR3411_2012_512, P = password, S = label(password/1) \|\| 0x00 \|\| th, c = 2600, dkLen = 32)`: the start of block T_1 |
 
 The GOST profile:
-- K_in is always 256 bits: the KEK, the output of Agree or the output of MixKey.
-- label is a constant of the scheme without 0x00, seed is always 32 bytes, 64 in MixKey. RFC 7836
-  (4.5) requires the protocol to assign label and seed and recommends fixing their lengths.
+- K_in is always 256 bits: the KEK, the output of Agree or the output of MixKey; the secret of
+  DeriveKey and DerivePair is exactly 32 bytes. That is the lower bound of the key length of
+  HMAC_GOSTR3411_2012_256 (RFC 7836, 4.1.1).
+- label is a constant of the scheme without 0x00, seed is always 32 bytes, 64 in MixKey, 33 in
+  DerivePair (th and the candidate number). RFC 7836 (4.5) requires the protocol to assign label
+  and seed and recommends fixing their lengths. The input of DerivePair is unambiguous: the label
+  holds no 0x00, the 01 00 tail is fixed, and the label pair/1 is out of a caller's reach, so it
+  does not meet DeriveKey or MixKey.
 - The output is one block, at most 32 bytes.
 - A 64-bit UKM is taken from the start of the transcript hash, and the whole hash goes into the
   seed. RFC 7836 (4.3.1) allows a UKM of up to half the public key size and recommends 64 bits or
@@ -264,6 +338,10 @@ rotation the published key stays in place and the attempt is counted as a failed
 check that fails for another reason, no room to lock a secret above all, reports that reason and
 not a bad pair.
 
+DerivePair and PasswordKey are meant for the client container
+([#20](https://github.com/jimichi-org/jimichi/issues/20)); the end-to-end packages and the
+conversation driver do not call them.
+
 ### Rules for changes
 
 - The scheme version (now `v2`) changes with any change to the transcript layout, to the
@@ -289,19 +367,34 @@ not a bad pair.
   way to recompute them in the comment. The c25519 values come from a separate Python
   implementation, the GOST values from a composition harness over the providers that matched the
   Python one byte for byte on c25519; every GOST primitive is held by a standard example as well.
+- The derivation `pair/1` and the cost `password/1` are fixed: another pair derivation or another
+  cost gets a new purpose (`pair/2`, `password/2`), not a new scheme version.
+- The DerivePair vectors (both suites: th, priv, pub; in the internal tests also the unclamped raw
+  on c25519, and the number of the candidate taken and every refused candidate with its reason on
+  GOST) and the PasswordKey values (both suites, outside -short) were computed by separate Python
+  implementations that are not part of the repository. On c25519 these are hashlib, hmac and the
+  X25519 of the cryptography package, with the clamping and Argon2id written in the script;
+  Argon2id first reproduces the example of RFC 9106 (5.3) and the vectors of the PHC reference
+  implementation. On GOST, Streebog, HMAC, the KDF, PBKDF2 and the curve arithmetic in affine
+  coordinates are written from the standards with no dependency, and first reproduce RFC 6986 (M1
+  and M2), the examples of RFC 7836 appendix B (HMAC, the KDF and VKO with the public keys of both
+  sides), the examples of R 50.1.111-2016 and every earlier GOST value of crypto/providertest.
+  pygost and openssl with gost-engine serve only as an extra comparison where they are installed.
 
 The provider checks are the same in both suites and run in this order: sizes of the secrets, the
-context, the label, the public key.
+context, the label, the public key; in PasswordKey the password first, then the context.
 
 | Argument | Rule | Error |
 |---|---|---|
 | priv | the private key length of the suite | ErrBadKeySize |
-| secret, chain | exactly KeySize | ErrBadKeySize |
+| secret, chain | exactly KeySize (DeriveKey, MixKey, DerivePair); a released buffer is refused too | ErrBadKeySize |
 | size | 1 to KeySize | ErrBadKeySize |
+| password | 1 to PasswordMax bytes, no 0x00, \r or \n; a released buffer is refused too | ErrBadPassword |
 | ctx | made by NewContext with a provider of the same suite | ErrBadContext |
 | purpose, exchange | the name format; in DeriveKey not one reserved to the provider | ErrBadLabel |
 | transcript parts | 1 to 255, each 1 to 65535 bytes | ErrBadContext |
 | peerPub | the length; a point of small order (on c25519 X25519 itself refuses it); in GOST also a point off the curve or with a coordinate not below p | ErrBadPublicKey |
+| scalar sampling of DerivePair, GOST only | all 128 candidates outside [1, q-1], probability below 2^-128 | ErrNoScalar |
 
 ## Signatures
 
@@ -696,6 +789,19 @@ transcript holding no other value.
   on the heap, while the node signing key lives as long as the process. The copies inside SHA-512
   and edwards25519 remain and are listed under "Known gaps". A test checks the public key and the
   signatures against ed25519.NewKeyFromSeed.
+- PasswordKey in c25519: golang.org/x/crypto/argon2 (IDKey). The 64 MiB matrix lies on the Go
+  heap and the four lanes run in goroutines of their own, so the processor time is about four
+  times the wall time. An internal test checks the function against the vectors of the PHC
+  reference implementation and the cost constants against RFC 9106 (section 4).
+- PasswordKey in GOST: crypto/pbkdf2 of the standard library with gogost's Streebog-512.
+  golang.org/x/crypto/pbkdf2 is a frozen wrapper over the same function that panics on an error.
+  With GODEBUG=fips140=only crypto/pbkdf2 refuses a hash outside SHA-2 and SHA-3, and PasswordKey
+  of the GOST suite returns an error. An internal test checks the function against the examples
+  of R 50.1.111-2016 (c = 1, 2 and 4096, password and salt with zero bytes, dkLen 100).
+- DerivePair in GOST keeps one gogost KDF state (gost34112012256.NewKDF) per call rather than per
+  candidate; the public key is computed as for an ephemeral pair. Internal tests check the
+  sampling against a stream of candidates of their own, and the composition against a direct
+  call of the KDF and gost3410.
 
 ## Known gaps
 
@@ -705,12 +811,14 @@ some of them live long:
 | Where | What | How long |
 |---|---|---|
 | x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct; in the end-to-end layer the key of a handshake message and the key mk_n of every record | for a circuit or link its whole life, never wiped; in the end-to-end layer the struct serves one Seal or Open, and the copy stays until the heap memory is reused; building the AEAD state per call from the secmem key is planned ([#39](https://github.com/jimichi-org/jimichi/issues/39)) |
-| crypto/ecdh | the X25519 scalar, the node's link and onion keys and the client identity key included, and the shared secret, the static-static one (ss) included, which is the same for every session of a pair of clients before the KDF | until the freed heap memory is reused, which can be after the key itself was released |
-| x/crypto hkdf, crypto/hmac | the HMAC pads (key XOR a constant) holding the PRK, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys; the SHA-256 state holding the X25519 shared secret and the second secret of MixKey; the last derived block, mk_n included | until the heap memory is reused; the provider zeroes its own copy of the PRK unless zeroing is off (-keymem none or a list without zero) |
+| crypto/ecdh | the X25519 scalar, the node's link and onion keys, the client identity key and the DerivePair private key while its public key is computed included, and the shared secret, the static-static one (ss) included, which is the same for every session of a pair of clients before the KDF | until the freed heap memory is reused, which can be after the key itself was released |
+| x/crypto hkdf, crypto/hmac | the HMAC pads (key XOR a constant) holding the PRK, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys; the SHA-256 state holding the X25519 shared secret and the second secret of MixKey; the last derived block, mk_n included, and in DerivePair the unclamped private key, equivalent to it | until the heap memory is reused; the provider zeroes its own copy of the PRK unless zeroing is off (-keymem none or a list without zero) |
 | Ed25519 generation and signing | the SHA-512 state with the seed or the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; generation and signing always wipe their own scalars and digests, -keymem none included |
 | gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link; Destroy wipes them unless zeroing is off (-keymem none or a list without zero) |
-| gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys; the Streebog message buffer holding the second secret of MixKey; the last block Streebog computed, kept in the working buffer of the hash and in a temporary block after Sum, half of which is the output: a copy of the KEK and of every Agree, MixKey and DeriveKey output | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer and, unless zeroing is off (-keymem none or a list without zero), zeroes the slices the library returns, not the buffers inside it |
-| gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys and the client identity key included | until the heap memory is reused, which can be after the key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
+| gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys, and the DerivePair secret, one state per call; the Streebog message buffer holding the second secret of MixKey; the last block Streebog computed, kept in the working buffer of the hash and in a temporary block after Sum, half of which is the output: a copy of the KEK, of every Agree, MixKey and DeriveKey output and of every DerivePair candidate, the last of which is the private key taken | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer and, unless zeroing is off (-keymem none or a list without zero), zeroes the slices the library returns, not the buffers inside it |
+| gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys, the client identity key and the DerivePair private key while its public key is computed included | until the heap memory is reused, which can be after the key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
+| x/crypto argon2 (PasswordKey c25519) | the BLAKE2b state with the password and the 64 MiB matrix, derived from the password, never wiped; a block of the matrix checks a password guess for less than the full cost | until the heap memory is reused; with zeroing on, PasswordKey calls debug.FreeOSMemory after the stretch, and the collector returns the freed pages to the kernel, so a process dump no longer holds them. It is a heuristic, not a wipe: physical memory and swap the pages may have reached before are not cleared this way. Locking all memory ([#36](https://github.com/jimichi-org/jimichi/issues/36)) and runtime/secret ([#37](https://github.com/jimichi-org/jimichi/issues/37)) are planned |
+| crypto/pbkdf2 (PasswordKey GOST) | the password as an immutable string and as a copy in the HMAC key, the HMAC-Streebog-512 states with the password XOR ipad and opad, the blocks U and T, equivalent to the output | until the heap memory is reused; FreeOSMemory as in c25519 |
 | gogost, GOST R 34.10 signing | the CA or node signing scalar and the one-time number k as math/big, intermediate points; k and the signature give back the key | until the heap memory is reused; the copies reappear at every signature: the request, the certificate, every descriptor refresh |
 | end-to-end layer | plaintexts: the body passed to Seal and the body Receive returns (e2e zeroes its own record buffer) | with the caller, never wiped |
 | -peer client and mailbox | message bodies and the records held before pinning, which the conversation driver zeroes only once the mailbox has stored a record or the conversation ends; the copies of a request with the fetch capability F that the circuit keeps after Send, while the driver zeroes its own: in client.Client the queue of the fixed schedule and the plaintext buffer wire.Circuit.Seal wraps in the layers; at the mailbox a copy of the request with F in the cell body and in the link buffer after it zeroes its own slice | until the heap memory is reused |
@@ -718,6 +826,24 @@ some of them live long:
 gogost arithmetic on math/big is not constant time. The node's link and onion keys could leak
 through VKO timing to an adversary who times the node's responses; side-channel attacks are
 outside the threat model.
+
+A password together with the Context it was stretched under is equivalent to the output of
+PasswordKey and to everything derived from it, so copies of the password and of the working state
+of the stretch are equivalent to that key.
+
+Timing of DerivePair in the GOST suite:
+- The number of candidates depends on the secret, but the refused candidates are outputs of the
+  pseudorandom function under other numbers, independent of the one taken, and tell nothing about
+  the private key. For one secret the number is constant, so repeated calls with the same secret
+  on one device narrow down both it and the time of the point multiplication. The multiplication
+  time carries what VKO with this key carries.
+- The check 0 < k < q on math/big is not constant time. The top 64-bit word of q is 2^62, so for
+  a candidate that is taken the comparison is decided on the top word, otherwise only with
+  probability about 2^-62; SetBytes drops a zero top word with the same probability. There is no
+  constant-time comparison: gogost's multiplication (double-and-add on math/big) is not constant
+  time anyway.
+- Streebog and Kuznyechik in gogost are table-driven: memory accesses depend on the key in every
+  KDF and AEAD call. Like other side channels, this is outside the threat model.
 
 The Go heap does not move objects, but freed memory is not wiped, and goroutine stacks are copied
 when they grow. Locking and MADV_DONTDUMP do not reach these copies: only secmem pages are locked,
