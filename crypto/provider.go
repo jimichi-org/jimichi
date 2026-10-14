@@ -58,6 +58,10 @@ type CryptoProvider interface {
 	// GenerateEphemeral lays it out; never a signing key
 	DerivePair(secret *secmem.Buffer, ctx Context) (priv *secmem.Buffer, pub []byte, err error)
 
+	// the cost is fixed by the suite under the purpose password/1, so a caller
+	// has no way to ask for a cheaper one
+	PasswordKey(password *secmem.Buffer, ctx Context) (*secmem.Buffer, error)
+
 	NewAEAD(key *secmem.Buffer) (AEAD, error)
 
 	GenerateSigning() (priv *secmem.Buffer, pub []byte, err error)

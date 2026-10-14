@@ -25,11 +25,11 @@ var (
 )
 
 // names reserved to the providers, whole or as a prefix: a caller that could
-// derive under them would reproduce the output of Agree, MixKey, DerivePair or
-// the transcript prefix
+// derive under them would reproduce the output of Agree, MixKey, DerivePair,
+// PasswordKey or the transcript prefix
 var (
-	reservedPurposes = []string{"agree", "mix", "pair"}
-	reservedPrefixes = []string{transcriptNS, "pair/"}
+	reservedPurposes = []string{"agree", "mix", "pair", "password"}
+	reservedPrefixes = []string{transcriptNS, "pair/", "password/"}
 )
 
 // "jimichi/v2/<suite>/<purpose>": no zero byte, so a provider can put one

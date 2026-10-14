@@ -68,6 +68,8 @@ func TestLabels(t *testing.T) {
 		{jcrypto.SuiteGOST, "link/r2i", "jimichi/v2/gost/link/r2i"},
 		{jcrypto.SuiteC25519, "pair/1", "jimichi/v2/c25519/pair/1"},
 		{jcrypto.SuiteGOST, "pair/1", "jimichi/v2/gost/pair/1"},
+		{jcrypto.SuiteC25519, "password/1", "jimichi/v2/c25519/password/1"},
+		{jcrypto.SuiteGOST, "password/1", "jimichi/v2/gost/password/1"},
 	} {
 		got, err := jcrypto.Label(tc.suite, tc.purpose)
 		if err != nil || string(got) != tc.want {
@@ -111,25 +113,26 @@ func TestBadPurposeIsRefused(t *testing.T) {
 	}
 }
 
-// a caller of DeriveKey must not reach the labels of Agree, MixKey and
-// DerivePair or the transcript prefix; the providers get them through Label
+// a caller of DeriveKey must not reach the labels of Agree, MixKey, DerivePair
+// and PasswordKey or the transcript prefix; the providers get them through Label
 func TestReservedPurposes(t *testing.T) {
 	for _, s := range suites {
 		for _, purpose := range []string{
 			"agree", "mix", "transcript/setup", "transcript/link", "transcript/x", "pair", "pair/1", "pair/2",
+			"password", "password/1", "password/2",
 		} {
 			if _, err := jcrypto.DeriveLabel(s, purpose); !errors.Is(err, jcrypto.ErrBadLabel) {
 				t.Fatalf("DeriveLabel(%q): %v, want ErrBadLabel", purpose, err)
 			}
 		}
-		for _, purpose := range []string{"agree", "mix", "pair/1"} {
+		for _, purpose := range []string{"agree", "mix", "pair/1", "password/1"} {
 			if _, err := jcrypto.Label(s, purpose); err != nil {
 				t.Fatalf("Label(%q): %v", purpose, err)
 			}
 		}
 		for _, purpose := range []string{
 			"agree/x", "mixer", "transcript", "e2e/send", "auth/tag", "link/ratchet", "cell/ratchet",
-			"pairs", "pair2", "pairing", "pairs/1",
+			"pairs", "pair2", "pairing", "pairs/1", "passwords", "password2", "passwordkey/1",
 		} {
 			got, err := jcrypto.DeriveLabel(s, purpose)
 			want, _ := jcrypto.Label(s, purpose)

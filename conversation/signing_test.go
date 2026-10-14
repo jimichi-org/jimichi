@@ -39,7 +39,7 @@ func TestNoSignaturesAndNoCryptoOfItsOwn(t *testing.T) {
 		ast.Inspect(f, func(n ast.Node) bool {
 			if sel, ok := n.(*ast.SelectorExpr); ok {
 				switch sel.Sel.Name {
-				case "GenerateSigning", "Sign", "Verify", "GenerateEphemeral", "Agree", "MixKey", "DeriveKey", "DerivePair", "NewAEAD", "Hash":
+				case "GenerateSigning", "Sign", "Verify", "GenerateEphemeral", "Agree", "MixKey", "DeriveKey", "DerivePair", "PasswordKey", "NewAEAD", "Hash":
 					t.Errorf("%s: %s", fset.Position(sel.Pos()), sel.Sel.Name)
 				}
 			}

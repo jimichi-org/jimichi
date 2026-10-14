@@ -32,6 +32,7 @@ func Run(t *testing.T, newProvider func() jcrypto.CryptoProvider) {
 	t.Run("DerivePair", func(t *testing.T) { testDerivePair(t, newProvider()) })
 	t.Run("DerivePairRejectsBadInput", func(t *testing.T) { testDerivePairBadInput(t, newProvider()) })
 	t.Run("GoldenDerivePair", func(t *testing.T) { testGoldenDerivePair(t, newProvider()) })
+	t.Run("PasswordKey", func(t *testing.T) { testPasswordKey(t, newProvider()) })
 	t.Run("AEADRoundTrip", func(t *testing.T) { testAEADRoundTrip(t, newProvider()) })
 	t.Run("AEADDetectsTampering", func(t *testing.T) { testAEADTamper(t, newProvider()) })
 	t.Run("AEADIsSafeForConcurrentUse", func(t *testing.T) { testAEADConcurrent(t, newProvider()) })
