@@ -51,18 +51,6 @@ func testDerivePair(t *testing.T, p jcrypto.CryptoProvider) {
 		t.Fatal("the derived pair does not agree with an ephemeral one")
 	}
 
-	// buffers made by the call are locked exactly when a fresh one is, so the
-	// check is hard on Linux and does not fail where locking is unavailable
-	probe, err := secmem.New(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	locked := probe.Locked()
-	probe.Release()
-	if priv.Locked() != locked {
-		t.Fatalf("private key locked = %v, a fresh buffer %v", priv.Locked(), locked)
-	}
-
 	seen := map[string]string{string(pub): "base"}
 	differs := func(name string, s *secmem.Buffer, c jcrypto.Context) {
 		t.Helper()

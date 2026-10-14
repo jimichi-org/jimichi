@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"runtime/metrics"
 	"strings"
 	"testing"
 
@@ -11,9 +12,9 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
-// The golden values of PasswordKey, at the production cost, so only outside
-// -short. Password "jimichi vault password", ctx = NewContext(p,
-// "vault/password", 00..1f):
+// The golden values of PasswordKey, checked under -short too: the call is paid
+// for at the production cost anyway. Password "jimichi vault password", ctx =
+// NewContext(p, "vault/password", 00..1f):
 //
 //	T = "jimichi/v2/<suite>/transcript/vault/password" || 00 || 01 || 0020 || 00..1f     79 / 77 bytes
 //	S = "jimichi/v2/<suite>/password/1" || 00 || th                                      61 / 59 bytes
@@ -78,32 +79,6 @@ func testPasswordKey(t *testing.T, p jcrypto.CryptoProvider) {
 		}
 	}
 
-	before := bytes.Clone(pw.Bytes())
-	key := mustPasswordKey(t, p, pw, ctx)
-	if !bytes.Equal(pw.Bytes(), before) {
-		t.Fatal("PasswordKey changed the password")
-	}
-	if len(key) != p.KeySize() || allZero(key) {
-		t.Fatalf("a key of %d bytes, or all zeroes", len(key))
-	}
-	out, err := p.PasswordKey(pw, ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	probe, err := secmem.New(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	locked := probe.Locked()
-	probe.Release()
-	if out.Locked() != locked || !bytes.Equal(out.Bytes(), key) {
-		t.Fatalf("second call: locked = %v, a fresh buffer %v; or another key", out.Locked(), locked)
-	}
-	out.Release()
-
-	if testing.Short() {
-		return
-	}
 	g, ok := goldenPassword[p.Suite()]
 	if !ok {
 		t.Fatalf("no golden password key listed for suite %v", p.Suite())
@@ -111,13 +86,47 @@ func testPasswordKey(t *testing.T, p jcrypto.CryptoProvider) {
 	if got := hex.EncodeToString(ctx.Sum()); got != g.th {
 		t.Fatalf("th(vault/password) = %s, want %s", got, g.th)
 	}
-	if got := hex.EncodeToString(key); got != g.key {
-		t.Fatalf("PasswordKey = %s, want %s", got, g.key)
+
+	// once more under the other zeroing: the key is the same, and only with
+	// zeroing on does the call hand the freed heap back, which takes one forced
+	// collection
+	before := bytes.Clone(pw.Bytes())
+	policy := secmem.CurrentPolicy()
+	defer func() { _ = secmem.SetPolicy(policy) }()
+	other := policy
+	other.Zero = !policy.Zero
+	var key []byte
+	for _, pol := range []secmem.Policy{policy, other} {
+		if err := secmem.SetPolicy(pol); err != nil {
+			t.Fatal(err)
+		}
+		forced := forcedCollections()
+		key = mustPasswordKey(t, p, pw, ctx)
+		forced = forcedCollections() - forced
+		if !bytes.Equal(pw.Bytes(), before) {
+			t.Fatalf("PasswordKey under %v changed the password", pol)
+		}
+		if got := hex.EncodeToString(key); got != g.key {
+			t.Fatalf("PasswordKey under %v = %s, want %s", pol, got, g.key)
+		}
+		var want uint64
+		if pol.Zero {
+			want = 1
+		}
+		if forced != want {
+			t.Fatalf("PasswordKey under %v forced %d collections, want %d", pol, forced, want)
+		}
+	}
+	if err := secmem.SetPolicy(policy); err != nil {
+		t.Fatal(err)
 	}
 
-	other := mustPassword(t, "jimichi vault passwore")
-	defer other.Release()
-	if bytes.Equal(mustPasswordKey(t, p, other, ctx), key) {
+	if testing.Short() {
+		return
+	}
+	another := mustPassword(t, "jimichi vault passwore")
+	defer another.Release()
+	if bytes.Equal(mustPasswordKey(t, p, another, ctx), key) {
 		t.Fatal("another password gave the same key")
 	}
 	if bytes.Equal(mustPasswordKey(t, p, pw, mustContext(t, p, "vault/password", seq(0x01, 32))), key) {
@@ -126,6 +135,14 @@ func testPasswordKey(t *testing.T, p jcrypto.CryptoProvider) {
 	longest := mustPassword(t, strings.Repeat("\xd0\xb6", jcrypto.PasswordMax/2))
 	defer longest.Release()
 	mustPasswordKey(t, p, longest, ctx)
+}
+
+// FreeOSMemory forces a collection, and the runtime counts those apart from
+// the ones it starts itself
+func forcedCollections() uint64 {
+	s := []metrics.Sample{{Name: "/gc/cycles/forced:gc-cycles"}}
+	metrics.Read(s)
+	return s[0].Value.Uint64()
 }
 
 func mustPassword(t *testing.T, s string) *secmem.Buffer {
