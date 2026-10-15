@@ -3,6 +3,7 @@ package c25519
 import (
 	"bytes"
 	"go/ast"
+	"go/types"
 	"strings"
 	"testing"
 
@@ -109,6 +110,26 @@ func TestKeyMaterialFlow(t *testing.T) {
 	// GenerateEphemeral, Agree and DerivePair
 	if calls < 3 {
 		t.Fatalf("%d calls of curve25519.X25519 found, want 3 or more", calls)
+	}
+}
+
+// what the stub of the stretch test cannot see: the real stretch hands
+// argon2.IDKey the password parameter as it is, not a copy on the heap where
+// nothing wipes it
+func TestStretchTakesThePassword(t *testing.T) {
+	lit := srccheck.VarFunc(t, srccheck.Files(t, "."), "argon2id")
+	keys := srccheck.Calls(lit.Body, "argon2.IDKey")
+	if len(keys) != 1 || len(keys[0].Args) != 6 {
+		t.Fatalf("argon2id: %d calls of argon2.IDKey, want one", len(keys))
+	}
+	if !srccheck.Param(lit, "password") {
+		t.Fatal("argon2id: password is bound other than as its parameter")
+	}
+	if arg, ok := keys[0].Args[0].(*ast.Ident); !ok || arg.Name != "password" {
+		t.Errorf("argon2id: argon2.IDKey gets %s, not the password parameter", types.ExprString(keys[0].Args[0]))
+	}
+	if n := len(srccheck.Sinks(lit.Body, "password")); n != 1 {
+		t.Errorf("argon2id: %d uses of password, want the argument of argon2.IDKey alone", n)
 	}
 }
 
