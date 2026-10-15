@@ -41,8 +41,9 @@ func absInt(v int) int {
 	return v
 }
 
-// one number reached by different arithmetic parts in the last bits, so values
-// within 1e-9 of their size count as equal
+// the same number reached by different arithmetic differs in the last bits, so
+// values within 1e-9 of the larger count as equal; this is not transitive, and
+// a tie group starts at its smallest value
 func same(a, b float64) bool {
 	if a == b {
 		return true
@@ -79,7 +80,7 @@ func doubledRanks(v []float64) (ranks []int, ties float64) {
 }
 
 // how many subsets of k ranks reach each sum; float64 because the counts
-// outgrow int64 near fifty values a side
+// outgrow int64 from about thirty-four values a side
 func subsetSums(ranks []int, k int) []float64 {
 	top := append([]int(nil), ranks...)
 	sort.Sort(sort.Reverse(sort.IntSlice(top)))
@@ -101,6 +102,17 @@ func subsetSums(ranks []int, k int) []float64 {
 		}
 	}
 	return f[k]
+}
+
+// a single tie group: nothing can separate the samples, and the comparison
+// stays out of the Holm family
+func degenerate(ranks []int) bool {
+	for _, r := range ranks {
+		if r != len(ranks)+1 {
+			return false
+		}
+	}
+	return true
 }
 
 // two-sided p of a statistic dev away from its mean, with the 0.5 continuity
@@ -137,6 +149,11 @@ func MannWhitney(x, y []float64) Test {
 		Statistic: float64(u2) / 2,
 		Effect:    float64(u2-n*m) / float64(n*m),
 	}
+	if degenerate(ranks) {
+		out.P = 1
+		out.Method = "degenerate"
+		return out
+	}
 
 	// the smaller group gives the same distances from nm/2 with a smaller table
 	if k := min(n, m); k*(n+m) <= exactMannWhitney {
@@ -159,8 +176,7 @@ func MannWhitney(x, y []float64) Test {
 }
 
 // Statistic is W, the rank sum of the positive differences x - y. pairs with
-// equal values are dropped; with none left there is nothing to rank, p is 1 and
-// the effect 0
+// equal values are dropped; with none left the comparison is degenerate
 func Wilcoxon(x, y []float64) Test {
 	if len(x) == 0 || len(x) != len(y) || hasNaN(x) || hasNaN(y) {
 		return undefinedTest()
@@ -189,9 +205,12 @@ func Wilcoxon(x, y []float64) Test {
 	mean2 := total2 / 2
 	dev := absInt(w2 - mean2)
 	out := Test{Statistic: float64(w2) / 2}
-	if n > 0 {
-		out.Effect = float64(2*w2-total2) / float64(total2)
+	if n == 0 {
+		out.P = 1
+		out.Method = "degenerate"
+		return out
 	}
+	out.Effect = float64(2*w2-total2) / float64(total2)
 
 	if n <= exactWilcoxon {
 		counts := make([]float64, total2+1)

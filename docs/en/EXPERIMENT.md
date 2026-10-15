@@ -448,9 +448,12 @@ call them with their series.
 
 Procedures:
 
-- Equal values: values that differ by less than 1e-9 of their size count as equal, because one
-  number reached by different arithmetic parts in the last bits. The rule holds for ties and
-  zero differences in every procedure below.
+- Equal values: a and b count as equal when |a - b| is at most 1e-9 max(|a|, |b|), because the
+  same number reached by different arithmetic differs in the last bits. The rule holds for ties
+  and zero differences in every procedure below. It is not transitive, so a group of equal values
+  starts at its smallest value and takes every value within 1e-9 of it. Values with a large
+  offset (absolute timestamps, counters) are not passed to the procedures: by this rule 1e10 + 5
+  and 1e10 are equal.
 - Mann-Whitney U test, two independent samples: x of n values and y of m. U is the number of
   pairs where the x value is larger than the y value, plus half the pairs with equal values, over
   all nm pairs; U/(nm) reads as an AUC. The two-sided p is the share of splits of the pooled
@@ -461,8 +464,10 @@ Procedures:
   z = max(|U - nm/2| - 0.5, 0) / sqrt(nm/12 (n+m+1 - S / ((n+m)(n+m-1)))), where S is the sum of
   t^3 - t over groups of t equal values, and p = 2(1 - F(z)), F the standard normal distribution
   function. With large tie groups the approximation gives too small a p (seven values of 0 and 1
-  in each group: 0.045 against the exact 0.103), with a group of one value too large a p, so the
-  bound sits above the sizes of every series.
+  in each group: 0.045 against the exact 0.103), and a growing sample does not cure it when the
+  ties form rare minority values. So conclusions rest only on the exact p: if a series goes past
+  the bound, the bound is raised before the analysis (the counting grows as the square of
+  min(n, m)(n+m)).
 - Wilcoxon signed-rank test, pairs (x_i, y_i). Pairs with equal x_i and y_i are dropped, leaving
   n' differences d_i = x_i - y_i; their absolute values are ranked with midranks, and W is the
   rank sum of the positive differences. The two-sided p is the share of the 2^n' sign assignments
@@ -489,30 +494,39 @@ Rules:
   the baseline configuration.
 - Per-run metrics (AUC and the like) are bounded, not normally distributed and often sit at the
   edge: a run's AUC is often exactly 1. So the tests are rank tests with no assumption on the
-  distribution, and p is exact at series sizes.
-- Runs are paired when they share random streams. Repeat r of every level of one cmd/lab set is
-  derived from the same seed (-seed and the repeat number), so the levels share client phases and
-  flow gaps, while relay clock phases are each run's own. Levels of one set are compared as pairs
-  by repeat number, by Wilcoxon's test, over the pairs where both runs are clean. Two quantities
-  of one run are compared as pairs in the same way: two attacks on the same links, a watermark and
-  the null level of the detector. Runs with different base seeds are independent and are compared
-  by Mann-Whitney's test.
+  distribution, and p is exact.
+- Runs are paired when they share random streams. cmd/lab derives the seed of repeat r from -seed
+  and r alone, so runs with the same -seed and repeat number, from one set or from separate
+  invocations, share the stream of message gaps and the stream of client phases. A phase from
+  that stream is scaled by the schedule of the level, so it coincides only between levels with
+  the same schedule, and a level without a schedule has no phases; relay clock phases are each
+  run's own. Such runs are compared as pairs by repeat number, by Wilcoxon's test, over the pairs
+  where both runs are clean; the number of dropped pairs is reported alongside, since a pair stays
+  only when both levels survived. A pair shares random numbers, not time: the levels of a set run
+  one after another, and a pair does not cancel drift in host load. Two quantities of one run are
+  compared as pairs in the same way: two attacks on the same links, a watermark and the null level
+  of the detector. Runs with different -seed values are independent and are compared by
+  Mann-Whitney's test.
 - A p-value is reported only together with the effect size, and a significant but negligible
   difference is called negligible.
 - A Holm family holds only comparisons where rejecting the null hypothesis is the result. A
-  comparison whose outcome is exact by construction (the same value in every run of both groups)
-  and an undefined comparison (an empty group) are not tested and do not enter the family.
+  comparison whose outcome is exact by construction (the same value in every run of both groups,
+  which the procedure marks as degenerate) and an undefined comparison (an empty group) are not
+  tested and do not enter the family.
 - Agreement with a model and equality with guessing are not inferred from a non-significant p:
   with few runs a non-significant p shows nothing, and Holm's correction would only make such a
   claim easier. A proportion inside +-2 SE of the model is the same non-rejection, so the deviation
   in SE is reported as a consistency check, not as agreement. Agreement is claimed as equivalence:
   before the series the block sets a margin and claims agreement only when the 95 percent interval
-  for the measured quantity lies entirely inside the model value plus or minus the margin. For AUC
-  the default margin is 0.05, the corridor [0.45, 0.55]. The quantity a block compares with the
-  corridor must not hide separation on both sides of 0.5: a mix of runs at AUC 0.2 and 0.8 has a
-  median of 0.5 but is not guessing. The block sets the quantity, its interval, the margin and the
-  number of runs at which the interval can fit inside the margin at all, given the step of the
-  quantity itself; the intervals are planned with the series
+  for the measured quantity lies entirely inside the model value plus or minus the margin; with k
+  such claims in a block the intervals are taken at level 1 - 0.05/k. For AUC the default margin
+  is 0.05, the corridor [0.45, 0.55]. Under exact guessing the quantity a block compares with the
+  corridor must lie well inside it: the folded per-run AUC max(AUC, 1 - AUC) is pushed upward by
+  noise and with few flows can lie above 0.55 at any number of runs. It must also bound the share
+  of runs that separate, not only the centre: a mix of runs at AUC 0.2 and 0.8, and 22 runs at
+  AUC 0.5 next to 8 at 0.8, both have a median of 0.5 but are not guessing. The block sets the
+  quantity, its interval, the margin and the number of runs, given the step of the quantity
+  itself, before the series; the intervals are planned with the series
   ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
 - The smallest exact p that can be reached is 2/2^n' for Wilcoxon and 2/C(n+m, n) for
   Mann-Whitney with equal groups or without ties; with unequal groups and ties the null
@@ -523,7 +537,8 @@ Rules:
   per point therefore serves only to size the series, and conclusions rest on the series.
 - Series size, planned ([#23](https://github.com/jimichi-org/jimichi/issues/23)): before a series,
   a pilot of five runs per point on the same code revision. Power is computed by resampling the
-  pilot runs with one group shifted by 0.05 AUC, by the same exact test the series will use, at
+  pilot runs with one group shifted by 0.05 AUC away from the nearer end of [0, 1], by the same
+  exact test the series will use, at
   Holm's first threshold, and for paired comparisons on the number of nonzero differences. The
   size is the smallest number of runs with power 0.8; a series point takes the larger of 30 and
   that size, and pilot runs do not enter the series.

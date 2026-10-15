@@ -69,17 +69,10 @@ func TestMannWhitneyExactKnownAnswer(t *testing.T) {
 		// U = 1.5 twice, nm/2 = 1. only U = 0 lies 1 away: p = 1/3. the null
 		// distribution is not symmetric, and doubling the lower tail would give 2/3
 		{"ties, asymmetric null", []float64{1, 1}, []float64{2}, 0, 1.0 / 3, -1},
-		// every split gives U = nm/2 = 3, so every split is as far as the observed
-		{"all tied", repeat(5, 2), repeat(5, 3), 3, 1, 0},
 	}
 	for _, c := range cases {
 		checkTest(t, c.name, metrics.MannWhitney(c.x, c.y), c.u, c.p, c.effect, "exact")
 	}
-
-	// 0.1 + 0.2 = 0.30000000000000004 in float64 is within 1e-9 of 0.3, a tie:
-	// U = 0.5 = nm/2, delta 0, p = 1 (compared bit for bit, U would be 1)
-	a, b := 0.1, 0.2
-	checkTest(t, "equal within 1e-9", metrics.MannWhitney([]float64{a + b}, []float64{0.3}), 0.5, 1, 0, "exact")
 }
 
 func TestMannWhitneyExactWithHeavyTies(t *testing.T) {
@@ -133,9 +126,17 @@ func TestMannWhitneyNormalWithTies(t *testing.T) {
 	want := math.Erfc(152.5 / math.Sqrt(2601.0/12*(103-272850.0/10302)) / math.Sqrt2)
 	checkTest(t, "binary 51 and 51", metrics.MannWhitney(x, y), 1453.5, want, 306.0/2601, "normal")
 
-	// all 102 tied: ties = 102^3 - 102 = 102*101*103, divided by N(N-1) it is
-	// 103 = N+1, so the variance is 0, U = nm/2 and p = 1
-	checkTest(t, "all tied", metrics.MannWhitney(repeat(0.5, 51), repeat(0.5, 51)), 1300.5, 1, 0, "normal")
+}
+
+func TestMannWhitneyDegenerate(t *testing.T) {
+	// one tie group: every split gives U = nm/2 (3 here, 1300.5 for 51 and 51),
+	// so p = 1 and delta 0, and the comparison is marked to stay out of Holm
+	checkTest(t, "small", metrics.MannWhitney(repeat(5, 2), repeat(5, 3)), 3, 1, 0, "degenerate")
+	checkTest(t, "large", metrics.MannWhitney(repeat(0.5, 51), repeat(0.5, 51)), 1300.5, 1, 0, "degenerate")
+	// 0.1 + 0.2 = 0.30000000000000004 in float64 is within 1e-9 of 0.3, so the
+	// three values are one group: U = 1 = nm/2 (bit for bit it would be 1.5)
+	a, b := 0.1, 0.2
+	checkTest(t, "within 1e-9", metrics.MannWhitney([]float64{a + b, 0.3}, []float64{0.3}), 1, 1, 0, "degenerate")
 }
 
 func TestMannWhitneySymmetric(t *testing.T) {
@@ -181,8 +182,6 @@ func TestWilcoxonExactKnownAnswer(t *testing.T) {
 		// at most 1.5 are {}, {1.5}, {1.5}: three; their complements have sum at
 		// least 13.5: three more. p = 6/32
 		{"zero and ties", []float64{5, 6, 4, 7, 7, 8}, repeat(5, 6), 13.5, 6.0 / 32, 0.8},
-		// no difference is left: one assignment, W = 0 at its mean, p = 1
-		{"all zero", seq(1, 4), seq(1, 4), 0, 1, 0},
 		// eleven differences of one size, nine positive: every rank is 6, so
 		// W = 6k with k the number of plus signs, binomial(11, 1/2). W = 54,
 		// mean 33, and |6k - 33| >= 21 means k >= 9 or k <= 2:
@@ -239,6 +238,11 @@ func TestWilcoxonEqualWithin1e9(t *testing.T) {
 	// of 3, mean 1.5; the sums 0 1 2 3 lie 1.5 0.5 0.5 1.5 away: p = 2/4
 	inf := math.Inf(1)
 	checkTest(t, "infinite", metrics.Wilcoxon([]float64{inf, inf, 1}, []float64{inf, 0, 0}), 3, 0.5, 1, "exact")
+}
+
+func TestWilcoxonDegenerate(t *testing.T) {
+	// no difference is left: W = 0, p = 1, effect 0, marked to stay out of Holm
+	checkTest(t, "all zero", metrics.Wilcoxon(seq(1, 4), seq(1, 4)), 0, 1, 0, "degenerate")
 }
 
 func TestWilcoxonUndefined(t *testing.T) {
