@@ -38,22 +38,23 @@ func vacant(path string) error {
 }
 
 // a hard link never replaces its target, so an existing container is never
-// overwritten, and the file appears whole or not at all. linked reports that
-// path names the data, whatever the error after the link
-func create(path string, data []byte) (linked bool, err error) {
+// overwritten, and the file appears whole or not at all. reached reports that
+// the tmp was opened, so its blocks may hold the data; linked that path names
+// the data, whatever the error after the link
+func create(path string, data []byte) (reached, linked bool, err error) {
 	tmp := path + tmpSuffix
-	if err := writeTmp(tmp, data); err != nil {
+	if reached, err := writeTmp(tmp, data); err != nil {
 		_ = os.Remove(tmp)
-		return false, fmt.Errorf("vault: write: %w", err)
+		return reached, false, fmt.Errorf("vault: write: %w", err)
 	}
 	if err := os.Link(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		if errors.Is(err, fs.ErrExist) {
-			return false, ErrExists
+			return true, false, ErrExists
 		}
-		return false, fmt.Errorf("vault: link: %w", err)
+		return true, false, fmt.Errorf("vault: link: %w", err)
 	}
-	return true, settle(tmp, filepath.Dir(path))
+	return true, true, settle(tmp, filepath.Dir(path))
 }
 
 // the steps after the link; replaced in tests to fail as a drive fails there.
@@ -65,10 +66,10 @@ var settle = func(tmp, dir string) error {
 	return syncDir(dir)
 }
 
-func writeTmp(tmp string, data []byte) error {
+func writeTmp(tmp string, data []byte) (opened bool, err error) {
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return err
+		return false, err
 	}
 	_, err = f.Write(data)
 	if err == nil {
@@ -77,7 +78,7 @@ func writeTmp(tmp string, data []byte) error {
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
-	return err
+	return true, err
 }
 
 // reads at most one byte past the size of a container, whatever the file is

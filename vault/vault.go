@@ -219,19 +219,22 @@ func (d *Draft) Write(path string, fill Fill) error {
 	if err := vacant(path); err != nil {
 		return err
 	}
-	if d.image == nil {
-		file := bytes.Clone(d.file)
-		if err := sealChecked(d.p, d.key, d.first, d.plain, areaOf(file, d.first)); err != nil {
+	image := d.image
+	if image == nil {
+		image = bytes.Clone(d.file)
+		if err := sealChecked(d.p, d.key, d.first, d.plain, areaOf(image, d.first)); err != nil {
 			return err
 		}
-		d.image = file
 	}
-	linked, err := create(path, d.image)
+	reached, linked, err := create(path, image)
+	if reached {
+		d.image = image
+	}
 	if !linked {
 		return err
 	}
 	d.written = true
-	if rerr := d.readBack(path, d.image); err == nil {
+	if rerr := d.readBack(path, image); err == nil {
 		err = rerr
 	}
 	d.key.Release()

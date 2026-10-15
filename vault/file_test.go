@@ -80,6 +80,36 @@ func TestNeverReplacesAFile(t *testing.T) {
 	})
 }
 
+// a tmp that cannot be opened holds no byte of the container, so the attempt
+// fixes nothing and the content can still change
+func TestUnopenedTmpFixesNothing(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p *spy) {
+		d, err := Prepare(p, volume(t, "a", []byte("x")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+		missing := filepath.Join(t.TempDir(), "no such directory", "peer.vault")
+		if err := d.Write(missing, nil); err == nil || errors.Is(err, ErrWritten) {
+			t.Fatalf("Write under a missing directory: %v", err)
+		}
+		if d.image != nil {
+			t.Fatal("an attempt that opened no tmp fixed the bytes")
+		}
+		path := vaultPath(t)
+		if err := d.Write(path, content([]byte("changed"))); err != nil {
+			t.Fatalf("Write after an unopened tmp: %v", err)
+		}
+		file, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v, _ := mustOpen(t, p, file, password(t, "a")); string(v.Content()) != "changed" {
+			t.Fatalf("content %q", v.Content())
+		}
+	})
+}
+
 // a file that appears after the check of the path and before the link makes
 // the link refuse once the tmp is on the drive. The retry writes the same
 // bytes, so the drive never holds two versions of one container, and a fill
@@ -229,7 +259,7 @@ func TestKilledBeforeLink(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer d.Close()
-		if err := writeTmp(path+tmpSuffix, d.file); err != nil {
+		if _, err := writeTmp(path+tmpSuffix, d.file); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -246,7 +276,7 @@ func TestKilledBeforeLink(t *testing.T) {
 		}
 
 		// a Write after a kill clears the leftover itself
-		if err := writeTmp(path+tmpSuffix, []byte("left by a killed creation")); err != nil {
+		if _, err := writeTmp(path+tmpSuffix, []byte("left by a killed creation")); err != nil {
 			t.Fatal(err)
 		}
 		if err := d.Write(path, nil); err != nil {

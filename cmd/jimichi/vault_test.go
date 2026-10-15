@@ -371,6 +371,10 @@ func TestVaultInitFailureAfterLink(t *testing.T) {
 		if err := prev(p, path, volumes...); err != nil {
 			return err
 		}
+		// as a tmp whose removal failed: a second name of the container
+		if err := os.Link(path, path+".tmp"); err != nil {
+			return err
+		}
 		return fmt.Errorf("%w, but %w", vault.ErrWritten, injected)
 	}
 	t.Cleanup(func() { createVault = prev })

@@ -170,7 +170,12 @@ func removeLinked(path string, err error) error {
 	if !errors.Is(err, vault.ErrWritten) {
 		return err
 	}
-	if rerr := os.Remove(path); rerr != nil {
+	// a tmp whose removal failed after the link is a second name of the file
+	rerr := os.Remove(path)
+	if cerr := vault.Clean(path); rerr == nil {
+		rerr = cerr
+	}
+	if rerr != nil {
 		return fmt.Errorf("%w; the file is left: %v", err, rerr)
 	}
 	return fmt.Errorf("%w; the file is removed", err)
