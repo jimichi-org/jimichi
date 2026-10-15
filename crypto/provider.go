@@ -62,8 +62,9 @@ type CryptoProvider interface {
 	// the cost is fixed by the suite under the purpose password/1, so a caller
 	// has no way to ask for a cheaper one. The salt is the transcript hash of
 	// ctx, whose parts the provider cannot see: the caller puts a fresh random
-	// part of at least 16 bytes per container and per volume into it. Password
-	// strength and the rate of attempts are the caller's too
+	// part of at least 16 bytes per container into it, one for all its volumes
+	// since one stretch tries them all. Password strength and the rate of
+	// attempts are the caller's too
 	PasswordKey(password *secmem.Buffer, ctx Context) (*secmem.Buffer, error)
 
 	NewAEAD(key *secmem.Buffer) (AEAD, error)
