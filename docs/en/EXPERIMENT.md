@@ -394,11 +394,7 @@ run.
   resamples. Across repeats the summary gives the median, the minimum and the maximum; an
   interval for the median across repeats is planned with the full series
   ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
-- Planned with the full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)):
-  comparisons by Mann-Whitney U at 0.05, always with an effect size (Cliff's delta), a
-  significant but negligible difference reported as such; Holm's correction for multiple
-  comparisons; the sample size needed to detect an AUC difference of 0.05 at power 0.8, computed
-  before a series.
+- Configurations and attacks are compared under one convention, section "Comparisons" below.
 - The attack implemented so far has no training step. A learned attack, once added, will be
   trained and evaluated on separate samples, split by time, with no feature leakage.
 - A relay closes a circuit when a counter breaks the order (a copy, a gap, a step back, a jump, or
@@ -439,6 +435,105 @@ run.
   circuit that closed and, when a node forwards at once, cells towards the next node and replies
   of the exit whose write met a link that node had already closed itself. A write that fails for
   any other reason closes the circuit and is counted in relay_broken_circuits, not here.
+
+### Comparisons
+
+One convention for the full series of block 1
+([#23](https://github.com/jimichi-org/jimichi/issues/23)), blocks 2
+([#116](https://github.com/jimichi-org/jimichi/issues/116)) and 3
+([#117](https://github.com/jimichi-org/jimichi/issues/117)) and traffic indistinguishability
+([#119](https://github.com/jimichi-org/jimichi/issues/119)). The procedures are implemented once in
+lab/metrics (stats.go) and checked by tests with hand-computed answers; the block summaries will
+call them with their series.
+
+Procedures:
+
+- Equal values: values that differ by less than 1e-9 of their size count as equal, because one
+  number reached by different arithmetic parts in the last bits. The rule holds for ties and
+  zero differences in every procedure below.
+- Mann-Whitney U test, two independent samples: x of n values and y of m. U is the number of
+  pairs where the x value is larger than the y value, plus half the pairs with equal values, over
+  all nm pairs; U/(nm) reads as an AUC. The two-sided p is the share of splits of the pooled
+  sample into groups of n and m values whose |U - nm/2| is at least the observed one; equal values
+  get the midrank. While min(n, m)(n+m) is at most 5000 (which includes up to 50 values in each
+  group), p is exact: the distribution of U over all C(n+m, n) splits is obtained by counting rank
+  sums. Above the bound, the normal approximation with tie and continuity corrections:
+  z = max(|U - nm/2| - 0.5, 0) / sqrt(nm/12 (n+m+1 - S / ((n+m)(n+m-1)))), where S is the sum of
+  t^3 - t over groups of t equal values, and p = 2(1 - F(z)), F the standard normal distribution
+  function. With large tie groups the approximation gives too small a p (seven values of 0 and 1
+  in each group: 0.045 against the exact 0.103), with a group of one value too large a p, so the
+  bound sits above the sizes of every series.
+- Wilcoxon signed-rank test, pairs (x_i, y_i). Pairs with equal x_i and y_i are dropped, leaving
+  n' differences d_i = x_i - y_i; their absolute values are ranked with midranks, and W is the
+  rank sum of the positive differences. The two-sided p is the share of the 2^n' sign assignments
+  whose |W - n'(n'+1)/4| is at least the observed one: exact, by counting rank sums, when n' is at
+  most 100, otherwise
+  z = max(|W - n'(n'+1)/4| - 0.5, 0) / sqrt(n'(n'+1)(2n'+1)/24 - S/48), with S the same sum over
+  groups of equal absolute values, and p = 2(1 - F(z)).
+- Effect size, from -1 to 1. For Mann-Whitney it is Cliff's delta: (pairs with x > y minus pairs
+  with x < y) / (nm), that is 2U/(nm) - 1. For Wilcoxon the matched-pairs rank-biserial
+  correlation (Kerby, 2014): (W - W') / (W + W'), where W' is the rank sum of the negative
+  differences; its sign is always on the side W departs to, and for independent samples the same
+  measure is Cliff's delta. Cliff's delta on paired data would describe the overlap of two
+  distributions and could point the opposite way to the test. Magnitude for both measures by the
+  thresholds of Romano et al. (2006): an absolute value below 0.147 is negligible, below 0.33
+  small, below 0.474 medium, otherwise large.
+- Holm's correction for a family of k comparisons: the p-values are sorted ascending,
+  p(1) <= ... <= p(k); the adjusted p(j) is the largest (k - i + 1) p(i) over i <= j, capped at 1.
+  A hypothesis is rejected when its adjusted p is at most 0.05.
+
+Rules:
+
+- Tests are two-sided at 0.05 per family after Holm's correction. A family is the set of
+  comparisons that answer one question of a block, for example every level of one factor against
+  the baseline configuration.
+- Per-run metrics (AUC and the like) are bounded, not normally distributed and often sit at the
+  edge: a run's AUC is often exactly 1. So the tests are rank tests with no assumption on the
+  distribution, and p is exact at series sizes.
+- Runs are paired when they share random streams. Repeat r of every level of one cmd/lab set is
+  derived from the same seed (-seed and the repeat number), so the levels share client phases and
+  flow gaps, while relay clock phases are each run's own. Levels of one set are compared as pairs
+  by repeat number, by Wilcoxon's test, over the pairs where both runs are clean. Two quantities
+  of one run are compared as pairs in the same way: two attacks on the same links, a watermark and
+  the null level of the detector. Runs with different base seeds are independent and are compared
+  by Mann-Whitney's test.
+- A p-value is reported only together with the effect size, and a significant but negligible
+  difference is called negligible.
+- A Holm family holds only comparisons where rejecting the null hypothesis is the result. A
+  comparison whose outcome is exact by construction (the same value in every run of both groups)
+  and an undefined comparison (an empty group) are not tested and do not enter the family.
+- Agreement with a model and equality with guessing are not inferred from a non-significant p:
+  with few runs a non-significant p shows nothing, and Holm's correction would only make such a
+  claim easier. A proportion inside +-2 SE of the model is the same non-rejection, so the deviation
+  in SE is reported as a consistency check, not as agreement. Agreement is claimed as equivalence:
+  before the series the block sets a margin and claims agreement only when the 95 percent interval
+  for the measured quantity lies entirely inside the model value plus or minus the margin. For AUC
+  the default margin is 0.05, the corridor [0.45, 0.55]. The quantity a block compares with the
+  corridor must not hide separation on both sides of 0.5: a mix of runs at AUC 0.2 and 0.8 has a
+  median of 0.5 but is not guessing. The block sets the quantity, its interval, the margin and the
+  number of runs at which the interval can fit inside the margin at all, given the step of the
+  quantity itself; the intervals are planned with the series
+  ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
+- The smallest exact p that can be reached is 2/2^n' for Wilcoxon and 2/C(n+m, n) for
+  Mann-Whitney with equal groups or without ties; with unequal groups and ties the null
+  distribution can be asymmetric and the floor drops to 1/C(n+m, n). With five runs per group
+  that is 2/252, about 0.0079, so in a family of more than six comparisons no difference passes
+  Holm's first threshold 0.05/k. With five pairs it is 2/32 = 0.0625, so a paired comparison is
+  not significant even alone; zero differences lower n' and raise the floor. A pilot of five runs
+  per point therefore serves only to size the series, and conclusions rest on the series.
+- Series size, planned ([#23](https://github.com/jimichi-org/jimichi/issues/23)): before a series,
+  a pilot of five runs per point on the same code revision. Power is computed by resampling the
+  pilot runs with one group shifted by 0.05 AUC, by the same exact test the series will use, at
+  Holm's first threshold, and for paired comparisons on the number of nonzero differences. The
+  size is the smallest number of runs with power 0.8; a series point takes the larger of 30 and
+  that size, and pilot runs do not enter the series.
+
+| Block | Unit of observation | What is compared | Procedure | Why |
+|---|---|---|---|---|
+| 1, full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run | attack AUC at each level of a factor against the baseline configuration of the same set | Wilcoxon by repeat number with the rank-biserial correlation, Holm over the levels of one factor; between sets with different seeds Mann-Whitney with Cliff's delta | repeat r of every level of a set is derived from one seed, so these are pairs |
+| 2 ([#116](https://github.com/jimichi-org/jimichi/issues/116)) | clean run | watermark detector AUC against its null level in the same run; configurations of the block against each other | against the null level Wilcoxon; configurations by the pairing rule above; Holm over the configurations; resistance threshold by equivalence | the null level is the same detector on unmarked flows of the same run |
+| 3 ([#117](https://github.com/jimichi-org/jimichi/issues/117)) | established chain for proportions, clean run for AUC | proportions against the model; residual linking AUC from the vantage point of the rogue nodes against the A1 AUC on the same runs; scenarios of the block against each other | proportions: equivalence with a margin, deviation in SE as a consistency check; AUC: Wilcoxon; Holm over non-degenerate comparisons | the model proportion is known exactly, so the question is agreement, not rejection; both attacks watch the same links of one run |
+| Traffic indistinguishability ([#119](https://github.com/jimichi-org/jimichi/issues/119)) | clean run | AUC of the cell distinguisher in the immediate mode against the constant rate | by the pairing rule above; equality with guessing by equivalence | indistinguishability is claimed by equivalence, not by a non-significant p |
 
 ## Threats to validity
 
