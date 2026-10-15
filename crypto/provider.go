@@ -30,6 +30,9 @@ var (
 	ErrBadKeySize   = errors.New("crypto: bad key size")
 	ErrOpen         = errors.New("crypto: message authentication failed")
 	ErrBadPublicKey = errors.New("crypto: bad public key")
+	// only the GOST sampling of DerivePair: every candidate was out of range,
+	// which happens with probability below 2^-128; memory errors stay apart
+	ErrNoScalar = errors.New("crypto: no scalar in range")
 )
 
 // secrets cross this boundary as secmem buffers, never as plain slices, so a
@@ -50,6 +53,18 @@ type CryptoProvider interface {
 	DeriveKey(secret *secmem.Buffer, purpose string, ctx Context, size int) (*secmem.Buffer, error)
 
 	KeySize() int
+
+	// an agreement pair that is a function of secret and ctx, laid out as
+	// GenerateEphemeral lays it out; never a signing key, though in GOST Sign
+	// would take it, so keeping it from Sign is the caller's
+	DerivePair(secret *secmem.Buffer, ctx Context) (priv *secmem.Buffer, pub []byte, err error)
+
+	// the cost is fixed by the suite under the purpose password/1, so a caller
+	// has no way to ask for a cheaper one. The salt is the transcript hash of
+	// ctx, whose parts the provider cannot see: the caller puts a fresh random
+	// part of at least 16 bytes per container and per volume into it. Password
+	// strength and the rate of attempts are the caller's too
+	PasswordKey(password *secmem.Buffer, ctx Context) (*secmem.Buffer, error)
 
 	NewAEAD(key *secmem.Buffer) (AEAD, error)
 

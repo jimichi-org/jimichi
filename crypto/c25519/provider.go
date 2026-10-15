@@ -108,6 +108,44 @@ func (p *Provider) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.
 	return expand(secret.Bytes(), info(label, ctx.Sum()), size)
 }
 
+// the DeriveKey formula under the label pair/1, clamped in place: X25519 clamps
+// anyway, so the public key and every agreement are those of the raw output,
+// and the stored private key has one encoding
+func (p *Provider) DerivePair(secret *secmem.Buffer, ctx jcrypto.Context) (*secmem.Buffer, []byte, error) {
+	var s []byte
+	if secret != nil {
+		s = secret.Bytes()
+	}
+	if len(s) != keySize {
+		return nil, nil, jcrypto.ErrBadKeySize
+	}
+	if !p.owns(ctx) {
+		return nil, nil, jcrypto.ErrBadContext
+	}
+	label, err := jcrypto.Label(p.Suite(), "pair/1")
+	if err != nil {
+		return nil, nil, err
+	}
+	priv, err := expand(s, info(label, ctx.Sum()), privSize)
+	if err != nil {
+		return nil, nil, err
+	}
+	clamp(priv.Bytes())
+	pub, err := curve25519.X25519(priv.Bytes(), curve25519.Basepoint)
+	if err != nil {
+		priv.Release()
+		return nil, nil, fmt.Errorf("c25519: derive public key: %w", err)
+	}
+	return priv, pub, nil
+}
+
+// RFC 7748, section 5 (decodeScalar25519)
+func clamp(k []byte) {
+	k[0] &= 0xf8
+	k[31] &= 0x7f
+	k[31] |= 0x40
+}
+
 func (p *Provider) owns(ctx jcrypto.Context) bool {
 	return ctx.Valid() && ctx.Suite() == p.Suite()
 }
