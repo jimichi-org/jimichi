@@ -24,9 +24,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   TC26 recommendations have no memory-hard function; c25519 uses Argon2id with 64 MiB. The
   iteration count matches the processor time of Argon2id only for gogost's Streebog in the Linux
   containers of the testbed. Outside a container, with an optimised Streebog and above all on
-  GPUs and dedicated hardware a guess costs less; by how much has not been measured. The client
-  container that will use the key is planned
-  ([#20](https://github.com/jimichi-org/jimichi/issues/20)).
+  GPUs and dedicated hardware a guess costs less; by how much has not been measured
+  ([#161](https://github.com/jimichi-org/jimichi/issues/161)). The client container takes this
+  key (ARCHITECTURE, "Client container").
 - Go runtime: libraries keep their own copies of keys on the heap. The AEAD working key in
   x/crypto stays there for the life of the circuit or link and is never wiped: it remains after
   that until the memory is reused. secmem protects only its own buffers; CRYPTO lists the copies.
@@ -269,9 +269,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   "Store"); such queues stand in the way of new pairs. Quotas are planned
   ([#84](https://github.com/jimichi-org/jimichi/issues/84)).
 - The identity and the pin of a -peer client live only in process memory: a restart of either
-  client gives a new identity and needs a new introduction (scripts/introduce.sh). Lasting storage
-  is planned with the container ([#20](https://github.com/jimichi-org/jimichi/issues/20)). The
-  stopped state after a foreign card is ended only by the operator.
+  client gives a new identity and needs a new introduction (scripts/introduce.sh). The client
+  container is implemented, while the -peer client with it (-vault), whose identity survives a
+  restart, is planned ([#20](https://github.com/jimichi-org/jimichi/issues/20)). The stopped state
+  after a foreign card is ended only by the operator.
 - The introduction trusts the kube API: whoever has pods/log and pods/portforward on the client
   pods can pin any card before the first pin or after a restart of the client. This is the same
   root of trust as certificate issuance. A script, not people, compares the card hashes
@@ -473,16 +474,59 @@ English | [Русский](../ru/LIMITATIONS.md)
   separately and without traffic (EXPERIMENT, block 3).
 - The dataset is synthetic: message traffic is generated, messages of one size with exponential
   gaps between them, not captured from real users.
-- The client container with two volumes is planned, not implemented
-  ([#20](https://github.com/jimichi-org/jimichi/issues/20)); this limit and the two after it
-  belong to its design. Its plausible deniability will break through the environment rather than
-  the cryptography: filesystem journals, shadow copies, timestamps, and wear-leveling and TRIM on
-  SSDs leave traces of writes where the decoy says nothing happened. Hidden volumes of TrueCrypt
-  and VeraCrypt were detected exactly this way.
-- Its deniability will not protect against coercion to surrender a password: it provides a cover
-  story, not immunity.
-- An adversary holding several snapshots of the container over time will see changes in the areas
-  the decoy claims are unused. The property is not claimed against that adversary.
+- Client container (ARCHITECTURE, "Client container"): no key is on disk, but the file and a
+  volume password reproduce the identity key and F. Against seizure of the file together with the
+  password the strength is that of a key stored under a password.
+- Changing the password changes the identity. The pin on the peer's side is permanent, so a new
+  introduction needs a new container on the peer's side too.
+- A password a person chose: the claim about the second volume is not made for it. On GOST PBKDF2
+  needs no memory and is cheaper than Argon2id on GPUs; the GPU cost is not measured
+  ([#161](https://github.com/jimichi-org/jimichi/issues/161)). A generated password is printed
+  once; terminal history and redirected output are the user's responsibility.
+- Coercion: the software is known to have two regions, and a coercer will demand a second
+  password. This is a cover story, not immunity. The cover story is plausible only while it is
+  used: an inactive queue of the decoy at the mailbox and a decoy contact that never answers give
+  it away.
+- A surrendered volume gives the identity key and F (by derivation) for the whole life of the
+  container: one can pose as the owner to the contact, take and delete the records of the owner's
+  queue, see the tie to the contact. There is no rotation or revocation
+  ([#160](https://github.com/jimichi-org/jimichi/issues/160)), the only way out is a new
+  container on both sides.
+- An active adversary between seizures: replacing the other region with a fresh empty volume does
+  not disturb the decoy, while the owner of the second volume gets the same error as for a wrong
+  password. If the owner recreates the container on the same device, the next seizure shows it
+  (THREAT_MODEL, advice to the owner).
+- Filesystem metadata of one state: mtime, ctime and the creation time show the moment of
+  creation, atime the openings. The filesystem journal, shadow copies, wear-leveling and TRIM see
+  one write for any container, but how many traces of the creation they keep is not measured
+  ([#162](https://github.com/jimichi-org/jimichi/issues/162)).
+- A `<path>.tmp` left by a creation killed before its link is removed at the next start, but
+  removal does not wipe the blocks on the drive.
+- The single write: changing the contact means a new container, a new identity and a new
+  introduction; the contact card of a second volume is needed already at creation.
+- The -peer client with a container (-vault) is planned, and it will have limits of its own: a
+  constant F is a constant queue by which the mailbox will link all runs with that container
+  ([#84](https://github.com/jimichi-org/jimichi/issues/84),
+  [#87](https://github.com/jimichi-org/jimichi/issues/87)); a restart for any reason will leave
+  the client locked until the operator opens the volume; log lines carry no identity values, but
+  their times will show the starts and the openings.
+- A running client: copies of the password, the Argon2id matrix and the PBKDF2 state on the heap
+  ([#36](https://github.com/jimichi-org/jimichi/issues/36),
+  [#37](https://github.com/jimichi-org/jimichi/issues/37),
+  [#158](https://github.com/jimichi-org/jimichi/issues/158)); k_s in HMAC buffers; the identity
+  key in library copies (on c25519 the unclamped key in the hkdf reader and the scalar in
+  crypto/ecdh, on GOST the candidate in the Streebog buffers and the math/big scalar); all of this
+  can reach swap, the page file and the hibernation file. The measurement is planned (EXPERIMENT,
+  block 4, [#24](https://github.com/jimichi-org/jimichi/issues/24)).
+- Opening time on the device itself: the number of GOST candidates is constant for a volume and
+  tells volumes apart, and repeated openings narrow it down; it tells nothing about the key.
+  gogost's multiplication and the table-driven Streebog and Kuznyechik vary in time and in memory
+  access: side channels are outside the model.
+- The container is bound to the scheme jimichi/v2, the cost password/1 and the derivation pair/1.
+  Changing the scheme or the cost makes earlier containers impossible to open, changing the pair
+  derivation gives them other identities. There is no migration.
+- An updatable container with a message history is not implemented; against several states it
+  would need a measure of its own ([#159](https://github.com/jimichi-org/jimichi/issues/159)).
 - Latency measurement needs a clock finer than a millisecond. On a Windows host short intervals
   read as zero, so latency runs happen in Linux (a container or the cluster), not on the
   development host.

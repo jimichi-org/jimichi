@@ -165,7 +165,7 @@ noise/        Noise-shaped handshake machine over CryptoProvider
 e2e/          end-to-end layer: contact card, KK handshake, hash ratchet
 mailbox/      queues of end-to-end records at the exit, in memory only
 conversation/ a client's conversation with its contact: requests, window of puts, rebuild
-vault/        client container with two volumes, planned (#20), a placeholder package today
+vault/        client container of a constant size with one or two volumes, profile/ for -peer
 lab/          run harness and observer, metrics/, scenario/ (a recipient forging a
               conversation); report/ is a placeholder
 web/          testbed dashboard, planned (#21), a placeholder package today

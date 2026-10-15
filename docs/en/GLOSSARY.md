@@ -37,6 +37,15 @@ English | [Русский](../ru/GLOSSARY.md)
 | Sticky record | the one record a client puts as copies of the same bytes on every tick until the mailbox answers that it stored it: a handshake record or the probe after a refused put |
 | Contact card | the public data of a client for one contact: the suite, the mailbox address, the queue and the static key; the text `<suite>:<base64>`, its hash card_hash |
 | Pin | the client takes a contact card once per process and afterwards refuses any other and stops |
+| Client container | a client file of a constant size, 8224 bytes: the salt and two regions, each holding a volume or an empty volume. The file holds no keys, while the file and a volume password reproduce the identity key and F (ARCHITECTURE, "Client container") |
+| Region | one of the two 4096-byte parts of the container file: r, the ciphertext and the tag; the region number enters the volume key |
+| Volume | the content of one region under a key from a password: the version and the contact card; a container has one or two volumes, each under its own password |
+| Decoy volume | the volume whose password the owner may surrender under coercion; the file in one state and this password do not show whether a second volume exists, under the assumptions of CRYPTO ("Container") and only for a generated password of the second volume |
+| Empty volume | a region without a volume: empty content under a key from crypto/rand that is thrown away at once; sealed by the same code as a volume |
+| Key from a password | the output of PasswordKey: the password stretched with the salt from the context at the suite's cost (Argon2id or PBKDF2 with HMAC-Streebog-512); in the container it is W |
+| Volume key | k_s: the key derived from the key from a password, the salt of the file and the region number; the key of every sealing of the region, the identity key and F of the volume are derived from it |
+| Pair from a secret | an agreement pair that DerivePair derives from a 32-byte secret and a context: one secret and context give one pair, others an independent one |
+| File state | the bytes of the container file at one moment; the file is written once, so all states after creation are the same |
 | Trust anchor | the CA public key the client trusts in advance, as the string `<suite>:<base64>` |
 | Node certificate | a CA-signed record binding a node's name, address and signing key for a validity period |
 | Node signing key | the node's long-term signing pair (identity key): it signs the certificate request and the descriptor and takes no part in key agreement; when nodes are authenticated its public half goes into the setup and link transcripts of the node |
