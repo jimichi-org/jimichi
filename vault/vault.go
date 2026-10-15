@@ -31,6 +31,7 @@ var (
 	errNoProvider = errors.New("vault: no provider")
 	errVolumes    = errors.New("vault: one or two volumes")
 	errClosed     = errors.New("vault: draft closed")
+	errFixed      = errors.New("vault: an earlier attempt fixed the content")
 )
 
 // writes the content into buf, a locked buffer of MaxContent bytes, and
@@ -46,8 +47,11 @@ type Contents struct {
 type Draft struct {
 	p jcrypto.CryptoProvider
 
-	mu      sync.Mutex
-	file    []byte
+	mu   sync.Mutex
+	file []byte
+	// what the first attempt that reached the drive wrote; every retry writes
+	// it again, so the drive holds one version of the container
+	image   []byte
 	first   int
 	key     *secmem.Buffer
 	id      *Identity
@@ -194,8 +198,9 @@ func sealEmpty(p jcrypto.CryptoProvider, s int, area []byte) error {
 func (d *Draft) Identity() *Identity { return d.id }
 
 // the only write of a container: it never replaces an existing file. fill may
-// be nil; a failed Write leaves the draft as it was, without content when fill
-// failed
+// be nil. A Write that linked no file leaves the draft usable, with the bytes
+// fixed once an attempt reached the drive; one that linked it spends the
+// draft, and a failure after the link is ErrWritten with its cause
 func (d *Draft) Write(path string, fill Fill) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -205,28 +210,61 @@ func (d *Draft) Write(path string, fill Fill) error {
 	case d.closed:
 		return errClosed
 	}
-	if fill != nil {
-		n, err := fillContent(d.plain.Bytes(), d.id, fill)
-		d.n = n
-		if err != nil {
-			return err
-		}
+	if err := d.fill(fill); err != nil {
+		return err
 	}
 	if d.n == 0 {
 		return ErrEmpty
 	}
-	file := bytes.Clone(d.file)
-	if err := sealChecked(d.p, d.key, d.first, d.plain, areaOf(file, d.first)); err != nil {
+	if err := vacant(path); err != nil {
 		return err
 	}
-	if err := create(path, file); err != nil {
+	if d.image == nil {
+		file := bytes.Clone(d.file)
+		if err := sealChecked(d.p, d.key, d.first, d.plain, areaOf(file, d.first)); err != nil {
+			return err
+		}
+		d.image = file
+	}
+	linked, err := create(path, d.image)
+	if !linked {
 		return err
 	}
 	d.written = true
-	err := d.readBack(path, file)
+	if rerr := d.readBack(path, d.image); err == nil {
+		err = rerr
+	}
 	d.key.Release()
 	d.plain.Release()
-	return err
+	if err != nil {
+		return fmt.Errorf("%w, but %w", ErrWritten, err)
+	}
+	return nil
+}
+
+// once the bytes are fixed another content would be a second version of the
+// container, so fill writes into a buffer of its own and must match
+func (d *Draft) fill(fill Fill) error {
+	if fill == nil {
+		return nil
+	}
+	if d.image == nil {
+		n, err := fillContent(d.plain.Bytes(), d.id, fill)
+		d.n = n
+		return err
+	}
+	again, err := secmem.New(plainSize)
+	if err != nil {
+		return err
+	}
+	defer again.Release()
+	if _, err := fillContent(again.Bytes(), d.id, fill); err != nil {
+		return err
+	}
+	if !again.Equal(d.plain) {
+		return errFixed
+	}
+	return nil
 }
 
 func (d *Draft) readBack(path string, want []byte) error {

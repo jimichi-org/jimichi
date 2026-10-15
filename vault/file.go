@@ -11,8 +11,9 @@ import (
 
 const tmpSuffix = ".tmp"
 
-// removes what a creation killed before its link left behind; the blocks of
-// the removed file stay on the device
+// removes <path>.tmp, which a creation killed before its link leaves behind;
+// one creation per path at a time is assumed, and the blocks of the removed
+// file stay on the device
 func Clean(path string) error {
 	if err := os.Remove(path + tmpSuffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("vault: clean: %w", err)
@@ -20,29 +21,48 @@ func Clean(path string) error {
 	return nil
 }
 
-// a hard link never replaces its target, so an existing container is never
-// overwritten, and the file appears whole or not at all
-func create(path string, data []byte) error {
+// refuses an existing file before a byte reaches the drive; the link still
+// refuses one that appears after this check
+func vacant(path string) error {
 	if err := Clean(path); err != nil {
 		return err
 	}
+	_, err := os.Lstat(path)
+	switch {
+	case err == nil:
+		return ErrExists
+	case !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("vault: %w", err)
+	}
+	return nil
+}
+
+// a hard link never replaces its target, so an existing container is never
+// overwritten, and the file appears whole or not at all. linked reports that
+// path names the data, whatever the error after the link
+func create(path string, data []byte) (linked bool, err error) {
 	tmp := path + tmpSuffix
 	if err := writeTmp(tmp, data); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("vault: write: %w", err)
+		return false, fmt.Errorf("vault: write: %w", err)
 	}
-	err := os.Link(tmp, path)
-	rmErr := os.Remove(tmp)
-	if errors.Is(err, fs.ErrExist) {
-		return ErrExists
+	if err := os.Link(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		if errors.Is(err, fs.ErrExist) {
+			return false, ErrExists
+		}
+		return false, fmt.Errorf("vault: link: %w", err)
 	}
-	if err != nil {
-		return fmt.Errorf("vault: link: %w", err)
+	return true, settle(tmp, filepath.Dir(path))
+}
+
+// the steps after the link; replaced in tests to fail as a drive fails there.
+// A tmp already gone was removed by the Clean of another run
+var settle = func(tmp, dir string) error {
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("vault: remove %s: %w", tmp, err)
 	}
-	if rmErr != nil {
-		return fmt.Errorf("vault: remove %s: %w", tmp, rmErr)
-	}
-	return syncDir(filepath.Dir(path))
+	return syncDir(dir)
 }
 
 func writeTmp(tmp string, data []byte) error {

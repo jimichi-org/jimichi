@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
@@ -58,9 +60,13 @@ func TestNeverReplacesAFile(t *testing.T) {
 		wantErr(t, "Write over a file", d.Write(later, nil), ErrExists)
 		untouched("Write")
 
-		// a refused Write leaves the draft whole
+		// the existing file is refused before a byte reaches the drive, so the
+		// draft stays whole and its content can still change
+		if d.image != nil {
+			t.Fatal("a Write refused before the drive fixed the bytes")
+		}
 		fresh := vaultPath(t)
-		if err := d.Write(fresh, nil); err != nil {
+		if err := d.Write(fresh, content([]byte("changed"))); err != nil {
 			t.Fatalf("Write after ErrExists: %v", err)
 		}
 		file, err := os.ReadFile(fresh)
@@ -68,10 +74,147 @@ func TestNeverReplacesAFile(t *testing.T) {
 			t.Fatal(err)
 		}
 		v, _ := mustOpen(t, p, file, password(t, "a"))
-		if string(v.Content()) != "x" {
+		if string(v.Content()) != "changed" {
 			t.Fatalf("content %q", v.Content())
 		}
 	})
+}
+
+// a file that appears after the check of the path and before the link makes
+// the link refuse once the tmp is on the drive. The retry writes the same
+// bytes, so the drive never holds two versions of one container, and a fill
+// that would change the content is refused
+func TestRetryWritesTheSameBytes(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p *spy) {
+		for _, n := range []int{1, 2} {
+			hook := &appearing{CryptoProvider: p}
+			d, err := Prepare(hook, []Contents{volume(t, "a", []byte("x")), volume(t, "b", []byte("y"))}[:n]...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			busy := vaultPath(t)
+			hook.arm(busy)
+			wantErr(t, "a file that appears before the link", d.Write(busy, nil), ErrExists)
+			if got, err := os.ReadFile(busy); err != nil || string(got) != appeared {
+				t.Fatalf("the file that appeared changed: %q, %v", got, err)
+			}
+			if _, err := os.Stat(busy + tmpSuffix); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("tmp left after a refused link: %v", err)
+			}
+			tried := bytes.Clone(d.image)
+			if len(tried) != FileSize {
+				t.Fatal("an attempt that reached the drive fixed no bytes")
+			}
+
+			other := vaultPath(t)
+			wantErr(t, "another content after the drive", d.Write(other, content([]byte("z"))), errFixed)
+			failing := errors.New("fill failed")
+			wantErr(t, "a failing fill after the drive", d.Write(other, func(*Identity, []byte) (int, error) { return 0, failing }), failing)
+			noFile(t, other)
+
+			path := vaultPath(t)
+			if err := d.Write(path, content([]byte("x"))); err != nil {
+				t.Fatalf("a retry with the same content: %v", err)
+			}
+			file, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(file, tried) {
+				t.Fatal("the retry wrote another version of the container")
+			}
+			if v, _ := mustOpen(t, p, file, password(t, "a")); string(v.Content()) != "x" {
+				t.Fatalf("content %q", v.Content())
+			}
+		}
+	})
+}
+
+const appeared = "appeared before the link"
+
+// makes a file at the armed path at the first AEAD it builds: inside Write
+// that is the seal, after the check that the path is free and before the link
+type appearing struct {
+	jcrypto.CryptoProvider
+
+	mu   sync.Mutex
+	path string
+}
+
+func (a *appearing) arm(path string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.path = path
+}
+
+func (a *appearing) NewAEAD(key *secmem.Buffer) (jcrypto.AEAD, error) {
+	a.mu.Lock()
+	path := a.path
+	a.path = ""
+	a.mu.Unlock()
+	if path != "" {
+		if err := os.WriteFile(path, []byte(appeared), 0o600); err != nil {
+			return nil, err
+		}
+	}
+	return a.CryptoProvider.NewAEAD(key)
+}
+
+// a failure after the link leaves the container at the path: the Write is
+// ErrWritten with its cause, the key and the buffer of the first volume go at
+// once, and no later Write makes a second file. It replaces the steps after
+// the link, so it runs alone, before the parallel tests
+func TestFailureAfterLink(t *testing.T) {
+	injected := errors.New("injected after the link")
+	real := settle
+	t.Cleanup(func() { settle = real })
+	for _, c := range []struct {
+		name string
+		fail func(tmp, dir string) error
+	}{
+		{"the directory sync", func(tmp, dir string) error {
+			if err := real(tmp, dir); err != nil {
+				return err
+			}
+			return injected
+		}},
+		{"the tmp removal", func(string, string) error { return injected }},
+	} {
+		settle = c.fail
+		for _, s := range suites {
+			t.Run(c.name+"/"+s.String(), func(t *testing.T) {
+				p := newSpy(t, cheap{provider(t, s)})
+				d, err := Prepare(p, volume(t, "a", []byte("x")))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer d.Close()
+				path := vaultPath(t)
+				err = d.Write(path, nil)
+				wantErr(t, c.name, err, ErrWritten)
+				wantErr(t, c.name, err, injected)
+				if d.key.Bytes() != nil || d.plain.Bytes() != nil {
+					t.Fatal("the key or the buffer of the first volume outlived the link")
+				}
+				file, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if v, _ := mustOpen(t, p, file, password(t, "a")); string(v.Content()) != "x" {
+					t.Fatalf("content %q", v.Content())
+				}
+				other := vaultPath(t)
+				wantErr(t, "a Write after the link", d.Write(other, nil), ErrWritten)
+				noFile(t, other)
+			})
+		}
+	}
+	settle = real
+	dir := t.TempDir()
+	if err := settle(filepath.Join(dir, "gone"+tmpSuffix), dir); err != nil {
+		t.Fatalf("a tmp that the Clean of another run removed: %v", err)
+	}
 }
 
 // a creation killed between the temporary file and the link. The test runs
