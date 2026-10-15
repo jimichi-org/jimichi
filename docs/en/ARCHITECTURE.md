@@ -26,7 +26,7 @@ topology.
 | crypto | CryptoProvider: two primitive suites behind one interface |
 | crypto/secmem | key buffers outside the Go heap: mlock, no dumps, zeroed on release |
 | wire | cell format and nested route encryption |
-| vault | planned ([#20](https://github.com/jimichi-org/jimichi/issues/20)), no code yet: client container with two independent volumes, a decoy password and the real one |
+| vault | client container: a file of a constant size with one or two volumes under passwords of their own; a volume holds the contact card, while the identity key and F are derived from the volume password and the salt of the file at every opening (section "Client container"); the -peer client with a container is planned ([#20](https://github.com/jimichi-org/jimichi/issues/20)) |
 | lab | experiment runs, the observer and metrics; cmd/lab writes the reports to artifacts/ |
 | web | planned ([#21](https://github.com/jimichi-org/jimichi/issues/21)), no code yet: testbed dashboard with the network graph, what each node learns and the live attack result |
 
@@ -1356,14 +1356,15 @@ forged conversation with the assumption and the records in hex, without a byte o
 | e2e | the end-to-end layer: contact card, identity, KK session, hash ratchet, session recovery | crypto, crypto/secmem, noise, wire, pki |
 | mailbox | queue store at the exit, request and reply format | crypto |
 | conversation | a client's conversation with its contact: a request per tick, the window of puts, the sticky record, matching replies, epochs, rebuilding the circuit | crypto, crypto/secmem, e2e, mailbox |
-| vault | planned: client container with two volumes ([#20](https://github.com/jimichi-org/jimichi/issues/20)); an empty package today | nothing yet |
+| vault | client container: the file format, the keys from a password, the derivation of a volume's identity, the single write | crypto, crypto/secmem |
+| vault/profile | the -peer client profile in a volume: the contact card, the own card from the volume's identity, the parsing rules | crypto, crypto/secmem, e2e, mailbox, noise, vault |
 | lab | harness that runs one configuration in one process, the observer on two links, seeds, sampling of chains | client, relay, link, crypto, crypto/secmem, crypto/suite |
 | lab/metrics | correlation scores, AUC and its bootstrap interval, traffic multiplier and latency percentiles, share of compromised chains | standard library only |
 | lab/scenario | experiments that act on the system: a recipient forging a conversation of the end-to-end layer with the production session (Genuine, Forge, Verify, a recording and injecting provider wrapper), run by `cmd/lab -set deny` | crypto, crypto/secmem, e2e, noise |
 | lab/report | an empty package reserved for a report writer; today cmd/lab writes the reports | nothing yet |
 | web | planned: testbed dashboard ([#21](https://github.com/jimichi-org/jimichi/issues/21)); an empty package today | nothing yet |
 | cmd/relay, cmd/client, cmd/lab | entry points and configuration; cmd/client -peer with the admin port and the rebuild of the circuit | the packages above |
-| cmd/jimichi | testbed CLI: certificate issuance, the card of a key that is thrown away at once, and the hash of a card | pki, e2e, mailbox, crypto/suite, crypto/secmem |
+| cmd/jimichi | testbed CLI: certificate issuance, the card of a key that is thrown away at once, the hash of a card, creating and showing a client container (vault init, vault show) | pki, e2e, mailbox, crypto, crypto/suite, crypto/secmem, vault, vault/profile |
 
 Rule: no package of the system knows about lab. The experiment harness depends on the system, not
 the other way round, and a test of lab reads the imports of every .go file of every other package of
@@ -1373,19 +1374,187 @@ well: a CryptoProvider and the noise.Static interface.
 
 ## Client container
 
-Status: planned, not implemented ([#20](https://github.com/jimichi-org/jimichi/issues/20)).
+Status: the packages vault and vault/profile and the commands `jimichi vault init` and `jimichi
+vault show` are implemented. The -peer client with a container (-vault) and the measurement of
+the property (EXPERIMENT, block 5) are planned
+([#20](https://github.com/jimichi-org/jimichi/issues/20)).
 
-Today nothing is stored on either side: nodes write nothing to disk and the client keeps no
-message history. The container is planned as the client's store for that history. It will hold
-two independent volumes: one will open with a decoy password, the other with the real one. The
-volume key will come from the password through Argon2id, the file will carry no header revealing
-how many volumes exist, and unused space will be filled with random data.
+The container is a client file of a constant size with one or two volumes, each under its own
+password. A written volume holds the pin, that is the contact card, and nothing else. The file
+holds no key material in any form, not even encrypted: the identity key and the fetch capability
+F are derived from the volume key at every opening (CRYPTO, "Container"). Yet the file and a
+volume password reproduce the identity key and F, so against seizure of the file together with
+the password the strength is that of a key stored under a password. A volume holds no message
+history ([#159](https://github.com/jimichi-org/jimichi/issues/159)).
 
-The property will be measured, not declared: entropy estimates, the NIST STS battery and a
-classifier that tries to tell one volume from two are planned (EXPERIMENT, block 5). The battery
-can show that a file differs from random data, not that it is indistinguishable from it. The
-limits of the property (traces at the filesystem and drive level, an adversary with several
-snapshots) are stated in LIMITATIONS.
+### Format
+
+```
+file      = salt[32] | region 0 [4096] | region 1 [4096]                  exactly 8224 bytes
+region    = r[32] | Seal(K_b, nonce 0, plaintext[4048], ad = th_b) [4048 + tag 16]
+plaintext = u16be L | content[L] | zeroes                                  L from 0 to 4046
+content   = u8 version = 1 | contact card[L-1]                             at most 339 bytes
+```
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0 | 32 | salt |
+| 32 | 4096 | region 0 |
+| 4128 | 4096 | region 1 |
+| region + 0 | 32 | r |
+| region + 32 | 4048 | ciphertext |
+| region + 4080 | 16 | tag |
+| plaintext + 0 | 2 | L |
+| plaintext + 2 | L | content: version 1, then the canonical contact card |
+| plaintext + 2 + L | 4046 - L | zeroes |
+
+- The file carries no header, format version, suite, stretching cost or nonce. The size fixes the
+  format: a file of another size is ErrNotVault, and another suite cannot be told from a wrong
+  password.
+- A region without a volume holds an empty volume: L = 0 under a key of 32 bytes from crypto/rand,
+  sealed by the same code; the key is thrown away at once. The place of a volume is random:
+  volume i goes to region b xor i, where b is a random bit.
+- Every sealing takes a fresh r from crypto/rand, and the region key K_b is derived from the
+  volume key and r, so every K_b serves one Seal and the zero nonce is safe. No nonce is stored,
+  so regions are laid out the same way in both suites: the size and the look of the file do not
+  give the suite away.
+- vault keeps the content as opaque bytes, vault/profile knows its layout. A volume holds no own
+  card: it is built from the derived public key, QueueID(F) and the mailbox address of the
+  contact card.
+- Another format (history, another stretching cost, another identity derivation) is another file
+  size.
+
+### Keys
+
+```
+W           = PasswordKey(password, NewContext(p, "vault/password", salt))
+k_s         = DeriveKey(W, "vault/volume", NewContext(p, "vault/volume", salt, [s]), 32)   s = 0, 1
+K_b         = DeriveKey(k_s, "vault/block", NewContext(p, "vault/block", [s], r), 32)
+ctx_id      = NewContext(p, "vault/identity", salt, [s])
+(priv, pub) = DerivePair(k_s, ctx_id)                                        identity key
+F           = DeriveKey(k_s, "vault/fetch", ctx_id, 16)                      fetch capability
+```
+
+- One salt per file, shared by both volumes: Open stretches a password once, and the region
+  number s separates the keys of the two regions.
+- The region number and the salt enter the volume key, r enters the region key and the
+  associated data: swapped regions, another salt or any changed byte of a region make the opening
+  fail.
+- The identity is derived from the volume key of the region that opened, and only after a
+  successful opening; the volume key is released right after the pair and F are derived.
+- The identity derivation belongs to file format v1: another derivation is a new format and
+  another file size, otherwise earlier containers would give other identities when opened.
+- Consequences: another password or a new container gives a new identity, a copy of the file
+  keeps it. Changing the password changes the identity, and the pin on the peer's side is
+  permanent, so a new introduction needs a new container on both sides.
+
+### Operations
+
+| Operation | What it does |
+|---|---|
+| `Prepare(p, volumes...)` | one or two volumes, each with a password and a Fill. Equal passwords: ErrSamePassword. A salt from crypto/rand and a random place of the volume. For every volume one PasswordKey, the volume key and at once the identity; Fill gets the identity and writes the content straight into a secmem buffer of MaxContent = 4046 bytes (more: ErrTooLarge; the tail past the length is zeroed). A Fill of a volume other than the first that returns 0: ErrEmpty. The volumes other than the first and the empty volume are sealed and opened back, and their keys and buffers are released. The Draft holds the salt, the sealed regions, the key of the first volume, its identity and its buffer; there is no file yet |
+| `Draft.Identity()` | the identity of the first volume before the write: the own card is built from it |
+| `Draft.Write(path, fill)` | fill (may be nil) edits the content of the first volume; a failed fill leaves the volume without content; L = 0: ErrEmpty, no file. A file at the path: ErrExists before any byte reaches the drive. Seal of the first volume with a fresh r, the single write (below), a reread: the same bytes, and the first region opens. A Write that linked no file (ErrExists, a write or link error) leaves the Draft fit for another attempt. From the first attempt that reached the drive the bytes of the file are fixed: every later attempt writes the same bytes, and a fill then has to give the same content, otherwise it is refused and the Draft stays as it was. Once the link succeeded, the key and the buffer of the first volume are released and the next Write gives ErrWritten; a failure after the link (removing the tmp name, the directory sync, the reread) is ErrWritten with its cause |
+| `Draft.Close()` | releases whatever was not taken through Take |
+| `Create(p, path, volumes...)` | Prepare and Write(path, nil) |
+| `Open(p, path, password)` | a size other than 8224: ErrNotVault. The file is read whole, one PasswordKey, k_0 and k_1. Both regions are always tried, in one order, each attempt into its own secmem buffer. The identity is derived from the key of the region that opened. Open writes and removes nothing |
+| `Volume.Content()`, `Volume.Identity()`, `Volume.Close()` | the content and the identity of the open volume; Close releases whatever was not taken through Take |
+| `Identity` | Public: the public key; Agree: an agreement with the private key, together with Public a noise.Static; Fetch: F, borrowed; Take: moves the keys to the caller, after which Agree refuses. The private key sits under an RWMutex, as in noise.KeyPair |
+| `Clean(path)` | removes `<path>.tmp`: the one a creation killed before its link left, or the one of a creation on the same path running at that moment, which then fails |
+
+- Each attempt has a buffer of its own because on c25519 the AVX2 path zeroes its output on a
+  wrong tag: a failed attempt clears its own buffer and not the other one. Both regions are
+  always tried, so the work does not depend on which region opens; only a successful opening
+  goes on to derive the identity.
+
+| Error | When |
+|---|---|
+| ErrNotVault | the file size is not 8224, or it is not a regular file |
+| ErrNoVolume | no region opens: a wrong password, no such volume, another suite, a changed salt or a changed region; one error for all of these |
+| ErrCorrupt | both regions open, a length of 0 or above 4046, a nonzero tail; at opening a refused scalar sampling (crypto.ErrNoScalar) or a zero F |
+| ErrExists | a file already exists at the path, before the write or at the link; it is left untouched |
+| ErrSamePassword | two volumes share a password |
+| ErrTooLarge | Fill returned a length above MaxContent |
+| ErrWritten | a Write after this Draft has linked the file; with a cause, a Write whose link succeeded and a later step failed: the file is at the path and the Draft is spent |
+| ErrEmpty | a written volume without content |
+
+- A password that breaks the provider's rules is crypto.ErrBadPassword. ErrNoScalar and a zero F
+  (about 2^-128 or rarer each) make a creation fail without a file; nothing retries, the creation
+  is run again. Other provider and secmem errors, a shortage of lockable memory included, are
+  returned as they are, not as ErrCorrupt: a sound container does not look corrupt.
+- Both regions open only under equal passwords, which Prepare rules out.
+
+### The single write
+
+- The file is written exactly once, at creation, when every volume has a contact card. The API
+  has no write after creation, and Open only reads. So all states of the file after creation are
+  the same byte for byte, and the number and the moment of writes do not depend on the number of
+  volumes.
+- The write: a leftover `<path>.tmp` is removed and an existing file is refused with ErrExists
+  before anything is written; a new tmp is created with O_CREATE|O_EXCL and mode 0600, gets
+  8224 bytes, fsync and close; then `os.Link(tmp, path)`: if a file appeared at the path
+  meanwhile, ErrExists, and that file is left untouched; tmp is removed (a tmp already gone
+  counts as removed), and on Linux the directory is synced.
+- The first attempt that reaches the tmp fixes the bytes of the file in the Draft: the first
+  volume is sealed once, and an attempt after a failed write or link writes the same 8224 bytes.
+  So the blocks a failed attempt leaves on the drive hold the version the file holds, not
+  another version of this container.
+- A hard link never replaces a file, so no existing container is overwritten. One creation per
+  path at a time is assumed: every run starts with Clean, which removes `<path>.tmp`, so a run
+  that overlaps a creation on the same path makes that creation fail, and two overlapping
+  creations can both fail.
+- A `<path>.tmp` left by a creation killed before its link is another container with another
+  salt, not a version of this one: the next start runs a new Prepare. Clean removes it at the
+  next start; removal does not wipe the blocks on the drive (LIMITATIONS).
+- The cost: changing the contact means a new container, a new identity and a new introduction,
+  and the contact card of a second volume is needed already at creation.
+
+### Client profile (vault/profile)
+
+A volume holds `u8 version = 1 | canonical contact card`, at most 339 bytes.
+
+| Function | What it does |
+|---|---|
+| `New(p, mailbox, contact)` | a Fill for Prepare: builds the own card from the volume's identity (suite, mailbox, QueueID(F), public key) and checks it by a parsing round trip. A contact, if given, is checked as PUT /contact checks it (subsection "The -peer client"): the same suite and mailbox, not the own key and not the own queue, and the key takes a trial agreement (the exchange e2e/check). Writes the version and the contact card; without a contact it writes nothing, which only the first volume may do before Write |
+| `WithContact(p, own, contact)` | a Fill for Draft.Write once the identity was taken: checks the contact against the own card by public values, checks its key by a trial agreement with a one-time pair (the exchange e2e/check) and writes the version and the card |
+| `Parse(p, volume)` | version 1 and L above 1; the card canonical and of the provider's suite; not the own key and not the own queue. Then the keys move into the profile (Take), and the own card is built with the contact's address. Every refusal of the content is ErrCard |
+| `Profile.Fit(mailbox)` | the address of the contact card equals -mailbox |
+| `Profile.Identity(p)` | the end-to-end identity (e2e.Identity) over the profile's pair; the profile owns the key |
+| `Profile.Close()` | releases the identity key and F |
+
+- A zero queue (about 2^-128) is a profile error: New refuses and Prepare creates no file, and
+  Parse answers ErrCard.
+- The own card has the address of the contact card: the exit is pinned to the mailbox, so the
+  volume stores no own address.
+
+### Commands jimichi vault
+
+| Command | stdin | Action |
+|---|---|---|
+| `jimichi vault init -suite S -mailbox ADDR -contact CARD [-contact CARD] FILE` | none | one volume per -contact, at most two; the formal checks of every card (canonical, the suite of -suite, the address of -mailbox, two cards with neither the key nor the queue in common) and the refusal of an existing file come before any password is stretched, while the key of the contact and the match with the own card are checked after the identity is derived, before the write; the command generates the passwords itself (16 bytes from crypto/rand, base32 without padding, 128 bits) and, once Create succeeds, prints them on stdout one per line in the order of -contact, once; then `created` on stderr. A creation that fails after its link removes the file: an error leaves neither a file nor a password |
+| `jimichi vault init ... -stdin FILE` | passwords, one per line | the user's own passwords; a warning on stderr that the claim about the second volume is not made for them |
+| `jimichi vault show -suite S FILE` | the password | the own card derived from the password, its card_hash, the mailbox address and the contact's card_hash, as the lines `card=<suite>:<base64>`, `card_hash=`, `mailbox=`, `contact_card_hash=`; neither the region number nor the number of volumes |
+
+- The password is read from stdin straight into a secmem buffer up to \n or the end of input, a
+  final \r is dropped; the byte rules are those of PasswordKey (CRYPTO, "Interface").
+- Every run calls Clean first. The stretching cost is always the production one.
+- -keymem and -harden are those of enroll: if locked memory is asked for and does not work, the
+  command takes no password. A Windows host needs `-keymem zero -harden=false`, and the command
+  warns that the password, its stretch and the keys can be paged out to pagefile.sys and written
+  to hiberfil.sys; the locked path works in WSL2.
+- show reports errors on stderr in the classes of a volume opening: `vault: no volume opens with
+  this password`; `vault: the volume is corrupt` (ErrCorrupt and a refused content);
+  `vault: not opened: memory: ...` on a secmem error and `vault: not opened: io: ...` on any
+  other. A file of another size gives `vault: not a container`.
+- show with one password twice gives one card, a new container with the same password another.
+
+### The property and its check
+
+What is claimed and under which assumptions is written in CRYPTO ("Container") and THREAT_MODEL
+("Client container"), the limits in LIMITATIONS. A distinguisher of one volume from two with
+controls and a trace of the file states are planned (EXPERIMENT, block 5). Statistical batteries
+such as NIST STS are no evidence: they can show that a file differs from random data, not that it
+is indistinguishable from it.
 
 ## Deployment
 

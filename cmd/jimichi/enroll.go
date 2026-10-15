@@ -197,28 +197,41 @@ func runEnroll(args []string, stdout, stderr io.Writer) error {
 // the CA key is the one secret of this process; asking for locked memory and
 // not getting it stops the run before the key exists
 func protectKeyMemory(keymem string, harden bool, stderr io.Writer) error {
-	policy, err := secmem.ParsePolicy(keymem)
+	missing, err := keyMemory(keymem, harden, "refusing to create the CA key")
 	if err != nil {
 		return err
 	}
+	if len(missing) > 0 {
+		fmt.Fprintf(stderr, "WARNING: the CA key is held without %s while it issues the certificates\n", strings.Join(missing, " and "))
+	}
+	return nil
+}
+
+// applies -keymem and -harden before the first secret exists and names the
+// measures left off
+func keyMemory(keymem string, harden bool, refusal string) ([]string, error) {
+	policy, err := secmem.ParsePolicy(keymem)
+	if err != nil {
+		return nil, err
+	}
 	if err := secmem.SetPolicy(policy); err != nil {
-		return err
+		return nil, err
 	}
 	const fallback = "; where the host has no such measure pass -keymem zero -harden=false"
 	if harden {
 		if err := secmem.HardenProcess(); err != nil {
-			return fmt.Errorf("harden: %v%s", err, fallback)
+			return nil, fmt.Errorf("harden: %v%s", err, fallback)
 		}
 	}
 	if policy.Lock {
 		probe, err := secmem.New(32)
 		if err != nil {
-			return fmt.Errorf("key memory: %v%s", err, fallback)
+			return nil, fmt.Errorf("key memory: %v%s", err, fallback)
 		}
 		locked := probe.Locked()
 		probe.Release()
 		if !locked {
-			return errors.New("key memory is not locked, refusing to create the CA key" + fallback)
+			return nil, errors.New("key memory is not locked, " + refusal + fallback)
 		}
 	}
 	var missing []string
@@ -228,10 +241,7 @@ func protectKeyMemory(keymem string, harden bool, stderr io.Writer) error {
 	if !harden {
 		missing = append(missing, "process hardening")
 	}
-	if len(missing) > 0 {
-		fmt.Fprintf(stderr, "WARNING: the CA key is held without %s while it issues the certificates\n", strings.Join(missing, " and "))
-	}
-	return nil
+	return missing, nil
 }
 
 // a relay answers on loopback through a port-forward; a proxy from the

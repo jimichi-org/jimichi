@@ -444,6 +444,9 @@ var golden = map[jcrypto.Suite]goldenSuite{
 			{0, "noise/split/r2i", 32, "43c0eda0ca427224acff4f2ecf247c4f3f41eff77aea8a14660385a2871e0b3e"},
 			{0, "e2e/step/key", 32, "d0c7990fea65435b8469344ec77b8d9797a31aafcfbcf83b26687870159b3e62"},
 			{0, "e2e/step/next", 32, "ae3cb7c681bb463b02bdb6c0174e462f7fc2690bcf06536d696f9d17ed1a561b"},
+			{0, "vault/volume", 32, "2c88ac778d6ca442cc431aabfffa1af4b79a1a16bee9466c6574307bf7dd45e5"},
+			{0, "vault/block", 32, "5bea69eb3a4bfebfbbdf02e3be453a607c0f69f560dc429b8daaec8d7b746b27"},
+			{0, "vault/fetch", 16, "a14982a057a14f8540f95d11c9480ef0"},
 		},
 		mix: [2]string{
 			"afb0cba8f71ea59fc429db92ef6b09db684d2b4287136e84c1cd8b68316362aa",
@@ -496,6 +499,9 @@ var golden = map[jcrypto.Suite]goldenSuite{
 			{0, "noise/split/r2i", 32, "2f3efa57b0ed0e92b139166e140f761e388d41ae06c3e334aaa7668d6aa72f41"},
 			{0, "e2e/step/key", 32, "5385109422b7f4640bff01aa5bc25be26b1d30314f25ad388667b71529e9c8be"},
 			{0, "e2e/step/next", 32, "a2e56a5acb5e267c22c73a78fcd4f33654c1b605cee9f8a9cc3249ef121de007"},
+			{0, "vault/volume", 32, "4a7013c01faea9ead9beff52a1dec029f7f64e14ac65cca411b4de5c8823793b"},
+			{0, "vault/block", 32, "398ed2635105b845c2677bb8d974ac93e54c5e7fe14b267a034b8fb0c68badcc"},
+			{0, "vault/fetch", 16, "fa0ce63f3fca53aff918932c3ce6a3a9"},
 		},
 		mix: [2]string{
 			"c0135e5bc83af1586c67367eda0e249e6c0a45e30e2259da474ed7d6939f87ba",

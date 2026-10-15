@@ -140,6 +140,57 @@ func TestPasswordKeyClearsTheStretchOutput(t *testing.T) {
 	}
 }
 
+// what the stub of the test above cannot see: the real stretch hands
+// crypto/pbkdf2 a string that unsafe.String makes over the password parameter,
+// not a conversion that copies the password to the heap where nothing wipes it
+func TestStretchViewsThePassword(t *testing.T) {
+	lit := srccheck.VarFunc(t, srccheck.Files(t, "."), "pbkdf2Streebog")
+	if !srccheck.Param(lit, "password") {
+		t.Fatal("pbkdf2Streebog: password is bound other than as its parameter")
+	}
+	sinks := srccheck.Sinks(lit.Body, "password")
+	if len(sinks) == 0 {
+		t.Fatal("pbkdf2Streebog: no use of password")
+	}
+	for _, s := range sinks {
+		if s != "unsafe.SliceData" && s != "unsafe.String" {
+			t.Errorf("pbkdf2Streebog: password goes into %q", s)
+		}
+	}
+	views, keys := srccheck.Calls(lit.Body, "unsafe.String"), srccheck.Calls(lit.Body, "pbkdf2.Key")
+	if len(views) != 1 || len(keys) != 1 || len(keys[0].Args) != 5 {
+		t.Fatalf("pbkdf2Streebog: %d calls of unsafe.String and %d of pbkdf2.Key, want one each", len(views), len(keys))
+	}
+	if len(srccheck.Sinks(views[0], "password")) != len(sinks) {
+		t.Error("pbkdf2Streebog: password is used outside the call of unsafe.String")
+	}
+	if !isView(lit, keys[0].Args[1], views[0]) {
+		t.Error("pbkdf2Streebog: pbkdf2.Key gets a password other than the string unsafe.String makes")
+	}
+}
+
+func isView(lit *ast.FuncLit, arg ast.Expr, view *ast.CallExpr) bool {
+	if arg == view {
+		return true
+	}
+	id, ok := arg.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	b := srccheck.Binds(lit, id.Name)
+	if len(b) != 1 || len(srccheck.Sinks(lit.Body, id.Name)) != 1 {
+		return false
+	}
+	set := false
+	ast.Inspect(lit.Body, func(n ast.Node) bool {
+		if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 && as.Lhs[0] == b[0] && as.Rhs[0] == view {
+			set = true
+		}
+		return true
+	})
+	return set
+}
+
 // the count of the purpose password/1, from the calibration on the testbed
 func TestPasswordIterationsAreTheCalibratedOnes(t *testing.T) {
 	if passwordIterations != 2600 {
@@ -148,9 +199,10 @@ func TestPasswordIterationsAreTheCalibratedOnes(t *testing.T) {
 }
 
 // what the tests above cannot see: a copy of a library output kept on the
-// heap. Each output goes only into a secmem buffer, a copy into one and the
-// clearing of its own slice, and every private key number gogost makes is
-// wiped when its function returns
+// heap. Each output goes only into a secmem buffer, a copy into dst, the
+// parameter of the closure drawFrom returns, which pickScalar calls with the
+// secmem bytes of the private key, and the clearing of its own slice; every
+// private key number gogost makes is wiped when its function returns
 func TestKeyMaterialFlow(t *testing.T) {
 	files := srccheck.Files(t, ".")
 	for _, f := range []struct {
@@ -158,7 +210,7 @@ func TestKeyMaterialFlow(t *testing.T) {
 		allowed  map[string]bool
 	}{
 		{"PasswordKey", "key", map[string]bool{"secmem.NewFrom": true, "secmem.Zero": true}},
-		{"drawFrom", "out", map[string]bool{"copy": true, "secmem.Zero": true}},
+		{"drawFrom", "out", map[string]bool{"copy(dst)": true, "secmem.Zero": true}},
 	} {
 		sinks := srccheck.Sinks(srccheck.Func(t, files, f.fn).Body, f.name)
 		if len(sinks) == 0 {
@@ -169,6 +221,14 @@ func TestKeyMaterialFlow(t *testing.T) {
 				t.Errorf("%s: %s goes into %q", f.fn, f.name, s)
 			}
 		}
+	}
+	draw := srccheck.Func(t, files, "drawFrom")
+	lit := closure(t, draw)
+	if !srccheck.Param(lit, "dst") {
+		t.Error("drawFrom: dst is not only the parameter of the closure it returns")
+	}
+	if len(srccheck.Sinks(lit.Body, "out")) != len(srccheck.Sinks(draw.Body, "out")) {
+		t.Error("drawFrom: out is used outside the closure it returns")
 	}
 
 	keys := 0
@@ -228,4 +288,17 @@ func wipesKey(body *ast.BlockStmt, prv string) bool {
 		return true
 	})
 	return found
+}
+
+func closure(t *testing.T, fn *ast.FuncDecl) *ast.FuncLit {
+	t.Helper()
+	for _, s := range fn.Body.List {
+		if r, ok := s.(*ast.ReturnStmt); ok && len(r.Results) == 1 {
+			if lit, ok := r.Results[0].(*ast.FuncLit); ok {
+				return lit
+			}
+		}
+	}
+	t.Fatalf("%s returns no function literal", fn.Name.Name)
+	return nil
 }
