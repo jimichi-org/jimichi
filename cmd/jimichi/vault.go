@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base32"
 	"errors"
@@ -28,6 +29,9 @@ var passwordEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 // replaced in tests to count the stretches and make them cheap; a command
 // never takes a cost from its caller
 var newProvider = suite.New
+
+// replaced in tests to fail after the link
+var createVault = vault.Create
 
 func runVault(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
@@ -120,8 +124,8 @@ func runVaultInit(args []string, stdin io.Reader, stdout, stderr io.Writer) erro
 	for i := range contacts {
 		volumes[i] = vault.Contents{Password: passwords[i], Fill: numbered(i, profile.New(p, *mailboxAddr, &contacts[i]))}
 	}
-	if err := vault.Create(p, path, volumes...); err != nil {
-		return err
+	if err := createVault(p, path, volumes...); err != nil {
+		return removeLinked(path, err)
 	}
 	if !*fromStdin {
 		for _, pw := range passwords {
@@ -154,7 +158,22 @@ func checkContacts(contacts []e2e.Card, s jcrypto.Suite, addr string) error {
 			return fmt.Errorf("-contact %d: the card names mailbox %s, not %s", i+1, c.Mailbox, addr)
 		}
 	}
+	if len(contacts) == 2 && (bytes.Equal(contacts[0].Static, contacts[1].Static) || contacts[0].Queue == contacts[1].Queue) {
+		return errors.New("-contact 2: the key or the queue of -contact 1: a contact belongs to one volume")
+	}
 	return nil
+}
+
+// a creation that failed after its link leaves a container whose passwords
+// were never printed; it goes, so an error leaves no file
+func removeLinked(path string, err error) error {
+	if !errors.Is(err, vault.ErrWritten) {
+		return err
+	}
+	if rerr := os.Remove(path); rerr != nil {
+		return fmt.Errorf("%w; the file is left: %v", err, rerr)
+	}
+	return fmt.Errorf("%w; the file is removed", err)
 }
 
 // names the -contact a volume refused, never the area it was to take

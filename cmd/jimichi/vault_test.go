@@ -306,6 +306,84 @@ func TestVaultInitRefusesBeforeStretch(t *testing.T) {
 		t.Fatalf("equal passwords: %v after %d stretches, want ErrSamePassword before any", err, stretches.Load())
 	}
 	noVault(t, path)
+
+	second := newContact(t, s, addrOf("relay-5"))
+	sameKey, sameQueue := second, second
+	sameKey.card.Static = good.card.Static
+	sameQueue.card.Queue = good.card.Queue
+	for name, twice := range map[string]contactOf{"the same card": good, "the key of the first": sameKey, "the queue of the first": sameQueue} {
+		path := vaultAt(t)
+		stretches.Store(0)
+		_, _, err := vaultCmd("", initArgs(s, path, nil, good, twice))
+		if err == nil || !strings.Contains(err.Error(), "a contact belongs to one volume") || stretches.Load() != 0 {
+			t.Fatalf("a second -contact with %s: %v after %d stretches, want a refusal before any", name, err, stretches.Load())
+		}
+		noVault(t, path)
+	}
+}
+
+// init stands behind the guard of show: a warning names what is off, and off
+// linux locked memory or hardening asked for refuses the run before any
+// password exists
+func TestVaultInitKeyMemory(t *testing.T) {
+	stretches := useCheap(t)
+	prev := secmem.CurrentPolicy()
+	t.Cleanup(func() { _ = secmem.SetPolicy(prev) })
+	s := jcrypto.SuiteC25519
+	contact := newContact(t, s, addrOf("relay-5"))
+	_, errOut, err := vaultCmd("", initArgs(s, vaultAt(t), nil, contact))
+	if err != nil {
+		t.Fatalf("vault init: %v", err)
+	}
+	if !strings.Contains(errOut, "WARNING: the passwords and the keys they give are held without locked memory and process hardening") {
+		t.Fatalf("no warning about the unprotected keys in %q", errOut)
+	}
+	t.Run("refusal", func(t *testing.T) {
+		if runtime.GOOS == "linux" {
+			t.Skip("linux locks the memory and hardens the process")
+		}
+		for _, c := range []struct {
+			flags []string
+			text  string
+		}{
+			{[]string{"-keymem", "all", "-harden=false"}, "key memory is not locked, refusing to take a password"},
+			{[]string{"-keymem", "zero"}, "harden: "},
+		} {
+			path := vaultAt(t)
+			stretches.Store(0)
+			args := append([]string{"init", "-suite", s.String(), "-mailbox", addrOf("relay-5"), "-contact", contact.card.String()}, c.flags...)
+			out, _, err := vaultCmd("", append(args, path))
+			if err == nil || !strings.Contains(err.Error(), c.text) || out != "" || stretches.Load() != 0 {
+				t.Fatalf("init %v: %v, %q after %d stretches, want %q before any", c.flags, err, out, stretches.Load(), c.text)
+			}
+			noVault(t, path)
+		}
+	})
+}
+
+// a creation that fails after its link takes the file away: no password was
+// printed for it, so no container is left that nobody can open
+func TestVaultInitFailureAfterLink(t *testing.T) {
+	useCheap(t)
+	injected := errors.New("injected after the link")
+	prev := createVault
+	createVault = func(p jcrypto.CryptoProvider, path string, volumes ...vault.Contents) error {
+		if err := prev(p, path, volumes...); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w, but %w", vault.ErrWritten, injected)
+	}
+	t.Cleanup(func() { createVault = prev })
+	s := jcrypto.SuiteC25519
+	path := vaultAt(t)
+	out, errOut, err := vaultCmd("", initArgs(s, path, nil, newContact(t, s, addrOf("relay-5"))))
+	if !errors.Is(err, vault.ErrWritten) || !errors.Is(err, injected) || !strings.Contains(err.Error(), "the file is removed") {
+		t.Fatalf("a failure after the link: %v", err)
+	}
+	if out != "" || strings.Contains(errOut, "created") {
+		t.Fatalf("a failed creation printed %q and %q", out, errOut)
+	}
+	noVault(t, path)
 }
 
 // a key the agreement refuses passes the formal checks; the volume refuses it
