@@ -9,26 +9,34 @@ import (
 	"testing"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
 // every flipped bit of an area keeps that area from opening under the key
-// the password gives it, checked on the area function; every flipped bit of
-// the salt keeps the whole open from finding the volume. An open tries each
-// area on its own bytes, so a bit of the other area leaves the opened volume
-// as it was: the full opens at the borders of the fields check that too. Every
-// bit on c25519 without -race; under -race and on GOST a fixed sample of 512
-// bits, one bit of every salt byte and the borders
+// that sealed it, checked on the area function for both areas of a file with
+// two volumes; every flipped bit of the salt keeps the whole open from finding
+// the volume. An open tries each area on its own bytes, so a bit of the other
+// area leaves the opened volume as it was: the full opens at the borders of
+// the fields check that too. Every bit on c25519 without -race; under -race
+// and on GOST a fixed sample of 512 bits, one bit of every salt byte and the
+// borders
 func TestBitFlips(t *testing.T) {
 	t.Parallel()
 	for _, s := range suites {
 		t.Run(s.String(), func(t *testing.T) {
 			t.Parallel()
 			p := cheap{provider(t, s)}
-			pw := password(t, "the password")
+			pw, other := password(t, "the password"), password(t, "the other password")
 			body := []byte("integrity of the opened volume")
-			_, file := mustCreate(t, p, Contents{Password: pw, Fill: content(body)})
+			_, file := mustCreate(t, p, Contents{Password: pw, Fill: content(body)}, Contents{Password: other, Fill: content([]byte("the other volume"))})
 			_, own := mustOpen(t, p, file, pw)
-			keys := areaKeys(t, p, file, pw)
+			var sealing [2]*secmem.Buffer
+			sealing[own], sealing[1-own] = areaKeys(t, p, file, pw)[own], areaKeys(t, p, file, other)[1-own]
+			for a := range sealing {
+				if ok, err := openArea(p, sealing[a], a, areaOf(file, a), make([]byte, plainSize)); err != nil || !ok {
+					t.Fatalf("area %d does not open under the key that sealed it: %v", a, err)
+				}
+			}
 			bits, borders := flipSample(own)
 			if s == jcrypto.SuiteC25519 && !raceOn {
 				bits = bits[:0]
@@ -43,7 +51,7 @@ func TestBitFlips(t *testing.T) {
 				f[pos] ^= 1 << (bit % 8)
 				if pos >= SaltSize {
 					a := (pos - SaltSize) / RegionSize
-					ok, err := openArea(p, keys[a], a, areaOf(f, a), make([]byte, plainSize))
+					ok, err := openArea(p, sealing[a], a, areaOf(f, a), make([]byte, plainSize))
 					if err != nil || ok {
 						return fmt.Errorf("bit %d: area %d opens: %v, %v", bit, a, ok, err)
 					}

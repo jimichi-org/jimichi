@@ -183,8 +183,9 @@ func TestRefusedContacts(t *testing.T) {
 			name    string
 			contact e2e.Card
 			want    error
-			// whether the card can be refused before the identity exists
-			early bool
+			// whether the card is refused whatever the identity, so a volume
+			// under another password refuses it too
+			anyIdentity bool
 		}{
 			{"another suite", peerCard(t, provider(t, otherSuite(p.Suite())), testMailbox), e2e.ErrCard, true},
 			{"another mailbox", peerCard(t, p, otherMailbox), e2e.ErrCard, true},
@@ -205,7 +206,7 @@ func TestRefusedContacts(t *testing.T) {
 				t.Fatalf("WithContact, %s: wrote %d bytes", c.name, n)
 			}
 			wantErr(t, "WithContact, "+c.name, err, c.want)
-			if c.early {
+			if c.anyIdentity {
 				path := vaultPath(t)
 				err := vault.Create(p, path, vault.Contents{Password: password(t, "other"), Fill: New(p, testMailbox, &c.contact)})
 				wantErr(t, "Create, "+c.name, err, c.want)

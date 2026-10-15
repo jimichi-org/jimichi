@@ -58,9 +58,10 @@ func (c cheap) PasswordKey(password *secmem.Buffer, ctx jcrypto.Context) (*secme
 	return c.DeriveKey(h, "test/password", ctx, c.KeySize())
 }
 
-// records the calls in order, keeps a copy of every secret handed out and
-// every hashed transcript, fails the test on a signing call and can make
-// DerivePair or the fetch capability fail
+// records the calls in order, keeps a copy of every secret handed out, of
+// the secret into and the key out of every DeriveKey by purpose and of every
+// hashed transcript, fails the test on a signing call and can make DerivePair
+// or the fetch capability fail
 type spy struct {
 	jcrypto.CryptoProvider
 	t testing.TB
@@ -68,6 +69,7 @@ type spy struct {
 	mu      sync.Mutex
 	calls   []string
 	secrets [][]byte
+	in, out map[string][][]byte
 	hashed  [][]byte
 	pairs   int
 
@@ -93,6 +95,19 @@ func (s *spy) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls, s.secrets, s.hashed, s.pairs, s.fetches = nil, nil, nil, 0, 0
+	s.in, s.out = nil, nil
+}
+
+func (s *spy) inputs(purpose string) [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]byte(nil), s.in[purpose]...)
+}
+
+func (s *spy) outputs(purpose string) [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]byte(nil), s.out[purpose]...)
 }
 
 func (s *spy) seen() []string {
@@ -130,6 +145,10 @@ func (s *spy) MixKey(chain, secret *secmem.Buffer, ctx jcrypto.Context) (*secmem
 }
 
 func (s *spy) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.Context, size int) (*secmem.Buffer, error) {
+	var in []byte
+	if secret != nil {
+		in = bytes.Clone(secret.Bytes())
+	}
 	out, err := s.CryptoProvider.DeriveKey(secret, purpose, ctx, size)
 	if err == nil && purpose == purposeFetch {
 		s.mu.Lock()
@@ -139,6 +158,15 @@ func (s *spy) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.Conte
 		if zero {
 			clear(out.Bytes())
 		}
+	}
+	if err == nil {
+		s.mu.Lock()
+		if s.in == nil {
+			s.in, s.out = map[string][][]byte{}, map[string][][]byte{}
+		}
+		s.in[purpose] = append(s.in[purpose], in)
+		s.out[purpose] = append(s.out[purpose], bytes.Clone(out.Bytes()))
+		s.mu.Unlock()
 	}
 	s.record("DeriveKey "+purpose, out)
 	return out, err

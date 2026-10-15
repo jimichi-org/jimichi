@@ -494,6 +494,100 @@ func TestEmptyVolumeSealedAsVolume(t *testing.T) {
 	})
 }
 
+// both regions of every file are sealed, each under a fresh r: no r and no
+// body is zero, no r repeats within a file or across files, and the region
+// without a volume does not open under a zero key. Two seals of one content
+// under one key differ in r and in the ciphertext
+func TestRegionsSealedFresh(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p *spy) {
+		zero, err := secmem.New(keySize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer zero.Release()
+		seen := map[string]bool{}
+		for range 4 {
+			f := mustFile(t, p, volume(t, "a", []byte("x")))
+			_, s := mustOpen(t, p, f, password(t, "a"))
+			for a := range 2 {
+				area := areaOf(f, a)
+				if allZero(area[:rSize]) || allZero(area[rSize:]) {
+					t.Fatalf("region %d of a one-volume file is zero in r or in its body", a)
+				}
+				if seen[string(area[:rSize])] {
+					t.Fatalf("the r of region %d repeats", a)
+				}
+				seen[string(area[:rSize])] = true
+			}
+			if ok, err := openArea(p, zero, 1-s, areaOf(f, 1-s), make([]byte, plainSize)); err != nil || ok {
+				t.Fatalf("the region without a volume opens under a zero key: %v, %v", ok, err)
+			}
+		}
+
+		key, err := secmem.NewFrom(seq(1, keySize))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer key.Release()
+		plain, err := secmem.New(plainSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer plain.Release()
+		plain.Bytes()[1] = 1
+		one, two := make([]byte, RegionSize), make([]byte, RegionSize)
+		for _, area := range [][]byte{one, two} {
+			if err := sealChecked(p, key, 0, plain, area); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if bytes.Equal(one[:rSize], two[:rSize]) || bytes.Equal(one[rSize:], two[rSize:]) {
+			t.Fatal("two seals of one content under one key share r or the ciphertext")
+		}
+	})
+}
+
+// the empty volume is sealed and opened back under a key of its own: not zero,
+// not the volume key, another one at every Prepare
+func TestEmptyVolumeKeyFresh(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p *spy) {
+		var empty [][]byte
+		for range 2 {
+			p.reset()
+			d, err := Prepare(p, volume(t, "a", []byte("x")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.Close()
+			keys, volumes := p.inputs(purposeBlock), p.outputs(purposeVolume)
+			if len(keys) != 2 || !bytes.Equal(keys[0], keys[1]) || len(volumes) != 1 {
+				t.Fatalf("Prepare of one volume: %d block derivations, %d volume keys", len(keys), len(volumes))
+			}
+			if allZero(keys[0]) || bytes.Equal(keys[0], volumes[0]) {
+				t.Fatal("the empty volume is sealed under a zero key or under the volume key")
+			}
+			empty = append(empty, keys[0])
+		}
+		if bytes.Equal(empty[0], empty[1]) {
+			t.Fatal("two Prepare calls sealed their empty volumes under one key")
+		}
+	})
+}
+
+// the documented maximum fits in the first volume and in the second
+func TestFillFull(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p *spy) {
+		body := bytes.Repeat([]byte{0xaa}, MaxContent)
+		_, file := mustCreate(t, p, volume(t, "a", body), volume(t, "b", body))
+		for _, pw := range []string{"a", "b"} {
+			v, _ := mustOpen(t, p, file, password(t, pw))
+			if !bytes.Equal(v.Content(), body) {
+				t.Fatalf("volume %s opened to %d bytes, want %d", pw, len(v.Content()), MaxContent)
+			}
+		}
+	})
+}
+
 // a fresh 32-byte salt per file, in every context the password starts from
 func TestSaltFreshAndBound(t *testing.T) {
 	eachSuite(t, func(t *testing.T, p *spy) {
