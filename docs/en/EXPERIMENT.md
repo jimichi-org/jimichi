@@ -501,8 +501,9 @@ Rules:
   invocations, share the stream of message gaps and the stream of client phases. A phase is the
   remainder of a shared random number divided by the schedule of the level, so levels with the
   same schedule get the same phases, levels with different schedules share them for only part of
-  the flows, and a level without a schedule has no phases; relay clock phases are each run's own. Such runs are compared as pairs by repeat number, by Wilcoxon's test, over the pairs
-  where both runs are clean; the number of dropped pairs is reported alongside, since a pair stays
+  the flows, and a level without a schedule has no phases; relay clock phases are each run's own.
+  Such runs are compared as pairs by repeat number, by Wilcoxon's test, over the pairs where both
+  runs are clean; the number of dropped pairs is reported alongside, since a pair stays
   only when both levels survived. A pair shares random numbers, not time: the levels of a set run
   one after another, and a pair does not cancel drift in host load. Two quantities of one run are
   compared as pairs in the same way: two attacks on the same links, a watermark and the null level
