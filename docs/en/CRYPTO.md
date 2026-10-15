@@ -146,8 +146,10 @@ Decisions taken:
   one string. Otherwise ErrBadPassword. The call leaves the password buffer as it is.
 - The salt of PasswordKey is the transcript hash of ctx, and the provider does not see the parts
   of a context, so it cannot check them. The caller puts a fresh random part of at least 16 bytes
-  (RFC 9106, 3.1; SP 800-132, 5.1) into the context of every container and every volume and keeps
-  it with the container. A fixed context would give every container of a suite one salt, and one
+  (RFC 9106, 3.1; SP 800-132, 5.1) into the context of every container and keeps it with the
+  container. The client container has one salt of 32 bytes from crypto/rand per file, shared by
+  its two volumes: Open stretches one password once and tries both regions (section
+  "Container"). A fixed context would give every container of a suite one salt, and one
   computation per guessed password would test it against all of them.
 - The strength of a password, the rate of attempts and reading a password without a string copy
   are the caller's. Under zeroing PasswordKey ends with a forced collection (section "Known
@@ -189,6 +191,9 @@ A label holds no 0x00 byte and is at most 50 bytes long.
 | `noise/split/i2r`, `noise/split/r2i` | 33 / 31 | noise, the direction keys after the handshake | 32 |
 | `e2e/step/key` | 30 / 28 | e2e, the record key | 32 |
 | `e2e/step/next` | 31 / 29 | e2e, the next key of the ratchet chain | 32 |
+| `vault/volume` | 30 / 28 | vault, the volume key | 32 |
+| `vault/block` | 29 / 27 | vault, the region key for one sealing | 32 |
+| `vault/fetch` | 29 / 27 | vault, the fetch capability F of a volume | 16 |
 | `pair/1` | 24 / 22 | the provider, inside DerivePair | 32 |
 | `password/1` | 28 / 26 | the provider, inside PasswordKey | 32 |
 
@@ -350,10 +355,12 @@ rotation the published key stays in place and the attempt is counted as a failed
 check that fails for another reason, no room to lock a secret above all, reports that reason and
 not a bad pair.
 
-DerivePair and PasswordKey are meant for the client container
-([#20](https://github.com/jimichi-org/jimichi/issues/20)); the end-to-end packages and the
-conversation driver do not call them, and the source checks of noise, e2e and conversation hold
-this.
+Client container (section "Container"): only vault calls DerivePair and PasswordKey. The
+exchanges `vault/password` (the password stretch), `vault/volume` (the volume key), `vault/block`
+(the region key for one sealing) and `vault/identity` (the pair and F of a volume). vault/profile
+adds no exchange of its own: it checks the key of a contact card through e2e.NewSession, with the
+exchange `e2e/check`. The end-to-end packages and the conversation driver do not call DerivePair
+or PasswordKey, and the source checks of noise, e2e and conversation hold this.
 
 ### Rules for changes
 
@@ -743,6 +750,137 @@ timings); a witnessed transcript; a sender's device compromised before the sessi
 formal model: the argument rests on the symmetry of Agree, which the tests check, and on the
 transcript holding no other value.
 
+## Container
+
+The client container (package vault, ARCHITECTURE, "Client container") takes PasswordKey,
+DeriveKey, DerivePair and the AEAD from the provider and has no primitives of its own.
+
+### Container formulas
+
+```
+ctx_pw      = NewContext(p, "vault/password", salt)
+W           = PasswordKey(password, ctx_pw)
+ctx_s       = NewContext(p, "vault/volume", salt, [s])          s = 0, 1, the region number
+k_s         = DeriveKey(W, "vault/volume", ctx_s, 32)            volume key; W is released at once
+ctx_b       = NewContext(p, "vault/block", [s], r)               th_b = ctx_b.Sum()
+K_b         = DeriveKey(k_s, "vault/block", ctx_b, 32)           one Seal or Open
+region      = r || Seal(K_b, nonce = 0^NonceSize, plaintext[4048], ad = th_b)
+ctx_id      = NewContext(p, "vault/identity", salt, [s])
+(priv, pub) = DerivePair(k_s, ctx_id)                            identity key
+F           = DeriveKey(k_s, "vault/fetch", ctx_id, 16)          fetch capability
+own card    = (suite, mailbox address of the contact card, QueueID(F), pub)
+```
+
+| Exchange | Parts | T length, c25519 / GOST |
+|---|---|---|
+| `vault/password` | salt 32 | 79 / 77 |
+| `vault/volume` | salt 32, region number 1 | 80 / 78 |
+| `vault/block` | region number 1, r 32 | 79 / 77 |
+| `vault/identity` | salt 32, region number 1 | 82 / 80 |
+
+- The salt is 32 bytes from crypto/rand, one per file and shared by both volumes: Open stretches
+  one password once and tries both regions, so the region number in ctx_s, not the salt,
+  separates the keys of the volumes. This is the fresh part of the context PasswordKey asks of the
+  caller (section "Interface").
+- One key per Seal: r is 32 fresh bytes from crypto/rand at every sealing, so the zero nonce is
+  safe, as for the records of the end-to-end layer. The file holds no nonce; for MGM the top bit
+  of the zero nonce is 0, as the mode requires.
+- An empty volume is sealed by the same code, but instead of k_s under a key of 32 bytes from
+  crypto/rand, released right after the sealing.
+- The volume key carries three labels: `vault/block` for every r, `pair/1` inside DerivePair and
+  `vault/fetch`. HMAC under k_s is a PRF, the outputs are independent. The pair and F are told
+  apart by their labels under one context ctx_id. The salt and the region number in ctx_id repeat
+  what already went into k_s and bind the identity to the place of the volume explicitly. There is
+  no separate identity secret before DerivePair: the label `pair/1` separates it anyway.
+- The identity derivation (ctx_id, `pair/1`, `vault/fetch`) belongs to file format v1, as the cost
+  `password/1` does: another derivation is the purpose `pair/2` together with a new file format
+  (another size), otherwise earlier containers would give other identities when opened. The
+  version byte of the content describes only the layout of the profile, and vault/profile reads it
+  after the derivation.
+- A zero F (about 2^-128) and ErrNoScalar (below 2^-128) make a creation fail without a file and
+  an opening return ErrCorrupt; nothing retries. Other errors of DerivePair and DeriveKey, secmem
+  errors on a shortage of lockable memory included, are returned as they are, not as ErrCorrupt.
+- vault and vault/profile do not call GenerateSigning, Sign or Verify: the pair of a volume serves
+  agreement only (section "Signatures").
+
+### What the file holds
+
+The file holds no key material in any form, not even encrypted: no identity key, no F, no session
+keys, no W, k_s or K_b. It holds only the salt and two sealed regions, and the plaintext of a
+written volume holds the version and the contact card. This is a statement about the bytes of the
+file, not about strength: the file and a volume password reproduce the identity key and F just as
+the password would open them if they were stored in the volume under a key from the password. The
+password without the file gives nothing: the salt exists only in the file.
+
+### One and several states of the file
+
+The game: the adversary gets the file in one state and the password pw_a of one volume. World 0:
+the second region is an empty volume under a random key that was thrown away. World 1: the second
+region has a password pw_b of its own, generated (at least 80 bits) and different from pw_a, and
+any content. The place of the volume of pw_a is random in both worlds.
+
+1. Hybrid 1. In world 1 W_b = PasswordKey(pw_b, ctx_pw). While pw_b is outside the search, W_b is
+   indistinguishable from random to the adversary (the stretch in the random oracle model), and
+   then k_b and K_b are indistinguishable from random given a PRF DeriveKey. The price: the share
+   of the password space searched and the advantage against the PRF. For a generated password the
+   share is negligible, for a password a person chose it is not, so such a password is outside
+   the claim.
+2. Hybrid 2. Under a one-time random K_b with the zero nonce the plaintext of the volume is
+   replaced by the plaintext of an empty volume of the same length 4048. The price: the advantage
+   against an IND-CPA AEAD with a one-time key.
+3. The result is an empty volume under a random key with r from the same source, which is the
+   region of world 0. The worlds coincide.
+4. The key of the second region derived from W_a opens it in neither world, and the work of an
+   opening is the same: Open always tries both regions.
+
+- Assumptions: an IND-CPA AEAD with a one-time key, a PRF DeriveKey and a generated password of
+  the second volume of at least 80 bits. Under them the file in one state and the password of one
+  volume do not show whether a second volume exists.
+- The identity key of volume b is a function of k_b and is not in the file. The public key of
+  volume b held by its contact does not help to distinguish without pw_b: it can be tied to the
+  file only through k_b, that is by searching the password. The content of a written volume is at
+  most 339 bytes, the rest of the plaintext is zeroes, and the distribution of the region is the
+  same.
+- Several states: the file is written once, at creation, so the states of the file after creation
+  are the same byte for byte and give nothing beyond one.
+- That the file without a password cannot be told from uniform bytes needs IND$: ciphertext and
+  tag indistinguishable from a random string. For XChaCha20-Poly1305 with a one-time key this is
+  the standard assumption. For Kuznyechik-MGM it follows from the structure of the mode (counter
+  keystream, the tag as an output of the block cipher) given a Kuznyechik PRP, but the work has no
+  proof of it: it is an assumption.
+- Where the argument ends: a password within the search, filesystem metadata, the memory of a
+  running client, the environment (log line times, the mailbox, shell history). There is no
+  formal proof, there is the reasoning; the measurement is planned (EXPERIMENT, block 5).
+
+### The card
+
+A card built from a volume is distributed as the card of a -peer client without a container.
+Without a container on c25519 pub = X25519(clamp(u), 9) for a uniform u (GenerateEphemeral, X25519
+does the clamping), in GOST k is uniform on [1, q-1], F is uniform on nonzero 16 bytes. From a
+volume the same formulas run over a PRF output under k_s: clamp(raw), rejection sampling on
+[1, q-1], F from DeriveKey with a zero refused. A distinguisher between cards with and without a
+container would give a distinguisher of the PRF, so neither the contact nor the mailbox learns
+about the container from the card.
+
+A contact holding the owner's card checks a password guess through the queue only together with
+the salt from the file: PasswordKey, two DeriveKey and a Hash for QueueID(F), with no point
+multiplication. The cost is the same as for a check by the tag of a region: one stretch per guess.
+
+### Container keys
+
+| Key or secret | Where | Lives |
+|---|---|---|
+| password | secmem, the caller's buffer | vault holds it no longer than Prepare or Open; `jimichi vault show` releases it right after Open, `vault init` at its end, after printing the passwords |
+| W | secmem | until k_0 and k_1 are derived |
+| k_s of the first volume at creation | secmem | until the write |
+| k_0, k_1 at opening | secmem | the one that did not open until the attempts end, the one that opened until the pair and F are derived |
+| K_b | secmem; on c25519 a copy in the AEAD struct ([#39](https://github.com/jimichi-org/jimichi/issues/39)) | one Seal or Open |
+| key of an empty volume | secmem | Prepare only |
+| buffer of an opening attempt | secmem, one per attempt | a failed one at once, the successful one until the volume is closed |
+| volume buffer in a Draft | secmem | until the write |
+| GOST candidates of DerivePair | the private key buffer; the library's slice is zeroed | a refused one is overwritten by the next |
+| identity key, F | secmem | until Close of the volume or of the profile that took them through Take |
+
 ## Memory (crypto/secmem)
 
 - A buffer comes from mmap on pages of its own outside the Go heap, then mlock and
@@ -855,14 +993,34 @@ outside the threat model.
 
 A password together with the Context it was stretched under is equivalent to the output of
 PasswordKey and to everything derived from it, so copies of the password and of the working state
-of the stretch are equivalent to that key.
+of the stretch are equivalent to that key. In the client container the volume key, the identity
+key and F are derived from the output of PasswordKey, and the salt sits in the file. So a volume
+password together with the file is equivalent to the identity key and F of that volume, and
+copies of the password and of the working state of the stretch are equivalent to the identity
+key.
+
+Values of the container in the rows of the table:
+- x/crypto hkdf, crypto/hmac (c25519): the HMAC pads holding W (`vault/volume`) and the volume
+  key k_s (`vault/block`, `vault/fetch`, DerivePair); the last block of the Expand reader is k_s
+  in `vault/volume`, K_b in `vault/block`, the unclamped identity key, equivalent to it, in
+  DerivePair, and a block that starts with F in `vault/fetch`.
+- gogost, KDF: the HMAC-Streebog states holding W and k_s, one per call in DerivePair; the last
+  Streebog block, half of which is the output: copies of k_s, K_b, F and every DerivePair
+  candidate, the last of which is the identity key taken.
+- crypto/ecdh and gogost, GOST R 34.10: the scalar of the identity key while DerivePair computes
+  the public key, at every opening of a volume.
+- x/crypto chacha20poly1305 and gogost, Kuznyechik: the region key K_b in the cipher struct for
+  one Seal or Open, as the record key mk_n of the end-to-end layer.
 
 Timing of DerivePair in the GOST suite:
 - The number of candidates depends on the secret, but the refused candidates are outputs of the
   pseudorandom function under other numbers, independent of the one taken, and tell nothing about
   the private key. For one secret the number is constant, so repeated calls with the same secret
   on one device narrow down both it and the time of the point multiplication. The multiplication
-  time carries what VKO with this key carries.
+  time carries what VKO with this key carries. In the container the secret is the volume key, so
+  the number of candidates is constant for a volume and tells volumes apart, and repeated openings
+  on one device narrow it and the multiplication time down; it tells nothing about the identity
+  key.
 - The check 0 < k < q on math/big is not constant time. The top 64-bit word of q is 2^62, so for
   a candidate that is taken the comparison is decided on the top word, otherwise only with
   probability about 2^-62; SetBytes drops a zero top word with the same probability. There is no
