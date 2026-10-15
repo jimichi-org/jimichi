@@ -22,6 +22,13 @@ const usage = `usage:
       print the contact card of a client key that is thrown away at once
   jimichi card-hash <suite>:<base64>
       print the hash of a contact card, as a client prints it in card_hash=
+  jimichi vault init -suite c25519 -mailbox host:port -contact <suite>:<base64> [-contact ...] [-stdin] FILE
+      create a client container with one volume per -contact, each under a
+      password of its own: generated and printed one a line in the order of
+      -contact, or with -stdin read one a line from stdin
+  jimichi vault show -suite c25519 FILE
+      read the password of a volume from stdin and print the client card it
+      derives, its card_hash, the mailbox and the card_hash of the contact
 `
 
 func main() {
@@ -29,10 +36,15 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runIn(args, os.Stdin, stdout, stderr)
+}
+
+func runIn(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
+	name := args[0]
 	var err error
 	switch args[0] {
 	case "enroll":
@@ -43,6 +55,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = runKeygenCard(args[1:], stdout, stderr)
 	case "card-hash":
 		err = runCardHash(args[1:], stdout, stderr)
+	case "vault":
+		if len(args) > 1 {
+			name += " " + args[1]
+		}
+		err = runVault(args[1:], stdin, stdout, stderr)
 	case "help", "-h", "-help", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0
@@ -54,7 +71,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case errors.Is(err, flag.ErrHelp):
 		return 0
 	case err != nil:
-		fmt.Fprintf(stderr, "jimichi %s: %v\n", args[0], err)
+		fmt.Fprintf(stderr, "jimichi %s: %v\n", name, err)
 		return 1
 	}
 	return 0
