@@ -103,9 +103,10 @@ cell is not measured.
 
 ### Client container
 
-Status: planned, not implemented ([#20](https://github.com/jimichi-org/jimichi/issues/20)). NIST
-STS and entropy can show only that the ciphertext has no statistical structure; they do not show
-that a second volume is deniable. That is the task of the volume distinguisher.
+Status: the container is implemented (ARCHITECTURE, "Client container"), its metrics are planned
+([#20](https://github.com/jimichi-org/jimichi/issues/20)). NIST STS and entropy can show only
+that the ciphertext has no statistical structure; they do not show that a second volume is
+deniable. That is the task of the volume distinguisher.
 
 | Metric | Definition |
 |---|---|
@@ -289,9 +290,9 @@ message.
 
 Status: planned, not implemented ([#24](https://github.com/jimichi-org/jimichi/issues/24)). The
 measures are switched by the -keymem and -harden flags of the node and the client; the scenarios
-with memory dumps, the search on disk and the recording of setup cells do not exist yet. The row
-of the client container waits for the container
-([#20](https://github.com/jimichi-org/jimichi/issues/20)).
+with memory dumps, the search on disk and the recording of setup cells do not exist yet. The
+client container exists ([#20](https://github.com/jimichi-org/jimichi/issues/20)); its row is
+planned with the other scenarios.
 
 | Scenario | Metric |
 |---|---|
@@ -305,18 +306,23 @@ of the client container waits for the container
 
 ### Block 5. Client container, adversaries A5 and A6
 
-Status: planned, not implemented ([#20](https://github.com/jimichi-org/jimichi/issues/20)).
+Status: the container is implemented, the measurement is planned
+([#20](https://github.com/jimichi-org/jimichi/issues/20)).
 
 | Scenario | Metric |
 |---|---|
-| Ciphertext statistics | NIST STS, entropy, chi-square |
+| Ciphertext statistics | NIST STS, entropy, chi-square; no evidence about a hidden volume |
 | One volume against two | classifier AUC over a sample of containers |
 | Several snapshots over time | fraction of cases where the changes reveal the hidden volume |
 | Integrity | fraction of modifications detected, one hundred percent expected |
 | Cost to open | time at the chosen Argon2id parameters on the target hardware |
 
-For A6 the expected result is negative: against an adversary with snapshots the property does not
-hold. It will be reported as a measured boundary, not passed over.
+NIST STS, entropy and chi-square are no evidence about a hidden volume: they can show that a file
+differs from random data, not that one volume cannot be told from two.
+
+For A6 the file is written once (ARCHITECTURE, "The single write"), so its snapshots are expected
+to be the same byte for byte; what the filesystem and the drive keep beyond the file is a
+boundary (LIMITATIONS). The result will be reported as measured.
 
 ### Block 6. Performance and primitive cost
 
@@ -452,7 +458,8 @@ constant cell size, cover traffic, state kept on a node, deniability, primitive 
 latency figures. Of the deniability properties this work has today deniability of sending at a
 constant rate, nothing to surrender after a session and offline deniable authentication between
 clients, shown by a forgery and not measured (THREAT_MODEL); the client container
-([#20](https://github.com/jimichi-org/jimichi/issues/20)) is planned. Numbers for other systems
+([#20](https://github.com/jimichi-org/jimichi/issues/20)) is implemented, and the measurement of
+its property is planned (block 5). Numbers for other systems
 will come from their documentation and papers, ours will be measured. No direct performance
 comparison will be made: the conditions differ, and that will be stated.
 
@@ -472,9 +479,10 @@ comparison will be made: the conditions differ, and that will be stated.
    memory dumps with and without the key-memory measures. The measured result will be shown as
    it is; copies of keys that libraries keep on the heap are listed in [CRYPTO](CRYPTO.md),
    "Known gaps".
-5. Planned ([#20](https://github.com/jimichi-org/jimichi/issues/20)): the container, where one
-   password opens the decoy and another the real history. NIST STS results next to it will show
-   only that the ciphertext has no statistical structure; they say nothing about deniability.
+5. The container ([#20](https://github.com/jimichi-org/jimichi/issues/20)): `jimichi vault
+   init` and `jimichi vault show`, one password opens the decoy volume and another the second
+   volume; the distinguisher of block 5 is planned. NIST STS results are no evidence about a
+   hidden volume: they show only that the ciphertext has no statistical structure.
 6. The cost table: GOST against X25519 from the benchmarks and round-trip latency for chains of
    two and three nodes; the rest of block 6 is planned
    ([#118](https://github.com/jimichi-org/jimichi/issues/118)).

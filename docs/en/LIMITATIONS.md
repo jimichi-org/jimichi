@@ -498,10 +498,15 @@ English | [Русский](../ru/LIMITATIONS.md)
   (THREAT_MODEL, advice to the owner).
 - Filesystem metadata of one state: mtime, ctime and the creation time show the moment of
   creation, atime the openings. The filesystem journal, shadow copies, wear-leveling and TRIM see
-  one write for any container, but how many traces of the creation they keep is not measured
+  one version of any container: an attempt that failed before the link and its retry write the
+  same bytes, and the number of attempts depends on write errors, not on the number of volumes.
+  How many traces of the creation they keep is not measured
   ([#162](https://github.com/jimichi-org/jimichi/issues/162)).
-- A `<path>.tmp` left by a creation killed before its link is removed at the next start, but
-  removal does not wipe the blocks on the drive.
+- A `<path>.tmp` left by a creation killed before its link or by a failed attempt, and a file
+  that `jimichi vault init` removes after a failure past the link, are removed, but removal does
+  not wipe the blocks on the drive.
+- One creation per path at a time: every run on the path starts by removing `<path>.tmp`, so two
+  overlapping runs on one path make the creation fail; there is no lock.
 - The single write: changing the contact means a new container, a new identity and a new
   introduction; the contact card of a second volume is needed already at creation.
 - The -peer client with a container (-vault) is planned, and it will have limits of its own: a

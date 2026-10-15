@@ -833,9 +833,10 @@ any content. The place of the volume of pw_a is random in both worlds.
 4. The key of the second region derived from W_a opens it in neither world, and the work of an
    opening is the same: Open always tries both regions.
 
-- Assumptions: an IND-CPA AEAD with a one-time key, a PRF DeriveKey and a generated password of
-  the second volume of at least 80 bits. Under them the file in one state and the password of one
-  volume do not show whether a second volume exists.
+- Assumptions: the PasswordKey stretch in the random oracle model, an IND-CPA AEAD with a one-time
+  key, a PRF DeriveKey and a generated password of the second volume of at least 80 bits. Under
+  them the file in one state and the password of one volume do not show whether a second volume
+  exists.
 - The identity key of volume b is a function of k_b and is not in the file. The public key of
   volume b held by its contact does not help to distinguish without pw_b: it can be tied to the
   file only through k_b, that is by searching the password. The content of a written volume is at
@@ -854,11 +855,12 @@ any content. The place of the volume of pw_a is random in both worlds.
 
 ### The card
 
-A card built from a volume is distributed as the card of a -peer client without a container.
-Without a container on c25519 pub = X25519(clamp(u), 9) for a uniform u (GenerateEphemeral, X25519
-does the clamping), in GOST k is uniform on [1, q-1], F is uniform on nonzero 16 bytes. From a
-volume the same formulas run over a PRF output under k_s: clamp(raw), rejection sampling on
-[1, q-1], F from DeriveKey with a zero refused. A distinguisher between cards with and without a
+Under the assumption of a PRF DeriveKey and DerivePair, a card built from a volume cannot be told
+from the card of a -peer client without a container. Without a container on c25519
+pub = X25519(clamp(u), 9) for a uniform u (GenerateEphemeral, X25519 does the clamping), in GOST
+k is uniform on [1, q-1], F is uniform on nonzero 16 bytes. From a volume the same formulas run
+over a PRF output under k_s: clamp(raw), rejection sampling on [1, q-1], F from DeriveKey with a
+zero refused. A distinguisher between cards with and without a
 container would give a distinguisher of the PRF, so neither the contact nor the mailbox learns
 about the container from the card.
 
@@ -879,7 +881,8 @@ multiplication. The cost is the same as for a check by the tag of a region: one 
 | buffer of an opening attempt | secmem, one per attempt | a failed one at once, the successful one until the volume is closed |
 | volume buffer in a Draft | secmem | until the write |
 | GOST candidates of DerivePair | the private key buffer; the library's slice is zeroed | a refused one is overwritten by the next |
-| identity key, F | secmem | until Close of the volume or of the profile that took them through Take |
+| identity key, F at creation | secmem | the first volume's until Draft.Close or Take (in `vault init` until Create returns), any other volume's until its region is sealed in Prepare |
+| identity key, F at opening | secmem | until Close of the volume or of the profile that took them through Take |
 
 ## Memory (crypto/secmem)
 
@@ -964,13 +967,16 @@ multiplication. The cost is the same as for a check by the tag of a region: one 
   checks cover what such tests cannot see, a copy kept on the heap: a library output goes only into
   a secmem buffer, a copy into one and the clearing of its own slice, every private key number of
   gogost is wiped by a deferred wipe, and X25519 takes every private key as the bytes of its
-  buffer. providertest checks that under zeroing PasswordKey forces one collection and without it
-  none.
+  buffer. They also check that the stretch of both suites gets the password bytes themselves, not
+  a copy (on GOST as an unsafe.String view), and that a GOST candidate is copied only into the
+  private key buffer. providertest checks that under zeroing PasswordKey forces one collection
+  and without it none.
 
 ## Known gaps
 
-secmem protects only the buffers the code manages itself. Libraries make their own copies, and
-some of them live long:
+secmem protects only the secmem buffers themselves. Libraries make their own copies, and
+crypto.NewContext copies a secret part of a transcript to the heap (QueueID(F), below); some of
+the copies live long:
 
 | Where | What | How long |
 |---|---|---|
@@ -1011,6 +1017,12 @@ Values of the container in the rows of the table:
   the public key, at every opening of a volume.
 - x/crypto chacha20poly1305 and gogost, Kuznyechik: the region key K_b in the cipher struct for
   one Seal or Open, as the record key mk_n of the end-to-end layer.
+
+QueueID(F) leaves F outside secmem in the code of this work too: crypto.NewContext builds the
+transcript `mailbox/queue` with F on the heap and does not zero it, and the hash state holds it
+(the SHA-256 digest on c25519, the Streebog buffer on GOST), both until the heap memory is
+reused. The container does this in New at creation and in Parse at every opening, so in
+`vault init` and in `vault show`; the -peer client does it when it builds its own card.
 
 Timing of DerivePair in the GOST suite:
 - The number of candidates depends on the secret, but the refused candidates are outputs of the

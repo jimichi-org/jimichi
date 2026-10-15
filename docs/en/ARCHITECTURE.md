@@ -1454,27 +1454,28 @@ F           = DeriveKey(k_s, "vault/fetch", ctx_id, 16)                      fet
 |---|---|
 | `Prepare(p, volumes...)` | one or two volumes, each with a password and a Fill. Equal passwords: ErrSamePassword. A salt from crypto/rand and a random place of the volume. For every volume one PasswordKey, the volume key and at once the identity; Fill gets the identity and writes the content straight into a secmem buffer of MaxContent = 4046 bytes (more: ErrTooLarge; the tail past the length is zeroed). A Fill of a volume other than the first that returns 0: ErrEmpty. The volumes other than the first and the empty volume are sealed and opened back, and their keys and buffers are released. The Draft holds the salt, the sealed regions, the key of the first volume, its identity and its buffer; there is no file yet |
 | `Draft.Identity()` | the identity of the first volume before the write: the own card is built from it |
-| `Draft.Write(path, fill)` | fill (may be nil) edits the content of the first volume; a failed fill leaves the volume without content; L = 0: ErrEmpty, no file. Seal of the first volume with a fresh r, the single write (below), a reread: the same bytes, and the first region opens. After the write the key and the buffer of the first volume are released, and the next Write gives ErrWritten. A Write that wrote no file (ErrExists, for one) leaves the Draft fit for another attempt |
+| `Draft.Write(path, fill)` | fill (may be nil) edits the content of the first volume; a failed fill leaves the volume without content; L = 0: ErrEmpty, no file. A file at the path: ErrExists before any byte reaches the drive. Seal of the first volume with a fresh r, the single write (below), a reread: the same bytes, and the first region opens. A Write that linked no file (ErrExists, a write or link error) leaves the Draft fit for another attempt. From the first attempt that reached the drive the bytes of the file are fixed: every later attempt writes the same bytes, and a fill then has to give the same content, otherwise it is refused and the Draft stays as it was. Once the link succeeded, the key and the buffer of the first volume are released and the next Write gives ErrWritten; a failure after the link (removing the tmp name, the directory sync, the reread) is ErrWritten with its cause |
 | `Draft.Close()` | releases whatever was not taken through Take |
 | `Create(p, path, volumes...)` | Prepare and Write(path, nil) |
 | `Open(p, path, password)` | a size other than 8224: ErrNotVault. The file is read whole, one PasswordKey, k_0 and k_1. Both regions are always tried, in one order, each attempt into its own secmem buffer. The identity is derived from the key of the region that opened. Open writes and removes nothing |
 | `Volume.Content()`, `Volume.Identity()`, `Volume.Close()` | the content and the identity of the open volume; Close releases whatever was not taken through Take |
 | `Identity` | Public: the public key; Agree: an agreement with the private key, together with Public a noise.Static; Fetch: F, borrowed; Take: moves the keys to the caller, after which Agree refuses. The private key sits under an RWMutex, as in noise.KeyPair |
-| `Clean(path)` | removes the `<path>.tmp` left by a creation killed before its link |
+| `Clean(path)` | removes `<path>.tmp`: the one a creation killed before its link left, or the one of a creation on the same path running at that moment, which then fails |
 
 - Each attempt has a buffer of its own because on c25519 the AVX2 path zeroes its output on a
-  wrong tag: a failed attempt clears its own buffer and not the other one, and the work is the
-  same whatever the outcome.
+  wrong tag: a failed attempt clears its own buffer and not the other one. Both regions are
+  always tried, so the work does not depend on which region opens; only a successful opening
+  goes on to derive the identity.
 
 | Error | When |
 |---|---|
 | ErrNotVault | the file size is not 8224, or it is not a regular file |
 | ErrNoVolume | no region opens: a wrong password, no such volume, another suite, a changed salt or a changed region; one error for all of these |
 | ErrCorrupt | both regions open, a length of 0 or above 4046, a nonzero tail; at opening a refused scalar sampling (crypto.ErrNoScalar) or a zero F |
-| ErrExists | a file already exists at the path; it is left untouched |
+| ErrExists | a file already exists at the path, before the write or at the link; it is left untouched |
 | ErrSamePassword | two volumes share a password |
 | ErrTooLarge | Fill returned a length above MaxContent |
-| ErrWritten | a Write after this Draft has written the file |
+| ErrWritten | a Write after this Draft has linked the file; with a cause, a Write whose link succeeded and a later step failed: the file is at the path and the Draft is spent |
 | ErrEmpty | a written volume without content |
 
 - A password that breaks the provider's rules is crypto.ErrBadPassword. ErrNoScalar and a zero F
@@ -1489,15 +1490,22 @@ F           = DeriveKey(k_s, "vault/fetch", ctx_id, 16)                      fet
   has no write after creation, and Open only reads. So all states of the file after creation are
   the same byte for byte, and the number and the moment of writes do not depend on the number of
   volumes.
-- The write: a leftover `<path>.tmp` is removed, a new one is created with O_CREATE|O_EXCL and
-  mode 0600, gets 8224 bytes, fsync and close; then `os.Link(tmp, path)`: if the file already
-  exists, ErrExists, and the existing file is left untouched; tmp is removed, and on Linux the
-  directory is synced.
-- A hard link never replaces a file, so two creators cannot overwrite each other, and readers
-  only read: no locking is needed.
+- The write: a leftover `<path>.tmp` is removed and an existing file is refused with ErrExists
+  before anything is written; a new tmp is created with O_CREATE|O_EXCL and mode 0600, gets
+  8224 bytes, fsync and close; then `os.Link(tmp, path)`: if a file appeared at the path
+  meanwhile, ErrExists, and that file is left untouched; tmp is removed (a tmp already gone
+  counts as removed), and on Linux the directory is synced.
+- The first attempt that reaches the tmp fixes the bytes of the file in the Draft: the first
+  volume is sealed once, and an attempt after a failed write or link writes the same 8224 bytes.
+  So the blocks a failed attempt leaves on the drive hold the version the file holds, not
+  another version of this container.
+- A hard link never replaces a file, so no existing container is overwritten. One creation per
+  path at a time is assumed: every run starts with Clean, which removes `<path>.tmp`, so a run
+  that overlaps a creation on the same path makes that creation fail, and two overlapping
+  creations can both fail.
 - A `<path>.tmp` left by a creation killed before its link is another container with another
-  salt, not a version of this one. Clean removes it at the next start; removal does not wipe the
-  blocks on the drive (LIMITATIONS).
+  salt, not a version of this one: the next start runs a new Prepare. Clean removes it at the
+  next start; removal does not wipe the blocks on the drive (LIMITATIONS).
 - The cost: changing the contact means a new container, a new identity and a new introduction,
   and the contact card of a second volume is needed already at creation.
 
@@ -1523,7 +1531,7 @@ A volume holds `u8 version = 1 | canonical contact card`, at most 339 bytes.
 
 | Command | stdin | Action |
 |---|---|---|
-| `jimichi vault init -suite S -mailbox ADDR -contact CARD [-contact CARD] FILE` | none | one volume per -contact, at most two; the formal checks of every card (canonical, the suite of -suite, the address of -mailbox) and the refusal of an existing file come before any password is stretched, while the key of the contact and the match with the own card are checked after the identity is derived, before the write; the command generates the passwords itself (16 bytes from crypto/rand, base32 without padding, 128 bits) and, once the file is created, prints them on stdout one per line in the order of -contact, once; then `created` on stderr |
+| `jimichi vault init -suite S -mailbox ADDR -contact CARD [-contact CARD] FILE` | none | one volume per -contact, at most two; the formal checks of every card (canonical, the suite of -suite, the address of -mailbox, two cards with neither the key nor the queue in common) and the refusal of an existing file come before any password is stretched, while the key of the contact and the match with the own card are checked after the identity is derived, before the write; the command generates the passwords itself (16 bytes from crypto/rand, base32 without padding, 128 bits) and, once Create succeeds, prints them on stdout one per line in the order of -contact, once; then `created` on stderr. A creation that fails after its link removes the file: an error leaves neither a file nor a password |
 | `jimichi vault init ... -stdin FILE` | passwords, one per line | the user's own passwords; a warning on stderr that the claim about the second volume is not made for them |
 | `jimichi vault show -suite S FILE` | the password | the own card derived from the password, its card_hash, the mailbox address and the contact's card_hash, as the lines `card=<suite>:<base64>`, `card_hash=`, `mailbox=`, `contact_card_hash=`; neither the region number nor the number of volumes |
 
