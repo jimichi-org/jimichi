@@ -11,8 +11,9 @@ import (
 )
 
 // a signature over a record or a transcript would prove its sender to anyone:
-// the source names no signing method on any path, and reaches cryptography
-// only through the provider
+// the source names no signing method on any path, nor the derivations meant
+// for the client container, and reaches cryptography only through the
+// provider
 func TestNoSignatures(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -39,7 +40,7 @@ func TestNoSignatures(t *testing.T) {
 		ast.Inspect(f, func(n ast.Node) bool {
 			if sel, ok := n.(*ast.SelectorExpr); ok {
 				switch sel.Sel.Name {
-				case "GenerateSigning", "Sign", "Verify":
+				case "GenerateSigning", "Sign", "Verify", "DerivePair", "PasswordKey":
 					t.Errorf("%s: %s", fset.Position(sel.Pos()), sel.Sel.Name)
 				}
 			}

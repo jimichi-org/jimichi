@@ -322,9 +322,9 @@ hold. It will be reported as a measured boundary, not passed over.
 
 Status: partly implemented. go test -bench covers key generation, key agreement, signing,
 verification, one AEAD layer of a cell, the transcript hash, the derivation of the hop keys and
-the chaining of two agreements on both suites (crypto/suite), sealing a cell and layer
-stripping on c25519 (wire), and the KK handshake and one record of the hash ratchet on both
-suites (e2e). The lab reports round-trip latency for chains of two and more nodes. Planned
+the chaining of two agreements, the key from a password and the pair from a secret on both
+suites (crypto/suite), sealing a cell and layer stripping on c25519 (wire), and the KK
+handshake and one record of the hash ratchet on both suites (e2e). The lab reports round-trip latency for chains of two and more nodes. Planned
 ([#118](https://github.com/jimichi-org/jimichi/issues/118)): the setup benchmark
 at a node with one and two onion keys, node throughput at saturation, goodput per client, latency
 for a chain of one node (the lab takes no fewer than two hops) and the cost of memory locking (the
@@ -339,6 +339,8 @@ lab and the benchmarks have no switch for the key-memory measures).
 | Latency by hop count | one, two, three nodes; p50, p95, p99 |
 | Cost of mlock | the same metrics with memory locking on and off |
 | End-to-end layer | go test -bench, nanoseconds per KK handshake of both sides and per record of the hash ratchet, GOST against X25519 |
+| Key from a password | go test -bench (BenchmarkPasswordKey), wall and processor time per call, Argon2id against PBKDF2 with Streebog-512 |
+| Pair from a secret | go test -bench (BenchmarkDerivePair), wall and processor time per call, GOST against X25519 |
 
 The end-to-end layer has two benchmarks in e2e. BenchmarkKK times one handshake of both sides:
 two sessions with their card checks, kk1 and kk2. BenchmarkRatchetStep times one record with a
@@ -358,6 +360,20 @@ derives after the agreement: the setup key, the cell key, the replay tag and the
 offsets (BenchmarkDeriveHopKeys), and the chaining of two agreements on an authenticated link
 (BenchmarkMixKey). Release v0.2.0, the last one without the binding, has only the agreement
 benchmark to compare with.
+
+The cost of the key from a password is two numbers per call: the wall time and the processor
+time of the whole process (core-seconds, user + sys from getrusage; the wall time alone on
+systems without getrusage). Argon2id runs four lanes in goroutines of their own, so its processor
+time is about four times its wall time, while PBKDF2 runs on one thread. The iteration count
+C_GOST of the GOST suite comes from a one-off measurement on the testbed host, chosen so that the
+core-seconds per guess match Argon2id within 0.8-1.25. This equates the cost on our code in the
+Linux containers of the testbed, not for an adversary: the same code outside a container, an
+optimised Streebog and above all GPUs and dedicated hardware, where PBKDF2 needs no memory,
+compute a guess faster, and that cost has not been measured. The number of candidates of
+DerivePair in the GOST suite depends on the secret, so the benchmark cycles through 64 secrets and
+gives the mean; the worst case, 128 refused candidates, is timed by a separate benchmark in
+crypto/gost. No measurement is recorded yet, and the numbers are published only from a recorded
+run.
 
 ## Statistics
 

@@ -24,9 +24,13 @@ var (
 	ErrBadContext = errors.New("crypto: bad context")
 )
 
-// names reserved to the providers: a caller that could derive under them would
-// reproduce the output of Agree, MixKey or the transcript prefix
-var reservedPurposes = []string{"agree", "mix"}
+// names reserved to the providers, whole or as a prefix: a caller that could
+// derive under them would reproduce the output of Agree, MixKey, DerivePair,
+// PasswordKey or the transcript prefix
+var (
+	reservedPurposes = []string{"agree", "mix", "pair", "password"}
+	reservedPrefixes = []string{transcriptNS, "pair/", "password/"}
+)
 
 // "jimichi/v2/<suite>/<purpose>": no zero byte, so a provider can put one
 // after it as a separator
@@ -44,8 +48,10 @@ func DeriveLabel(s Suite, purpose string) ([]byte, error) {
 			return nil, ErrBadLabel
 		}
 	}
-	if strings.HasPrefix(purpose, transcriptNS) {
-		return nil, ErrBadLabel
+	for _, r := range reservedPrefixes {
+		if strings.HasPrefix(purpose, r) {
+			return nil, ErrBadLabel
+		}
 	}
 	return Label(s, purpose)
 }

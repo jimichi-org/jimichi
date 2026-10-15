@@ -19,6 +19,14 @@ English | [Русский](../ru/LIMITATIONS.md)
   HTTP with the suite named in them. Frames after the handshake are 528 bytes on both. Hiding the
   suite and the role in the first flight of the handshake is planned
   ([#57](https://github.com/jimichi-org/jimichi/issues/57)).
+- A key from a password is cheaper to guess offline in the GOST suite than in c25519. The GOST
+  suite stretches a password with PBKDF2 and HMAC-Streebog-512, which needs no memory, since the
+  TC26 recommendations have no memory-hard function; c25519 uses Argon2id with 64 MiB. The
+  iteration count matches the processor time of Argon2id only for gogost's Streebog in the Linux
+  containers of the testbed. Outside a container, with an optimised Streebog and above all on
+  GPUs and dedicated hardware a guess costs less; by how much has not been measured. The client
+  container that will use the key is planned
+  ([#20](https://github.com/jimichi-org/jimichi/issues/20)).
 - Go runtime: libraries keep their own copies of keys on the heap. The AEAD working key in
   x/crypto stays there for the life of the circuit or link and is never wiped: it remains after
   that until the memory is reused. secmem protects only its own buffers; CRYPTO lists the copies.
