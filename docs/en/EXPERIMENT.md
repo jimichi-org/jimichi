@@ -494,13 +494,14 @@ Rules:
   the baseline configuration.
 - Per-run metrics (AUC and the like) are bounded, not normally distributed and often sit at the
   edge: a run's AUC is often exactly 1. So the tests are rank tests with no assumption on the
-  distribution, and p is exact.
+  distribution, and p is exact: if a series goes past the bound of either test, that bound is
+  raised before the analysis.
 - Runs are paired when they share random streams. cmd/lab derives the seed of repeat r from -seed
   and r alone, so runs with the same -seed and repeat number, from one set or from separate
-  invocations, share the stream of message gaps and the stream of client phases. A phase from
-  that stream is scaled by the schedule of the level, so it coincides only between levels with
-  the same schedule, and a level without a schedule has no phases; relay clock phases are each
-  run's own. Such runs are compared as pairs by repeat number, by Wilcoxon's test, over the pairs
+  invocations, share the stream of message gaps and the stream of client phases. A phase is the
+  remainder of a shared random number divided by the schedule of the level, so levels with the
+  same schedule get the same phases, levels with different schedules share them for only part of
+  the flows, and a level without a schedule has no phases; relay clock phases are each run's own. Such runs are compared as pairs by repeat number, by Wilcoxon's test, over the pairs
   where both runs are clean; the number of dropped pairs is reported alongside, since a pair stays
   only when both levels survived. A pair shares random numbers, not time: the levels of a set run
   one after another, and a pair does not cancel drift in host load. Two quantities of one run are
@@ -510,9 +511,9 @@ Rules:
 - A p-value is reported only together with the effect size, and a significant but negligible
   difference is called negligible.
 - A Holm family holds only comparisons where rejecting the null hypothesis is the result. A
-  comparison whose outcome is exact by construction (the same value in every run of both groups,
-  which the procedure marks as degenerate) and an undefined comparison (an empty group) are not
-  tested and do not enter the family.
+  comparison whose outcome is exact by construction (for Mann-Whitney the same value in every run
+  of both groups, for Wilcoxon equal values in every pair; the procedure marks it as degenerate)
+  and an undefined comparison (an empty group) are not tested and do not enter the family.
 - Agreement with a model and equality with guessing are not inferred from a non-significant p:
   with few runs a non-significant p shows nothing, and Holm's correction would only make such a
   claim easier. A proportion inside +-2 SE of the model is the same non-rejection, so the deviation
