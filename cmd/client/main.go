@@ -21,6 +21,7 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/internal/fetch"
+	"github.com/jimichi-org/jimichi/internal/verify"
 	"github.com/jimichi-org/jimichi/link"
 	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/wire"
@@ -34,10 +35,7 @@ const (
 // 1 is any other failure and 2 is what the flag package exits with
 const exitRefused = 3
 
-var (
-	errNoBundle = errors.New("the entry holds no bundle for it")
-	errTooFew   = errors.New("too many listed nodes left out by the entry or not passing the check")
-)
+var errTooFew = errors.New("too many listed nodes left out by the entry or not passing the check")
 
 func main() {
 	nodes := flag.String("nodes", "", "comma separated host:port of the nodes the chain is drawn from, at least -hops of them")
@@ -322,7 +320,7 @@ func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger) ([]client
 	if err != nil {
 		return nil, s.named(err)
 	}
-	nodes, at := view.nodes, view.at
+	nodes := view.Nodes()
 	if err := s.enough(view, entry); err != nil {
 		return nil, err
 	}
@@ -345,91 +343,46 @@ func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger) ([]client
 	}
 	path := make([]int, s.hops)
 	for i := range path {
-		path[i] = at[i]
+		path[i] = i
 	}
 	if !s.fixed {
-		if path, err = client.ChooseRest(at[entry], len(nodes), s.hops, s.rnd); err != nil {
+		if path, err = view.Draw(entry, s.hops, s.rnd); err != nil {
 			return nil, err
 		}
 	}
-	return chainOf(nodes, path), nil
-}
-
-// the nodes of an entry's mirror whose bundles pass the check
-type mirrorView struct {
-	nodes []pki.Verified
-	// position in nodes of every listed node, or -1
-	at []int
-	// listed index of every node in nodes
-	listed []int
-	// why a served bundle of a listed node did not pass
-	failed []error
+	return view.Chain(path), nil
 }
 
 // the entry lists a bundle from the moment its own clock reaches the bundle's
-// start, so the time is read once the mirror is here, after any retries. Every
-// bundle is read on its own, and one that does not pass is a node left out
-// like one the entry does not serve; bundles are not compared with each other,
-// since the setup and the link of a node bind its own identity
-func (s selection) mirror(p jcrypto.CryptoProvider, entry int) (mirrorView, error) {
+// start, so the time is read once the mirror is here, after any retries
+func (s selection) mirror(p jcrypto.CryptoProvider, entry int) (verify.View, error) {
 	bundles, err := nodeBundles(s.web, s.addrs, entry, s.infoPort, s.attempts, s.pause)
 	if err != nil {
-		return mirrorView{}, err
+		return verify.View{}, err
 	}
 	now := s.now()
-	v := mirrorView{at: make([]int, len(s.addrs)), failed: make([]error, len(s.addrs))}
-	for i, b := range bundles {
-		v.at[i] = -1
-		if b == nil {
-			continue
-		}
-		node, err := readNode(p, s.auth, s.trust, s.addrs[i], b, now)
-		if err != nil {
-			v.failed[i] = err
-			continue
-		}
-		v.at[i] = len(v.nodes)
-		v.nodes = append(v.nodes, *node)
-		v.listed = append(v.listed, i)
-	}
-	return v, nil
-}
-
-// why listed node i is not usable
-func (v mirrorView) missing(i int) error {
-	if v.failed[i] != nil {
-		return v.failed[i]
-	}
-	return errNoBundle
-}
-
-func (v mirrorView) usable() []bool {
-	usable := make([]bool, len(v.at))
-	for i, place := range v.at {
-		usable[i] = place >= 0
-	}
-	return usable
+	return verify.Mirror(p, s.auth, s.trust, s.addrs, bundles, now)
 }
 
 // a mirror that waits for every node would let one node that withholds its
 // descriptor empty the mirrors of all the others, so the entry may leave out a
 // bounded number of nodes, and a fixed chain needs exactly its own
-func (s selection) enough(v mirrorView, entry int) error {
+func (s selection) enough(v verify.View, entry int) error {
 	if s.fixed {
 		for i := 0; i < s.hops; i++ {
-			if v.at[i] < 0 {
-				return fmt.Errorf("node %s: %w", s.addrs[i], v.missing(i))
+			if err := v.Missing(i); err != nil {
+				return fmt.Errorf("node %s: %w", s.addrs[i], err)
 			}
 		}
 		return nil
 	}
-	switch verdict, absent, allowed := client.JudgeMirror(v.usable(), entry, s.hops, s.missing); verdict {
+	switch verdict, absent, allowed := v.Judge(entry, s.hops, s.missing); verdict {
 	case client.MirrorTaken:
 		return nil
 	case client.MirrorLacksEntry:
 		// the client connects to the entry, so it needs the entry's own bundle
 		// to pass
-		return &entryError{v.missing(entry)}
+		return &entryError{v.Missing(entry)}
 	default:
 		return fmt.Errorf("%w: %d of %d listed nodes, at most %d may be", errTooFew, absent, len(s.addrs), allowed)
 	}
@@ -464,7 +417,7 @@ func (e *entryError) Error() string { return "the entry: " + failureClass(e.err)
 func (e *entryError) Unwrap() error { return e.err }
 
 var knownFailures = []error{
-	errNoBundle, fetch.ErrTooLarge,
+	verify.ErrNoBundle, fetch.ErrTooLarge,
 	pki.ErrFormat, pki.ErrVersion, pki.ErrDuplicate, pki.ErrSuite, pki.ErrUnknownCA, pki.ErrCertSignature, pki.ErrCertTime,
 	pki.ErrWrongAddr, pki.ErrCertMismatch, pki.ErrDescSignature, pki.ErrDescTime, pki.ErrKeySize,
 	link.ErrHandshake, client.ErrNodeKey, wire.ErrPayloadSize,
@@ -510,21 +463,4 @@ func nodeBundles(web *http.Client, addrs []string, entry int, infoPort string, a
 		bundles[i] = held[addr]
 	}
 	return bundles, nil
-}
-
-func readNode(p jcrypto.CryptoProvider, auth bool, trust pki.Policy, addr string, bundle []byte, now time.Time) (*pki.Verified, error) {
-	if auth {
-		return pki.Verify(p, trust, addr, bundle, now)
-	}
-	return pki.Unverified(p, addr, bundle)
-}
-
-// the identity is empty without authentication, and then nothing binds one
-func chainOf(nodes []pki.Verified, path []int) []client.Node {
-	chain := make([]client.Node, len(path))
-	for i, node := range path {
-		v := nodes[node]
-		chain[i] = client.Node{Addr: v.Addr, StaticPub: v.OnionPub, LinkPub: v.LinkPub, Identity: v.Identity}
-	}
-	return chain
 }

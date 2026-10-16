@@ -54,7 +54,7 @@ func TestSystemDoesNotImportLab(t *testing.T) {
 	}
 	for _, want := range []string{
 		"crypto", "crypto/secmem", "crypto/suite", "crypto/c25519", "crypto/gost", "wire", "link", "pki",
-		"relay", "client", "noise", "e2e", "mailbox", "cmd/relay", "cmd/client", "cmd/jimichi", "scripts",
+		"internal/fetch", "internal/verify", "relay", "client", "noise", "e2e", "mailbox", "cmd/relay", "cmd/client", "cmd/jimichi", "scripts",
 	} {
 		if !seen[want] {
 			t.Errorf("the walk did not reach %s", want)

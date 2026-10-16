@@ -14,6 +14,7 @@ import (
 	"github.com/jimichi-org/jimichi/client"
 	"github.com/jimichi-org/jimichi/conversation"
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/internal/verify"
 	"github.com/jimichi-org/jimichi/mailbox"
 	"github.com/jimichi-org/jimichi/pki"
 )
@@ -455,7 +456,7 @@ func TestRouteRefusesAMirrorItCannotDrawFrom(t *testing.T) {
 		want error
 	}{
 		{"without the mailbox", []int{bedExit}, errNoMailbox},
-		{"without the entry", []int{rogue}, errNoBundle},
+		{"without the entry", []int{rogue}, verify.ErrNoBundle},
 		{"without two nodes", []int{honestOne, honestTwo}, errTooFew},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -571,7 +572,7 @@ func TestPeerCauseNamesNoNode(t *testing.T) {
 	addr := "relay-3.jimichi.svc.cluster.local:9000"
 	for _, err := range []error{
 		&entryError{fmt.Errorf("dial tcp %s: connection refused", addr)},
-		&nodeError{fmt.Errorf("node %s: %w", addr, errNoBundle)},
+		&nodeError{fmt.Errorf("node %s: %w", addr, verify.ErrNoBundle)},
 		fmt.Errorf("dial tcp %s: i/o timeout", addr),
 		fmt.Errorf("%w: 2 of 5 listed nodes, at most 1 may be", errTooFew),
 		errNoMailbox, errNotServed, errSilent,
