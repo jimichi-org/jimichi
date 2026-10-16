@@ -388,8 +388,8 @@ run.
   in the report). The series published so far is preliminary and has fewer runs per point. The
   observation window opens when the flows start sending, so circuit setup falls outside it; no
   further warm-up is discarded.
-- Series run on an idle host: concurrent load disturbs timing and lowers the AUC of individual
-  runs. Tables report the median.
+- Series run with the kind cluster stopped and no build on the host: concurrent load disturbs
+  timing and lowers the AUC of individual runs. Tables report the median.
 - Within a run the AUC carries a 95 percent confidence interval: BCa bootstrap over flows, 10000
   resamples. Across repeats the summary gives the median, the minimum and the maximum; an
   interval for the median across repeats is planned with the full series
@@ -580,10 +580,11 @@ comparison will be made: the conditions differ, and that will be stated.
 1. A live message through three nodes. The panel of what each node learns is planned with the
    dashboard ([#21](https://github.com/jimichi-org/jimichi/issues/21)).
 2. The observer: the linking attack runs without protection and with each measure in turn. Cover
-   traffic on top of the payload is not expected to lower its AUC: in the preliminary series only
-   nodes sending on their own clocks brought it close to chance ([README](../../README.md)). A
-   live view of the attack result is planned with the dashboard
-   ([#21](https://github.com/jimichi-org/jimichi/issues/21)).
+   traffic on top of the payload is not expected to lower its AUC: in the preliminary series it
+   stayed at 1.000 with cover, and nodes sending on their own clocks lowered it to medians of
+   0.44-0.67 against 0.94-1.00 in the other rows of the README table; these runs cannot show that
+   it is at chance ([README](../../README.md)). A live view of the attack result is planned with
+   the dashboard ([#21](https://github.com/jimichi-org/jimichi/issues/21)).
 3. The bandwidth multiplier against AUC curve. The published figure has no intervals; confidence
    intervals across runs are planned with the full series
    ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
