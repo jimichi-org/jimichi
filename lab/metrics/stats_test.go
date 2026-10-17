@@ -458,6 +458,107 @@ func TestMeanIntervalKnownAnswer(t *testing.T) {
 	}
 }
 
+// a NaN bound matches only a NaN
+func nearBound(a, b float64) bool { return math.IsNaN(a) && math.IsNaN(b) || near(a, b) }
+
+// K ~ Binom(n, q), alpha = 1 - level; Low is x_(l) with the largest l such that
+// P(K <= l - 1) <= alpha/2, High is x_(u) with the smallest u such that
+// P(K >= u) <= alpha/2. Over 1..20 the order statistic x_(i) is i:
+//
+//	q 1/2, level 0.95: P(K <= 5) = (1+20+190+1140+4845+15504)/2^20 =
+//	21700/1048576 = 0.020695 <= 0.025 < P(K <= 6) = 60460/2^20 = 0.05766, so
+//	l = 6 and by symmetry u = 15; coverage 1 - 2 x 21700/2^20 =
+//	125647/131072 = 0.958611. Point (10 + 11)/2 = 21/2
+//	q 1/2, level 1 - 0.05/7: alpha/2 = 0.05/14 = 0.0035714; P(K <= 3) =
+//	1351/2^20 = 0.001288 <= it < P(K <= 4) = 6196/2^20 = 0.005909, so l = 4
+//	and u = 17; coverage 1 - 2 x 1351/2^20 = 522937/524288 = 0.997423
+//	q 4/5, level 0.95: P(K <= 11) = 0.009982 <= 0.025 < P(K <= 12) =
+//	0.032143, so l = 12; P(K >= 20) = 0.8^20 = 0.011529 <= 0.025 <
+//	P(K >= 19) = 0.069175, so u = 20. Point: pos 0.8 x 19 = 15.2, so
+//	16 + 0.2 = 81/5
+//	q 1/5, level 0.95, the corridor case, the mirror of q 4/5: P(K <= 0) =
+//	0.8^20 = 0.011529 <= 0.025 < P(K <= 1) = 0.069175, so l = 1;
+//	P(K >= 9) = 0.009982 <= 0.025 < P(K >= 8) = 0.032143, so u = 9. Point:
+//	pos 0.2 x 19 = 3.8, so 4 + 0.8 = 4.8. At n = 20 the minimum and the
+//	maximum bound the 0.2 and 0.8 quantiles at 0.95: when every run lies in
+//	[0.45, 0.55], at most a fifth of the runs lie outside on each side,
+//	coverage 1 - 2 x 0.011529 >= 0.9769
+//	q 4/5, level 1 - 0.05/7: 0.8^20 = 0.0115 > 0.00357, so no u;
+//	P(K <= 10) = 0.002594 <= 0.00357 < P(K <= 11) = 0.00998, so l = 11
+//
+// 1..5, q 1/2, level 0.95: P(K = 0) = 1/32 = 0.03125 > 0.025, no bound on
+// either side. {3, 1, 2, 6, 5, 4}, q 1/2, level 0.95: P(K = 0) = 1/64 <=
+// 0.025 < P(K <= 1) = 7/64, so [x_(1), x_(6)], coverage 1 - 2/64 = 31/32, and
+// the median 3.5. Ten 0.5 and ten 1.0: x_(6) = 0.5, x_(15) = 1, the median
+// (x_(10) + x_(11))/2 = 0.75. Twenty-two 0.5 and eight 0.8, n = 30:
+// P(K <= 9) = 0.021387 <= 0.025 < P(K <= 10) = 0.049369, so l = 10 (coverage
+// 0.957226) and u = 21, x_(10) = x_(21) = 0.5: the median interval cannot carry
+// an equality-with-guessing claim. A tail exactly at alpha/2: 1..6, q 1/2,
+// level 1 - 2/64, P(K = 0) = 1/64 = alpha/2 < P(K <= 1) = 7/64, so
+// [x_(1), x_(6)] although Exp gives P(K = 0) = 0.015625000000000007; 1..7 at
+// level 1 - 2/128, P(K = 0) = 1/128 = alpha/2, so [x_(1), x_(7)]
+func TestQuantileIntervalKnownAnswer(t *testing.T) {
+	nan := math.NaN()
+	for _, c := range []struct {
+		name             string
+		values           []float64
+		q, level         float64
+		point, low, high float64
+	}{
+		{"median of 20", seq(1, 20), 0.5, 0.95, 21.0 / 2, 6, 15},
+		{"median of 20 at 7 claims", seq(1, 20), 0.5, 1 - 0.05/7, 21.0 / 2, 4, 17},
+		{"0.8 of 20", seq(1, 20), 0.8, 0.95, 81.0 / 5, 12, 20},
+		{"0.2 of 20", seq(1, 20), 0.2, 0.95, 4.8, 1, 9},
+		{"0.8 of 20 at 7 claims", seq(1, 20), 0.8, 1 - 0.05/7, 81.0 / 5, 11, nan},
+		{"median of 5", seq(1, 5), 0.5, 0.95, 3, nan, nan},
+		{"median of 6 unsorted", []float64{3, 1, 2, 6, 5, 4}, 0.5, 0.95, 3.5, 1, 6},
+		{"two tie groups", concat(repeat(0.5, 10), repeat(1, 10)), 0.5, 0.95, 0.75, 0.5, 1},
+		{"22 at 0.5 and 8 at 0.8", concat(repeat(0.5, 22), repeat(0.8, 8)), 0.5, 0.95, 0.5, 0.5, 0.5},
+		{"median of 6, tail at alpha/2", seq(1, 6), 0.5, 1 - 2.0/64, 3.5, 1, 6},
+		{"median of 7, tail at alpha/2", seq(1, 7), 0.5, 1 - 2.0/128, 4, 1, 7},
+	} {
+		input := append([]float64(nil), c.values...)
+		got := metrics.QuantileInterval(c.values, c.q, c.level)
+		if !near(got.Point, c.point) || !nearBound(got.Low, c.low) || !nearBound(got.High, c.high) || got.Method != "order" {
+			t.Errorf("%s: QuantileInterval = %+v, want %v in [%v, %v]", c.name, got, c.point, c.low, c.high)
+		}
+		for i := range input {
+			if c.values[i] != input[i] {
+				t.Errorf("%s: the input changed to %v", c.name, c.values)
+				break
+			}
+		}
+	}
+}
+
+// the type 7 arithmetic a + 0.5(b - a) gives 0.28137050199999997 for this pair
+// against Median's (a + b)/2 = 0.281370502; P(K = 0) = 1/4, so no bounds
+func TestQuantileIntervalMedianIsMedian(t *testing.T) {
+	values := []float64{0.0140417, 0.548699304}
+	got := metrics.QuantileInterval(values, 0.5, 0.95)
+	if got.Point != metrics.Median(values) || !math.IsNaN(got.Low) || !math.IsNaN(got.High) {
+		t.Errorf("QuantileInterval(%v, 0.5, 0.95) = %+v, want exactly Median %v without bounds", values, got, metrics.Median(values))
+	}
+}
+
+// {-1.7e308, 1.7e308} at q 1/5: type 7 gives -1.7e308 + 0.2 x (+Inf) = +Inf
+func TestQuantileIntervalUndefined(t *testing.T) {
+	for _, c := range []struct {
+		values []float64
+		q      float64
+	}{
+		{nil, 0.5}, {[]float64{}, 0.5}, {[]float64{1, math.NaN(), 3}, 0.5}, {[]float64{1, math.Inf(1)}, 0.5},
+		{seq(1, 20), 0}, {seq(1, 20), 1}, {[]float64{-1.7e308, 1.7e308}, 0.2},
+	} {
+		if got := metrics.QuantileInterval(c.values, c.q, 0.95); !math.IsNaN(got.Point) || !math.IsNaN(got.Low) || !math.IsNaN(got.High) {
+			t.Errorf("QuantileInterval(%v, %v, 0.95) = %+v, want NaN", c.values, c.q, got)
+		}
+	}
+	if got := metrics.QuantileInterval(seq(1, 20), 0.5, 1.5); got.Point != 10.5 || !math.IsNaN(got.Low) || !math.IsNaN(got.High) {
+		t.Errorf("QuantileInterval(1..20, 0.5, 1.5) = %+v, want 10.5 without bounds", got)
+	}
+}
+
 // edges binary-exact, since 0.4 - 0.05 is 0.35000000000000003 in float64
 func TestEquivalenceKnownAnswer(t *testing.T) {
 	for _, c := range []struct {

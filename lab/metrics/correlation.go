@@ -197,6 +197,18 @@ func TPRAtFPR(scores []Score, target float64) float64 {
 	return best
 }
 
+func PrecisionAtBaseRate(tpr, fpr, base float64) float64 {
+	if !(tpr >= 0 && tpr <= 1) || !(fpr >= 0 && fpr <= 1) || !(base > 0 && base < 1) {
+		return math.NaN()
+	}
+	hits := tpr * base
+	positives := hits + fpr*(1-base)
+	if positives == 0 {
+		return math.NaN()
+	}
+	return hits / positives
+}
+
 // expected share of entry flows matched to their own exit when the adversary
 // picks the highest score and breaks ties at random; NaN without scores, where
 // a zero would read as a measured miss

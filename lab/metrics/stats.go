@@ -336,6 +336,69 @@ func MeanInterval(values []float64, level float64) Interval {
 	return out
 }
 
+// a bound no order statistic reaches at this n is NaN, not an infinite bound
+func QuantileInterval(values []float64, q, level float64) Interval {
+	nan := math.NaN()
+	undefinedQuantile := Interval{Point: nan, Low: nan, High: nan, Method: "order"}
+	if len(values) == 0 || !(q > 0 && q < 1) {
+		return undefinedQuantile
+	}
+	for _, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return undefinedQuantile
+		}
+	}
+	sorted := append([]float64(nil), values...)
+	sort.Float64s(sorted)
+	var point float64
+	if q == 0.5 {
+		// computed as Median computes it, so a summary median does not move by an ulp
+		point = middle(sorted)
+	} else {
+		point = quantile(sorted, q)
+	}
+	if math.IsNaN(point) || math.IsInf(point, 0) {
+		return undefinedQuantile
+	}
+	out := Interval{Point: point, Low: nan, High: nan, Method: "order"}
+	if !(level > 0 && level < 1) {
+		return out
+	}
+	n := len(sorted)
+	// the tails from Lgamma and Exp are a few ulp off, and a tail exactly at
+	// alpha/2 must not fall on the wrong side by rounding
+	half := (1 - level) / 2 * (1 + 1e-12)
+	pmf := binomialPMF(n, q)
+	below := 0.0
+	for l := 1; l <= n; l++ {
+		below += pmf[l-1]
+		if below > half {
+			break
+		}
+		out.Low = sorted[l-1]
+	}
+	above := 0.0
+	for u := n; u >= 1; u-- {
+		above += pmf[u]
+		if above > half {
+			break
+		}
+		out.High = sorted[u-1]
+	}
+	return out
+}
+
+func binomialPMF(n int, q float64) []float64 {
+	pmf := make([]float64, n+1)
+	all, _ := math.Lgamma(float64(n + 1))
+	for k := range pmf {
+		a, _ := math.Lgamma(float64(k + 1))
+		b, _ := math.Lgamma(float64(n - k + 1))
+		pmf[k] = math.Exp(all - a - b + float64(k)*math.Log(q) + float64(n-k)*math.Log1p(-q))
+	}
+	return pmf
+}
+
 // "not shown" says only that agreement was not shown, not that the value
 // differs
 func Equivalence(iv Interval, model, margin float64) string {
