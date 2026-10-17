@@ -2,6 +2,7 @@ package metrics_test
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/jimichi-org/jimichi/lab/metrics"
@@ -53,22 +54,24 @@ func cellAUC(values []float64, truth []bool) float64 {
 // the scores are w·(x - m)/(w·d) with m = (mu1 + mu0)/2 and d = mu1 - mu0, so
 // the zero row and the unit rows give the direction w/(w·d) as score(e_j) -
 // score(0), and the training class means score +1/2 and -1/2 in every case
-func TestDiscriminantScoresKnownAnswer(t *testing.T) {
+type discriminantCase struct {
+	name           string
+	payload, cover [][]float64
+	test           [][]float64
+	truth          []bool
+	want           []float64
+	dir            []float64
+	auc            float64
+}
+
+func discriminantCases() []discriminantCase {
 	nan := math.NaN()
 	case1 := rows([]float64{2, 0}, []float64{4, 0})
 	cover1 := rows([]float64{0, 1}, []float64{0, 3})
 	test1 := rows([]float64{3, 1}, []float64{1, 1}, []float64{1, 0}, []float64{0, 2})
 	truth1 := []bool{true, true, false, false}
 	scores1 := []float64{9.0 / 26, -3.0 / 26, 1.0 / 26, -0.5}
-	for _, c := range []struct {
-		name           string
-		payload, cover [][]float64
-		test           [][]float64
-		truth          []bool
-		want           []float64
-		dir            []float64
-		auc            float64
-	}{
+	return []discriminantCase{
 		// mu = (3/2, 1), deviations (1/2,-1), (5/2,-1), (-3/2,0), (-3/2,2):
 		// S_t = [[1/4+25/4+9/4+9/4, -1/2-5/2+0-3], [., 1+1+0+4]] = [[11,-6],[-6,6]],
 		// det 30, S_t^-1 = (1/30)[[6,6],[6,11]]. d = (3,0) - (0,2) = (3,-2),
@@ -80,10 +83,10 @@ func TestDiscriminantScoresKnownAnswer(t *testing.T) {
 		// (14/30-5/30)*15/13 = 9/26, (2/30-5/30)*15/13 = -3/26, (1/30)*15/13 =
 		// 1/26, (-13/30)*15/13 = -1/2. Pairs: 9/26 > 1/26, 9/26 > -1/2,
 		// -3/26 < 1/26, -3/26 > -1/2: 3 of 4. w/(w·d) = (3/13, -2/13)
-		{"BLOCKS case", case1, cover1, test1, truth1, scores1, []float64{3.0 / 13, -2.0 / 13}, 0.75},
+		{"two-feature worked case", case1, cover1, test1, truth1, scores1, []float64{3.0 / 13, -2.0 / 13}, 0.75},
 		// feature 1 times 1e9, feature 2 plus 7: x -> Ax + b maps w to A^-T w =
 		// (2e-10, -2/15) and leaves w·(x - m)/(w·d) unchanged, so the scores and
-		// the AUC of the BLOCKS case
+		// the AUC of the two-feature worked case
 		{
 			"affine invariance",
 			rows([]float64{2e9, 7}, []float64{4e9, 7}), rows([]float64{0, 8}, []float64{0, 10}),
@@ -92,7 +95,7 @@ func TestDiscriminantScoresKnownAnswer(t *testing.T) {
 		},
 		// a third value 7 in every training row: same(7, 7), so the column is
 		// dropped with weight 0 and its test values 0, 100, -5, 3 do not matter;
-		// weights (1/5, -2/15, 0), the scores of the BLOCKS case
+		// weights (1/5, -2/15, 0), the scores of the two-feature worked case
 		{
 			"constant column",
 			rows([]float64{2, 0, 7}, []float64{4, 0, 7}), rows([]float64{0, 1, 7}, []float64{0, 3, 7}),
@@ -122,9 +125,9 @@ func TestDiscriminantScoresKnownAnswer(t *testing.T) {
 			rows([]float64{2, 5}, []float64{1, 3}, []float64{2, 0}, []float64{1, 100}), nil,
 			[]float64{0.5, -0.5, 0.5, -0.5}, []float64{1, 0}, nan,
 		},
-		// columns (a+b, a, b) over the BLOCKS rows (a, b): b = (a+b) - a is
-		// dropped; -2/15 (a+b) + 1/3 a = a/5 - 2b/15, the BLOCKS discriminant,
-		// with the same m and w·d = 13/15: raw -2/15 and 1/5 give
+		// columns (a+b, a, b) over the rows (a, b) of the two-feature worked
+		// case: b = (a+b) - a is dropped; -2/15 (a+b) + 1/3 a = a/5 - 2b/15, its
+		// discriminant, with the same m and w·d = 13/15: raw -2/15 and 1/5 give
 		// (-2/15 - 1/6)*15/13 = -9/26 and (1/5 - 1/6)*15/13 = 1/26. Weights
 		// (-2/15, 1/3, 0), w/(w·d) = (-2/13, 5/13, 0): which dependent column
 		// goes does not change the scores while the test respects the dependency
@@ -200,14 +203,29 @@ func TestDiscriminantScoresKnownAnswer(t *testing.T) {
 			rows([]float64{1}, []float64{5}, []float64{0}, []float64{3}), []bool{true, false, true, false},
 			[]float64{0.5, -0.5, 0.75, 0}, []float64{-0.25}, 1,
 		},
-		// the BLOCKS case times 1e-150: S_t,jj about 1e-299 is a normal float,
-		// so the scores and the AUC of the BLOCKS case
+		// the two-feature worked case times 1e-150: S_t,jj about 1e-299 is a
+		// normal float, so the scores and the AUC of that case
 		{
 			"small units",
 			times(case1, 1e-150), times(cover1, 1e-150), times(test1, 1e-150), truth1,
 			scores1, nil, 0.75,
 		},
-	} {
+	}
+}
+
+// the probe of the zero row and the unit rows
+func directionProbe(width int) [][]float64 {
+	probe := rows(make([]float64, width))
+	for j := range width {
+		e := make([]float64, width)
+		e[j] = 1
+		probe = append(probe, e)
+	}
+	return probe
+}
+
+func TestDiscriminantScoresKnownAnswer(t *testing.T) {
+	for _, c := range discriminantCases() {
 		train, truth := classes(c.payload, c.cover)
 		got := metrics.DiscriminantScores(train, truth, c.test)
 		if len(got) != len(c.want) {
@@ -232,13 +250,7 @@ func TestDiscriminantScoresKnownAnswer(t *testing.T) {
 			continue
 		}
 		width := len(train[0])
-		probe := rows(make([]float64, width))
-		for j := range width {
-			e := make([]float64, width)
-			e[j] = 1
-			probe = append(probe, e)
-		}
-		s := metrics.DiscriminantScores(train, truth, probe)
+		s := metrics.DiscriminantScores(train, truth, directionProbe(width))
 		for j := range width {
 			if !near(s[j+1]-s[0], c.dir[j]) {
 				t.Errorf("%s: direction w/(w·d) %v at column %d, want %v", c.name, s[j+1]-s[0], j, c.dir)
@@ -252,7 +264,7 @@ func TestDiscriminantScoresKnownAnswer(t *testing.T) {
 
 // the underflowing column: payload {2e-200}, {4e-200}, cover {0}, {1e-200}
 // is not constant by same(), but every squared deviation underflows, so
-// S_t,11 = 0 and s_1 = 0. The BLOCKS case times 1e-160 has S_t,11 = 11e-320,
+// S_t,11 = 0 and s_1 = 0. The two-feature worked case times 1e-160 has S_t,11 = 11e-320,
 // a subnormal float that has lost its digits. The pivot case of the known
 // answers at e = 1e-5: e^2/(4 + e^2) = 2.5e-11 <= 1e-9 drops column 2 and the
 // means of column 1 are equal, so a leak of 1e-5 is lost to the tolerance
@@ -365,7 +377,7 @@ func TestTotalVariationKnownAnswer(t *testing.T) {
 	}{
 		// N = 6, ranks 0..5 go to floor(3r/6) = 0,0,1,1,2,2: p = (1/2, 1/2, 0),
 		// q = (1/4, 1/4, 1/2), TV = 1/2 (1/4 + 1/4 + 1/2)
-		{"BLOCKS pair", []float64{1, 3}, []float64{2, 4, 5, 6}, 3, 0.5},
+		{"worked example", []float64{1, 3}, []float64{2, 4, 5, 6}, 3, 0.5},
 		// N = 8, bin floor(r/2): the three 1s (r = 0) to bin 0, 2 (r = 3) to 1,
 		// 3 (r = 4) and 4 (r = 5) to 2, 5 and 6 to 3; p = (1/2, 1/4, 1/4, 0),
 		// q = (1/4, 0, 1/4, 1/2), TV = 1/2 (1/4 + 1/4 + 0 + 1/2)
@@ -404,5 +416,120 @@ func TestTotalVariationUndefined(t *testing.T) {
 		if got := metrics.TotalVariation(c.a, c.b, c.bins); !math.IsNaN(got) {
 			t.Errorf("TotalVariation(%v, %v, %d) = %v, want NaN", c.a, c.b, c.bins, got)
 		}
+	}
+}
+
+// the training rows of the DiscriminantScores cases: a constant column and a
+// column that is an affine function of the ones before it are left out, the
+// two-feature worked, separator, one column and pivot cases keep every
+// column; in the two row case S_t has rank one and the second column's pivot
+// is 8 - 16/2 = 0; one row makes every column constant
+func TestUnusedColumnsKnownAnswer(t *testing.T) {
+	nan := math.NaN()
+	for _, c := range []struct {
+		name  string
+		train [][]float64
+		want  []int
+	}{
+		{"two-feature worked case", rows([]float64{2, 0}, []float64{4, 0}, []float64{0, 1}, []float64{0, 3}), []int{}},
+		{"constant column", rows([]float64{2, 0, 7}, []float64{4, 0, 7}, []float64{0, 1, 7}, []float64{0, 3, 7}), []int{2}},
+		{"separator", rows([]float64{1, 5}, []float64{1, 7}, []float64{0, 4}, []float64{0, 6}), []int{}},
+		{"collinear", rows([]float64{1, 3}, []float64{3, 7}, []float64{0, 1}, []float64{2, 5}), []int{1}},
+		{"dependent column first", rows([]float64{2, 2, 0}, []float64{4, 4, 0}, []float64{1, 0, 1}, []float64{3, 0, 3}), []int{2}},
+		{"two rows", rows([]float64{1, 2}, []float64{3, 6}), []int{1}},
+		{"one column", rows([]float64{2}, []float64{4}, []float64{0}, []float64{0}), []int{}},
+		{"float constant", rows([]float64{2, 0.3}, []float64{4, tenth + fifth}, []float64{0, 0.3}, []float64{0, 0.3}), []int{1}},
+		{"just above the pivot tolerance", rows([]float64{0, 0.01}, []float64{2, 2.01}, []float64{0, 0}, []float64{2, 2}), []int{}},
+		{"just below the pivot tolerance", rows([]float64{0, 1e-5}, []float64{2, 2 + 1e-5}, []float64{0, 0}, []float64{2, 2}), []int{1}},
+		{"every column constant", rows([]float64{5, 1}, []float64{5, 1}, []float64{5, 1}, []float64{5, 1}), []int{0, 1}},
+		{"one row", rows([]float64{3, 4}), []int{0, 1}},
+	} {
+		got := metrics.UnusedColumns(c.train)
+		if got == nil || !slices.Equal(got, c.want) {
+			t.Errorf("%s: unused %v, want %v", c.name, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		name  string
+		train [][]float64
+	}{
+		{"empty", nil},
+		{"ragged", rows([]float64{2, 0}, []float64{4}, []float64{0, 1})},
+		{"NaN", rows([]float64{2, 0}, []float64{4, nan})},
+		{"width zero", rows([]float64{}, []float64{})},
+		{"underflowing column", rows([]float64{2e-200}, []float64{4e-200}, []float64{0}, []float64{1e-200})},
+		{"subnormal scatter", times(rows([]float64{2, 0}, []float64{4, 0}, []float64{0, 1}, []float64{0, 3}), 1e-160)},
+	} {
+		if got := metrics.UnusedColumns(c.train); got != nil {
+			t.Errorf("%s: unused %v, want nil", c.name, got)
+		}
+	}
+	// the two share one rule: every column UnusedColumns lists has weight 0,
+	// so its unit row scores exactly as the zero row
+	for _, c := range discriminantCases() {
+		train, truth := classes(c.payload, c.cover)
+		unused := metrics.UnusedColumns(train)
+		if unused == nil {
+			t.Errorf("%s: no columns, though DiscriminantScores scores it", c.name)
+			continue
+		}
+		s := metrics.DiscriminantScores(train, truth, directionProbe(len(train[0])))
+		for _, j := range unused {
+			if s[j+1]-s[0] != 0 {
+				t.Errorf("%s: column %d is unused but moves the score by %v", c.name, j, s[j+1]-s[0])
+			}
+		}
+	}
+}
+
+// truth [T, F, F, T | F, T] over flows 0 and 1: row j of a flow takes the
+// label of row (j + k) mod n of that flow. Offsets 1 and 1 turn flow 0 into
+// F, F, T, T and flow 1 into T, F; 3 and 0 give T, T, F, F and F, T; 5 and -1
+// equal 1 and 1 modulo 4 and 2
+func TestCircularShiftKnownAnswer(t *testing.T) {
+	truth := []bool{true, false, false, true, false, true}
+	flow := []int{0, 0, 0, 0, 1, 1}
+	before := slices.Clone(truth)
+	for _, c := range []struct {
+		name    string
+		truth   []bool
+		flow    []int
+		offsets []int
+		want    []bool
+	}{
+		{"one each", truth, flow, []int{1, 1}, []bool{false, false, true, true, true, false}},
+		{"three and none", truth, flow, []int{3, 0}, []bool{true, true, false, false, false, true}},
+		{"beyond the flow and negative", truth, flow, []int{5, -1}, []bool{false, false, true, true, true, false}},
+		{"identity", truth, flow, []int{0, 0}, truth},
+		// flow 0 holds rows 0 and 2, T and F; flow 1 rows 1 and 3, F and T
+		{"interleaved flows", []bool{true, false, false, true}, []int{0, 1, 0, 1}, []int{1, 1}, []bool{false, true, true, false}},
+	} {
+		got := metrics.CircularShift(c.truth, c.flow, c.offsets)
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+		for f := range c.offsets {
+			in, out := 0, 0
+			for i := range c.flow {
+				if c.flow[i] == f && c.truth[i] {
+					in++
+				}
+				if c.flow[i] == f && got[i] {
+					out++
+				}
+			}
+			if in != out {
+				t.Errorf("%s: flow %d holds %d true labels after the shift, %d before", c.name, f, out, in)
+			}
+		}
+	}
+	if !slices.Equal(truth, before) {
+		t.Fatalf("the input changed to %v", truth)
+	}
+	if got := metrics.CircularShift(truth, []int{0, 0, 0, 0, 1, 2}, []int{1, 1}); got != nil {
+		t.Errorf("a flow without an offset: %v, want nil", got)
+	}
+	if got := metrics.CircularShift(truth, flow[:5], []int{1, 1}); got != nil {
+		t.Errorf("truth and flow of different lengths: %v, want nil", got)
 	}
 }

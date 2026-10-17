@@ -92,6 +92,12 @@ type result struct {
 	RelayTimedOut uint64 `json:"relay_timed_out"`
 	RelayExpired  uint64 `json:"relay_expired"`
 	RelayRefused  uint64 `json:"relay_refused"`
+
+	// rank of the true entry, mean over exits, and how often it took each
+	// place; the degree of anonymity pools the places over runs
+	TrueRank   *float64  `json:"true_rank"`
+	RankCounts []float64 `json:"rank_counts"`
+	scores     []metrics.Score
 }
 
 type variant struct {
@@ -161,7 +167,7 @@ func command(args []string, stdout, stderr io.Writer) int {
 	binList := fs.String("bins", "100ms", "comma-separated observation windows, each scored on the same runs")
 	repeats := fs.Int("repeats", 1, "runs per configuration")
 	out := fs.String("out", "artifacts", "directory for the json report")
-	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic")
+	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic, cover: payload against cover cells at the entry, immediate with cover against constant rate")
 	rev := fs.String("rev", "unknown", "code revision recorded in every row")
 	seed := fs.Int64("seed", 1, "base seed; every repeat derives its own from it")
 	suiteName := fs.String("suite", "c25519", "primitive suite for every node and client: gost or c25519")
@@ -171,6 +177,10 @@ func command(args []string, stdout, stderr io.Writer) int {
 	missing := fs.Int("missing", 1, "paths set: listed nodes the client lets an entry leave out of its mirror, as -missing of the client")
 	leftOut := fs.Int("leftout", 0, "paths set: honest nodes a rogue entry leaves out of its mirror")
 	withhold := fs.Int("withhold", 0, "paths set: rogue nodes that keep their descriptors from the honest nodes")
+	train := fs.Int("train", 5, "cover set: training runs per level, run before the claim runs; at least 1")
+	corridorS := fs.Float64("corridor", 0.2, "cover set: s of the AUC corridor rule, set before the series from the pilot")
+	claims := fs.Int("claims", 1, "cover set: equivalence claims of block 7 over its whole series, one per invocation of the set, the m of 1 - 0.05/m")
+	base := fs.Float64("base", 0.001, "correlation sets: base rate of the precision in the summary, fixed before the series, in (0, 1)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -215,6 +225,19 @@ func command(args []string, stdout, stderr io.Writer) int {
 	chosen, err := suite.Parse(*suiteName)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if *set == "cover" {
+		return cover(coverFlags{
+			flows: *flows, hops: *hops, duration: *duration, send: *send,
+			train: *train, repeats: *repeats, corridor: *corridorS, claims: *claims,
+			seed: *seed, suite: chosen, rev: *rev, out: *out,
+		}, stdout, stderr)
+	}
+	// outside it PrecisionAtBaseRate is NaN, and the field would be null
+	// without a word
+	if !(*base > 0 && *base < 1) {
+		fmt.Fprintf(stderr, "-base %v must lie in (0, 1)\n", *base)
 		return 2
 	}
 	bins, err := parseBins(*binList)
@@ -286,7 +309,7 @@ func command(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "report: %v\n", err)
 		return 1
 	}
-	sum := summarise(results)
+	sum := summarise(results, *base)
 	printSummary(stdout, sum)
 	if err := write(stdout, *out, "summary-"+*set+"-"+stamp, sum); err != nil {
 		fmt.Fprintf(stderr, "summary: %v\n", err)
@@ -322,6 +345,25 @@ type summary struct {
 	DegenerateRuns *int     `json:"ci_degenerate_runs"`
 	// null also when the clean runs have no latency sample
 	LatencyP50Ms *float64 `json:"latency_p50_ms_median"`
+
+	TrueRank        *float64     `json:"true_rank_median"`
+	RankAnonymity   anonymityOut `json:"rank_anonymity"`
+	RankCorrected   anonymityOut `json:"rank_anonymity_corrected"`
+	PooledTPR       *float64     `json:"pooled_tpr_at_fpr_0.01"`
+	PooledNegatives *int         `json:"pooled_negatives"`
+	PrecisionAtF    *float64     `json:"precision_at_1_over_f"`
+	BaseRate        float64      `json:"base_rate"`
+	PrecisionAtBase *float64     `json:"precision_at_base_rate"`
+}
+
+type anonymityOut struct {
+	Entropy *float64 `json:"entropy_bits"`
+	Degree  *float64 `json:"degree"`
+	Size    *float64 `json:"size"`
+}
+
+func optAnonymity(a metrics.Anonymity) anonymityOut {
+	return anonymityOut{Entropy: opt(a.Entropy), Degree: opt(a.Degree), Size: opt(a.Size)}
 }
 
 // a closure counted by a relay or a client, or a flow whose circuit closed
@@ -334,7 +376,7 @@ func limited(r result) bool {
 	return r.RelayTimedOut > 0 || r.RelayExpired > 0 || r.RelayRefused > 0
 }
 
-func summarise(rows []result) []summary {
+func summarise(rows []result, base float64) []summary {
 	type key struct{ traffic, bin string }
 	order := []key{}
 	groups := map[key][]result{}
@@ -349,7 +391,10 @@ func summarise(rows []result) []summary {
 	for _, k := range order {
 		g := groups[k]
 		s := summary{Suite: g[0].Suite, Traffic: k.traffic, Bin: k.bin, Runs: len(g)}
-		var auc, top, mult, relay, p50 []float64
+		var auc, top, mult, relay, p50, ranks []float64
+		var counts []float64
+		countsDefined := true
+		var pooled []metrics.Score
 		degenerate := 0
 		for _, r := range g {
 			b, l := broken(r), limited(r)
@@ -373,21 +418,62 @@ func summarise(rows []result) []summary {
 			if r.CIDegenerate {
 				degenerate++
 			}
+			if r.TrueRank != nil {
+				ranks = append(ranks, *r.TrueRank)
+			}
+			switch {
+			case r.RankCounts == nil || counts != nil && len(r.RankCounts) != len(counts):
+				countsDefined = false
+			case counts == nil:
+				counts = slices.Clone(r.RankCounts)
+			default:
+				for i, c := range r.RankCounts {
+					counts[i] += c
+				}
+			}
+			pooled = append(pooled, r.scores...)
 		}
 		if len(auc) > 0 {
-			s.AUC, s.AUCMin, s.AUCMax = ptr(metrics.Median(auc)), ptr(slices.Min(auc)), ptr(slices.Max(auc))
-			s.TopOne, s.Multiplier, s.RelayMult = ptr(metrics.Median(top)), ptr(metrics.Median(mult)), ptr(metrics.Median(relay))
+			s.AUC, s.AUCMin, s.AUCMax = opt(metrics.Median(auc)), opt(slices.Min(auc)), opt(slices.Max(auc))
+			s.TopOne, s.Multiplier, s.RelayMult = opt(metrics.Median(top)), opt(metrics.Median(mult)), opt(metrics.Median(relay))
 			s.DegenerateRuns = &degenerate
 		}
 		if len(p50) > 0 {
-			s.LatencyP50Ms = ptr(metrics.Median(p50))
+			s.LatencyP50Ms = opt(metrics.Median(p50))
 		}
+		s.TrueRank = opt(metrics.Median(ranks))
+		// H is pooled over runs and not taken over one run (EXPERIMENT)
+		if !countsDefined || s.CleanRuns < 2 {
+			counts = nil
+		}
+		plugIn, corrected := metrics.RankAnonymity(counts)
+		s.RankAnonymity, s.RankCorrected = optAnonymity(plugIn), optAnonymity(corrected)
+		tpr := metrics.TPRAtFPR(pooled, 0.01)
+		s.PooledTPR = opt(tpr)
+		if len(pooled) > 0 {
+			negatives := 0
+			for _, sc := range pooled {
+				if !sc.True {
+					negatives++
+				}
+			}
+			s.PooledNegatives = &negatives
+		}
+		s.PrecisionAtF = opt(metrics.PrecisionAtBaseRate(tpr, 0.01, 1/float64(g[0].Flows)))
+		s.BaseRate = base
+		s.PrecisionAtBase = opt(metrics.PrecisionAtBaseRate(tpr, 0.01, base))
 		out = append(out, s)
 	}
 	return out
 }
 
-func ptr(v float64) *float64 { return &v }
+// encoding/json refuses NaN and +-Inf: one such field loses the whole report
+func opt(v float64) *float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil
+	}
+	return &v
+}
 
 func printSummary(w io.Writer, sum []summary) {
 	if len(sum) > 0 {
@@ -538,6 +624,10 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		BrokenFlows:         run.BrokenFlows,
 		FlowClosed:          make([]bool, len(run.Closures)),
 		FlowClosedAfter:     make([]string, len(run.Closures)),
+
+		TrueRank:   opt(metrics.TrueRank(scores)),
+		RankCounts: metrics.RankCounts(scores),
+		scores:     scores,
 	}
 	for i, c := range run.Closures {
 		if !c.Closed {

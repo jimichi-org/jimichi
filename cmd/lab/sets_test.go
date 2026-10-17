@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jimichi-org/jimichi/lab"
 )
@@ -173,4 +174,133 @@ func TestPacedSetFromTheCommandLine(t *testing.T) {
 		{"relay-35ms", "immediate", "0s", "0s", "33.25ms"},
 		{"both-35ms", "constant-rate", "35ms", "0s", "33.25ms"},
 	})
+}
+
+// two training and two claim runs of each level on three flows for a second:
+// the structure of the reports, and that every run is clean and its labels
+// agree, which every value of the set rests on. A host whose clock moves in
+// coarse steps is refused by the set, so the test does not run there
+func TestCoverSetFromTheCommandLine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs a live chain for every run of the set")
+	}
+	start := time.Now()
+	if step := clockStep(func() time.Duration { return time.Since(start) }, 20); step > coverClockLimit {
+		t.Skipf("the monotonic clock moves in steps of %v, above %v", step, coverClockLimit)
+	}
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	status := command([]string{"-set", "cover", "-flows", "3", "-hops", "3", "-suite", "c25519", "-duration", "1s",
+		"-send", "200ms", "-train", "2", "-repeats", "2", "-seed", "3", "-rev", "abc", "-out", dir}, &out, &errOut)
+	if status != 0 || errOut.Len() != 0 {
+		t.Fatalf("status %d, stderr %q", status, errOut.String())
+	}
+
+	names := reports(t, dir)
+	named := regexp.MustCompile(`^(cells|summary)-cover-(\d{8}-\d{6})\.json$`)
+	files := map[string]string{}
+	stamps := map[string]bool{}
+	for _, n := range names {
+		m := named.FindStringSubmatch(n)
+		if m == nil {
+			t.Fatalf("report %s", n)
+		}
+		files[m[1]] = filepath.Join(dir, n)
+		stamps[m[2]] = true
+	}
+	if len(names) != 2 || len(files) != 2 || len(stamps) != 1 {
+		t.Fatalf("reports %v, want the cells and the summary of one run of the command", names)
+	}
+	read := func(kind string, v any) {
+		t.Helper()
+		raw, err := os.ReadFile(files[kind])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, v); err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
+		if !strings.Contains(out.String(), "report: "+files[kind]) {
+			t.Errorf("the path of the %s report is not printed", kind)
+		}
+	}
+
+	var rows []coverRow
+	read("cells", &rows)
+	if len(rows) != 8 {
+		t.Fatalf("%d rows, want 8", len(rows))
+	}
+	step := rows[0].ClockStep
+	if d, err := time.ParseDuration(step); err != nil || d <= 0 || d > coverClockLimit {
+		t.Errorf("clock step %q", step)
+	}
+	for i, r := range rows {
+		traffic, mode := "add-1x", "immediate"
+		if i >= 4 {
+			traffic, mode = "fixed-2x", "constant-rate"
+		}
+		role, rep, seed := "training", i%4, lab.Derive(3, lab.StreamTraining, uint64(i%4))
+		if i%4 >= 2 {
+			role, rep, seed = "claim", i%4-2, lab.Derive(3, uint64(i%4-2))
+		}
+		if r.Role != role || r.Traffic != traffic || r.Mode != mode || r.Repeat != rep || r.Seed != seed || r.BaseSeed != 3 ||
+			r.Flows != 3 || r.Hops != 3 || r.Duration != "1s" || r.Send != "200ms" || r.Suite != "c25519" || r.Rev != "abc" ||
+			r.ClockStep != step {
+			t.Errorf("row %d does not carry the flags: %s", i, encode(t, r))
+		}
+		if r.broken() || r.limited() {
+			t.Fatalf("row %d is not clean: %s", i, encode(t, r))
+		}
+		if r.LabelMismatch || r.PayloadLabels != r.Messages-int(r.Dropped) {
+			t.Fatalf("row %d: labels disagree: %s", i, encode(t, r))
+		}
+		if r.PayloadCells == nil || r.CoverCells == nil || r.UndefinedCells == nil ||
+			*r.PayloadCells+*r.CoverCells+*r.UndefinedCells != r.Cells || *r.PayloadCells == 0 || *r.CoverCells == 0 {
+			t.Errorf("row %d: cells %d against %s payload, %s cover and %s undefined",
+				i, r.Cells, dashInt(r.PayloadCells), dashInt(r.CoverCells), dashInt(r.UndefinedCells))
+		}
+		if (r.AUC == nil) != (r.Degenerate != "") || r.AUC != nil && (*r.AUC < 0 || *r.AUC > 1) {
+			t.Errorf("row %d: lda_auc %s with degenerate %q", i, dash(r.AUC), r.Degenerate)
+		}
+	}
+
+	var sum coverSummary
+	read("summary", &sum)
+	if sum.Set != "cover" || sum.ClockStep != step || len(sum.Levels) != 2 || len(sum.Tests) != 7 {
+		t.Fatalf("summary %s", encode(t, sum))
+	}
+	for i, l := range sum.Levels {
+		if l.TrainingRuns != 2 || l.Runs != 2 || l.EquivalenceClaim != (i == 1) ||
+			l.CorridorLow != nil || l.CorridorHigh != nil || l.Corridor != nil {
+			t.Errorf("level %d: %s", i, encode(t, l))
+		}
+	}
+	families := map[string]int{}
+	for _, c := range sum.Tests {
+		families[c.Family]++
+	}
+	if families["null"] != 4 || families["modes"] != 3 {
+		t.Errorf("tests %v, want 4 against the null and 3 between the modes", families)
+	}
+
+	printed := map[string]int{}
+	for _, l := range strings.Split(out.String(), "\n") {
+		f := strings.Fields(l)
+		switch {
+		case len(f) > 2 && (f[0] == "training" || f[0] == "claim"):
+			printed[f[0]+" "+f[1]+" "+f[2]]++
+		case len(f) > 1 && (f[0] == "level" || f[0] == "test"):
+			printed[f[0]]++
+		case strings.HasPrefix(l, "clock step "):
+			printed["clock"]++
+		}
+	}
+	if printed["clock"] != 1 || printed["level"] != 2 || printed["test"] != 7 {
+		t.Errorf("printed %v:\n%s", printed, out.String())
+	}
+	for _, r := range rows {
+		if n := printed[r.Role+" "+r.Traffic+" "+strconv.Itoa(r.Repeat)]; n != 1 {
+			t.Errorf("%s %s %d printed %d times", r.Role, r.Traffic, r.Repeat, n)
+		}
+	}
 }

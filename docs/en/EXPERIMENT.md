@@ -18,15 +18,18 @@ the windows.
 Seeds: each repeat's seed is derived from the series' base seed, and separate streams for client
 phases and for each flow's gaps are derived from it (splitmix64). Neighbouring repeats and flows
 share no random sequence. The chains sampled in block 3 are drawn from a stream of their own,
-derived from the seed in the same way. The phases of node clocks come from the node's own
-generator, not from the seed, as in a real deployment. Every report row records the
+derived from the seed in the same way. The seeds of the training runs of block 7 come from the base
+seed through a stream of their own, and the shift and the permutation of the labels of its null
+level from streams of their own of the run's seed. The phases of node clocks come from the node's
+own generator, not from the seed, as in a real deployment. Every report row records the
 configuration, the seeds, the code revision and the host load before and after the run.
 
 ## Adversary models
 
 The codes are used in every results table. Measured so far: A1 with the count correlation attack
-(block 1) and the choice of chains for A4 (block 3). The experiments for A3, A5 and A6 are
-planned, see the status of each block; A2 has no block of its own yet.
+(block 1) and the choice of chains for A4 (block 3). The experiments for A3, A5 and A6 are planned,
+see the status of each block; for A2 the cell distinguisher is in place (block 7) and its series is
+planned.
 
 | Code | Adversary | What it sees and can do |
 |---|---|---|
@@ -49,16 +52,20 @@ indistinguishability, not on the secrecy of the implementation.
 | ROC AUC | area under the error curve of the linking attack; a tie between a true and a false pair counts as half a pair | one number, comparable across configurations |
 | Top-1 accuracy | share of entry flows whose highest-scoring exit flow is their own; when k exit flows tie for the highest score and the own one is among them, the flow counts 1/k | what an adversary that picks the best pair gets |
 | TPR at FPR 0.01 | fraction of correctly linked pairs at a fixed false positive rate | an attack matters in the low false positive region |
-| Precision at the base rate | TPR pi / (TPR pi + FPR (1 - pi)) at the operating point FPR 0.01 with the TPR there (row above): the share of true pairs among those the adversary calls linked, when a share pi of the candidate pairs is true. For linking pi = 1/F, F being the number of flows in the network the conclusion is about; the summary also gives it at the F of the testbed. It is a projection, not a measurement: the TPR and FPR measured on the testbed are taken to hold at F flows. The summary computes the TPR over the scores of all clean runs of a configuration together, with one threshold, and prints the number of false pairs the FPR rests on. An adversary that reaches the same TPR at a lower FPR gets a higher precision. Undefined for pi outside (0, 1) and without positive decisions (TPR pi + FPR (1 - pi) = 0). Example: TPR 0.9, FPR 0.01 and pi = 1/1000 give 10/121, about 0.083 | guards against a false claim: with a thousand flows AUC 0.9 is nearly useless to the adversary |
+| Precision at the base rate | TPR pi / (TPR pi + FPR (1 - pi)) at the operating point FPR 0.01 with the TPR there (row above): the share of true pairs among those the adversary calls linked, when a share pi of the candidate pairs is true. For linking pi = 1/F, F being the number of flows in the network the conclusion is about; the summary also gives it at the F of the testbed. It is a projection, not a measurement: the TPR and FPR measured on the testbed are taken to hold at F flows. The summary computes the TPR over the scores of all clean runs of a configuration together, with one threshold, and reports (pooled_negatives) the number of false pairs the FPR rests on. An adversary that reaches the same TPR at a lower FPR gets a higher precision. Undefined for pi outside (0, 1) and without positive decisions (TPR pi + FPR (1 - pi) = 0). Example: TPR 0.9, FPR 0.01 and pi = 1/1000 give 10/121, about 0.083 | guards against a false claim: with a thousand flows AUC 0.9 is nearly useless to the adversary |
 | Rank of the true sender | for each exit flow the number of entry flows scoring at least as high as the true one (the true one included, a tie counted whole), averaged over the exit flows of a run: 1 when the true one is the single best, F when all tie. It is not a set of indistinguishable candidates: the adversary tells them apart but cannot drop any of them without risking the true one. Example: scores 0.9 for the true entry and 0.95, 0.9, 0.3 for the others give 3 | the intuitive form for the defence |
 | Degree of anonymity by rank (upper bound) | r is the place of the true entry among the F entries of an exit flow by descending score; when t more entries share its score, each of the t + 1 places gets 1/(t + 1); scores are compared exactly, as for top-1 accuracy. q_r is the share of exit flows at place r over all clean runs of a configuration together, H = -sum over r of q_r log2 q_r in bits, d = H / log2 F. An adversary that knows only the order of the scores and judges each exit flow by itself gives the entry at place r probability q_r. One that sees the scores themselves knows at least as much, so against these scores the anonymity is at most d: an upper bound, not a measure of a strong adversary. An adversary that uses the fact that each entry is linked to exactly one exit and looks at the whole score matrix can know more, so against it the anonymity is no higher and d bounds it as well. A low d shows a low anonymity; a d near 1 shows only that this attack learns little. H over N exit flows is biased low, to first order by (K - 1)/(2N ln 2) bits, K being the number of places with q_r > 0, so H with the Miller-Madow correction, at most log2 F, is given beside it; its remaining bias is small and can have either sign, and near log2 F the cap leaves it slightly low; H is not taken over one run. Example: q = (1/2, 1/4, 1/4, 0) with F = 4 gives H = 1.5 and d = 0.75; with counts 20, 10, 10, 0 over all runs (N = 40) the corrected H is 1.5 + 2/(80 ln 2), about 1.536 | the formula of the degree after Díaz et al. (2002); the number belongs to this attack |
 | Degree of anonymity by posterior | pair scores are calibrated on the other runs of the same configuration by isotonic regression of the pair truth on the score (equal scores in one block), with one true pair added below all scores and one false pair above all, so every block holds a true and a false pair and the calibrated probability c lies strictly between 0 and 1; a score between training scores takes the block of the nearest training score not above it, a score below all the lowest block. For an exit flow of the held-out run the probability of an entry is proportional to c/(1 - c): the posterior under equal prior probabilities and entry scores independent given the sender. d is the mean entropy of the posterior over exit flows, divided by log2 F; it holds only when the calibration holds for the held-out run, and by itself it is neither an upper nor a lower bound. The mean -log2 of the probability of the true sender (the cross-entropy) is given beside it: with the calibration taken from other runs its expectation is at least the entropy of the sender given the entry scores of that exit flow, without the independence assumption, so it bounds from above the anonymity against the strongest adversary that judges by these scores. An adversary that uses the fact that each entry is linked to exactly one exit and looks at the whole score matrix can know more; against it the anonymity is no higher, and the cross-entropy bounds it as well. When the cross-entropy is below the mean entropy, the posterior is underconfident and d overstates the anonymity: against that adversary the degree is at most the cross-entropy divided by log2 F. When it is above, the posterior is miscalibrated for the held-out run and d is unreliable, while the cross-entropy still bounds the anonymity from above. Numbers are planned on the data of the full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)). Example: calibrated c = 1/3, 1/2 and 2/3 for three entries give odds 1/2, 1 and 2 and the posterior (1/7, 2/7, 4/7) | a measure against an adversary that uses the score values |
 | Effective anonymity set size | 2^H, the number of equally likely candidates with the same entropy, from 1 to F; Serjantov and Danezis (2002) call H itself, in bits, the effective size. By rank 2^H for H without and with the correction, by posterior 2 to the mean entropy. In the rank example 2 sqrt 2, about 2.83 | the intuitive form for the defence |
 
-The lab computes ROC AUC, top-1 accuracy and TPR at FPR 0.01. Precision at the base rate, the rank
-of the true sender, both degrees of anonymity and the effective set size are in lab/metrics and
-checked by tests with hand-computed answers; the report rows and the summary do not carry them yet
-([#119](https://github.com/jimichi-org/jimichi/issues/119)).
+Every report row carries ROC AUC, top-1 accuracy, TPR at FPR 0.01, the rank of the true sender
+(true_rank) and the places of the true entry (rank_counts). The summary over the clean runs of a
+line gives the median rank, the precision at the base rate at the F of the testbed and at a pi fixed
+before the series (-base, 1/1000 by default), with the TPR over the scores of all runs together and
+the number of wrong pairs, the degree of anonymity by ranks and the effective set size, plain and
+with the Miller-Madow correction, given two clean runs or more (with one those fields are null).
+The posterior degree is in lab/metrics and checked by tests with hand-computed answers; its numbers
+are planned on the data of the full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
 
 ### Compromised chains
 
@@ -81,20 +88,18 @@ checked by tests with hand-computed answers; the report rows and the summary do 
 
 ### Traffic indistinguishability
 
-Status: the metrics are in lab/metrics and checked by tests with hand-computed answers; the
-distinguisher is not run on the testbed yet: the labelling of cells in the lab, the cell features,
-the set and the report rows do not exist
-([#119](https://github.com/jimichi-org/jimichi/issues/119)), and there are no numbers. The
-distinguisher separates payload cells from cover cells on the client-entry link by the moments of
-the cells of a flow and of the replies to them (adversary A2).
+Status: implemented, no numbers yet. The distinguisher separates payload cells from cover cells on
+the client-entry link by the moments of the cells of a flow and of the replies to them (adversary
+A2); the set `cmd/lab -set cover`, the labelling of cells, the features and the report are described
+in block 7. The flow distinguisher is planned.
 
 | Metric | Definition |
 |---|---|
-| Cell distinguisher AUC | a linear discriminant over the features of a cell: w = S_t^-1 (mu1 - mu0), mu1 and mu0 being the feature means of payload and cover cells and S_t the sum of (x - mu)(x - mu)^T over all training cells, mu their mean. For two classes S_t = S_w + (n1 n0 / n)(mu1 - mu0)(mu1 - mu0)^T, S_w being the within-class scatter, so when S_w is invertible w points as Fisher's discriminant S_w^-1 (mu1 - mu0); it is also the least-squares direction for the class label (Hastie, Tibshirani, Friedman, 2009). When a combination of features is constant within each training class and differs between the classes, S_w is singular and w follows that combination: dropping it would hide the strongest leak. A feature constant over the training cells or a linear function of the features before it (1 - R^2 at most 1e-9) is not used; this rule also loses a combination whose spread is below about 1e-4 of the feature standard deviation, so the feature set is built without exact linear relations and the features left out are printed. A cell scores w·(x - (mu1 + mu0)/2) / (w·(mu1 - mu0)): the training class means score +1/2 and -1/2, so, while no feature is left out by the rule above, the scores do not depend on the units of the features and all runs of the series share one scale. AUC against the truth "the cell carries a message", the interval within a run by a bootstrap over flows. Training uses the cells of separate training runs of the same configuration, run before the series with a base seed of their own and not part of it; every run of the series is a test run. The direction is fixed before the series and is the same for all of its runs, so the per-run AUCs of the series are independent given it, an AUC below 0.5 is not replaced by 1 - AUC, and under indistinguishability it is 0.5 on average, with no upward shift. Undefined (NaN, null in the report) when the test run lacks cells of one class (in the immediate mode without -cover there are no cover cells); when the training gives no direction (it lacks cells of one class, no feature is left, or the class means agree on every feature left), the AUC is undefined for the whole configuration. Such a run stays out of the medians and is counted separately in the summary, with the reason; a configuration without a direction makes no indistinguishability claim by AUC, and its D and TV are given as usual. Example: training (2, 0), (4, 0) with a message against (0, 1), (0, 3) gives S_t = [[11, -6], [-6, 6]] and w = (1/5, -2/15), that is 2/15 of Fisher's w (3/2, -1); the test (3, 1), (1, 1) against (1, 0), (0, 2) scores 9/26 and -3/26 against 1/26 and -1/2 and orders 3 pairs of 4 right, AUC 0.75 |
+| Cell distinguisher AUC | a linear discriminant over the features of a cell: w = S_t^-1 (mu1 - mu0), mu1 and mu0 being the feature means of payload and cover cells and S_t the sum of (x - mu)(x - mu)^T over all training cells, mu their mean. For two classes S_t = S_w + (n1 n0 / n)(mu1 - mu0)(mu1 - mu0)^T, S_w being the within-class scatter, so when S_w is invertible w points as Fisher's discriminant S_w^-1 (mu1 - mu0); it is also the least-squares direction for the class label (Hastie, Tibshirani, Friedman, 2009). When a combination of features is constant within each training class and differs between the classes, S_w is singular and w follows that combination: dropping it would hide the strongest leak. A feature constant over the training cells or a linear function of the features before it (1 - R^2 at most 1e-9) is not used; this rule also loses a combination whose spread is below about 1e-4 of the feature standard deviation, so the feature set is built without exact linear relations and the features left out are printed. A cell scores w·(x - (mu1 + mu0)/2) / (w·(mu1 - mu0)): the training class means score +1/2 and -1/2, so, while no feature is left out by the rule above, the scores do not depend on the units of the features and all runs of the series share one scale. AUC against the truth "the cell carries a message", the interval within a run by a bootstrap over flows. Training uses the cells of separate training runs of the same configuration, run before the series with seeds from a stream of their own and not part of it; every run of the series is a test run. The direction is fixed before the series and is the same for all of its runs, so the per-run AUCs of the series are independent given it, an AUC below 0.5 is not replaced by 1 - AUC, and under indistinguishability it is 0.5 on average, with no upward shift. Undefined (NaN, null in the report) when the test run lacks cells of one class (in the immediate mode without -cover there are no cover cells); when the training gives no direction (it lacks cells of one class, no feature is left, or the class means agree on every feature left), the AUC is undefined for the whole configuration. Such a run stays out of the medians and is counted separately in the summary, with the reason; a configuration without a direction makes no indistinguishability claim by AUC, and its D and TV are given as usual. Example: training (2, 0), (4, 0) with a message against (0, 1), (0, 3) gives S_t = [[11, -6], [-6, 6]] and w = (1/5, -2/15), that is 2/15 of Fisher's w (3/2, -1); the test (3, 1), (1, 1) against (1, 0), (0, 2) scores 9/26 and -3/26 against 1/26 and -1/2 and orders 3 pairs of 4 right, AUC 0.75 |
 | AUC of a feature | the same distinguisher on one feature: the direction by the sign of the difference of the class means over the training runs, AUC on a run of the series without folding; undefined when the feature is constant in training or the class means are equal. Shows which feature separates the classes |
 | Kolmogorov-Smirnov distance | D = max over x of \|F_a(x) - F_b(x)\| between the empirical distribution functions of a feature of payload cells (a) and of cover cells (b) of one run; equal values by the rule of section "Comparisons" make one step. When D and AUC take values as equal by one rule, \|AUC - 0.5\| <= D for the feature itself as a score on the same sample. No p is given within a run: the values of one flow are dependent, and even for independent values the asymptotic formula is not exact at these sizes (8 and 8 values, D = 1/2: 0.188 against the exact 1819/6435, about 0.283). Beside it the null level: D of the same run after a random circular shift of the label sequence of each flow, one draw of the shift per run. The shift keeps the group sizes, on which D depends, and the clustering of messages in time, and breaks only the link between labels and features; the null level holds when, without a leak, the labels do not depend on the features and the processes within the run are stationary. A random permutation of the cell labels keeps the sizes but not the clustering: with clustered labels and slowly changing features its D is too low. Runs are compared by D and the null level, section "Comparisons". Example: a = {1, 2, 3, 4} and b = {3, 4, 5, 6} give D = 1/2 |
 | Total variation over bins | TV = 1/2 sum over k of \|p_k - q_k\| for B = 16 bins of equal frequency of the pooled sample of N values of both groups: a group of equal values whose smallest place in ascending order is r (from 0) goes whole into bin floor(B r / N); the bins are built without the labels. (1 + TV)/2 is the accuracy of the best rule that judges the group by the bin of one value at equal group shares. Bins coarsen the distributions (for the interleaved samples 1, 3, ..., 31 and 2, 4, ..., 32, TV over 16 bins is 0 although they share no value), and for small groups the sample TV is biased up even for one distribution, so it is neither an upper nor a lower bound; the null level is given beside it, as for D. Example with three bins: a = {1, 3} and b = {2, 4, 5, 6} give p = (1/2, 1/2, 0), q = (1/4, 1/4, 1/2), TV = 1/2 |
-| Precision at the base rate | as for linking, over the scores of the cell distinguisher of all runs of the series together: they share one direction, so one threshold over them is meaningful; pi is the share of payload cells in the network the conclusion is about |
+| Precision at the base rate | as for linking, over the scores of the cell distinguisher of all runs of the series together: they share one direction, so one threshold over them is meaningful; pi is the share of payload cells in the network the conclusion is about; the summary of block 7 gives it at the share of payload cells in the clean runs of the series with a defined AUC, with the number of cover cells the FPR rests on |
 | Flow distinguisher (planned) | D and TV of the inter-arrival gaps of flows that carry messages against flows that send only cover cells; the null level: the same distances after a random split of all flows of the run into groups of the same sizes. Needs a testbed mode in which some clients send no messages |
 
 ### The price of protection
@@ -557,6 +562,110 @@ gives the mean; the worst case, 128 refused candidates, is timed by a separate b
 crypto/gost. No measurement is recorded yet, and the numbers are published only from a recorded
 run.
 
+### Block 7. Cell indistinguishability, adversary A2
+
+Status: implemented, the series is planned
+([#23](https://github.com/jimichi-org/jimichi/issues/23)). The set `cmd/lab -set cover` runs the
+cell distinguisher (section "Traffic indistinguishability") on the client-entry link; there are no
+numbers yet.
+
+The observer sees the moments of the frames on the client-entry link in both directions and tells a
+payload cell from a cover cell by the moments of the cells of a flow and of the replies to them. The
+entry of the chain sees the same moments on this link and does not see the cover flag, which sits
+inside the innermost layer (ARCHITECTURE, "Cell format"), so the same distinguisher is open to it,
+and a distinguishability found here holds for the entry too; what the entry can learn beyond these
+features the block does not measure.
+
+| Factor | Levels |
+|---|---|
+| Client mode | add-1x: immediate, a cover cell every 200 ms; fixed-2x: constant rate, a slot every 100 ms. At a mean message gap of 200 ms both levels send about ten cells per second per flow, half of them payload: one bandwidth price and close group sizes. The immediate mode without cover is not a level: it has no cover cells, and the AUC is undefined |
+| Primitive suite | c25519 at three hops; GOST at two and three, the GOST setup layer holds no more |
+| Client | without -peer only (LIMITATIONS) |
+| Relays | forward at once, without own-clock sending (the kind testbed relays send on their own clocks): r_idx is defined, and the exit answers a payload cell after handling it and a cover cell at once (LIMITATIONS) |
+
+Labelling of cells:
+
+- The lab wraps the provider of every client; the relays get the provider without the wrapper. The
+  wrapper remembers the last cell key the client derives at circuit setup, the exit's key, and
+  labels only Seal on the AEAD instance made on that key, and only with the associated data of a
+  data cell at the exit's position (11 bytes: version, kind, counter, hop index). The label is the
+  top bit of the length field inside the innermost layer, the cover flag. Payload and cover cells
+  take one path through the wrapper.
+- Labelling by length is not possible: on c25519 at three hops the plaintext of the entry's setup
+  layer and of the innermost layer of a data cell have one length, 446 bytes (494 - 32 - 16 and 494
+  - 3 · 16), and the first byte of the setup layer would read as a payload cell. Setup layers are
+  sealed under setup keys and never reach the labelled instance; the test of the wrapper checks this
+  case explicitly.
+- A second instance on the exit's key, or a Seal on it with other associated data, makes the labels
+  of the flow inconsistent.
+- The forward frames are [setup, data cells...]: frame k + 1 carries label k. A cell is labelled
+  before it is written to the link, so there are as many labels as data frames, or one more when the
+  last write failed as the client closed; the extra label at the end is not used.
+- In every run the labels are checked against the frames of every flow, and the number of payload
+  labels against the number of messages handed to the clients minus those the schedule dropped
+  (messages - dropped). A run that disagrees is marked label_mismatch and enters no training, median
+  or comparison; the summary counts such runs (label_mismatch_runs), and in the summary of block 7
+  clean_runs leaves them out as well.
+
+Cell features, in seconds, in this order:
+
+| Feature | Definition |
+|---|---|
+| g_prev | the gap since the previous data cell of the flow |
+| g_next | the gap to the next data cell of the flow |
+| dev | \|g_prev - m\|, m being the median g_prev of the cells of the flow in the window; each flow has its own median, computed without labels |
+| r_next | from the cell to the first backward frame strictly after it |
+| r_idx | from the cell to the k-th backward frame when it is the k-th data cell of the flow: the exit answers every data cell with one cell, the client accepts replies strictly by number, and without relays sending on their own clocks only replies travel back to the client. With relay clocks the feature is left out |
+
+- The cells of the distinguisher are the data frames in the observation window; neighbouring frames
+  and replies are taken outside the window as well. A cell lacking any feature (the first and the
+  last data cell of a flow, no backward frame after it, no k-th backward frame) enters neither
+  training nor test nor D and TV; the row counts them (undefined_cells).
+- By definition the features have no linear relation: dev is an absolute deviation, not g_prev minus
+  a constant of the flow. r_next and r_idx are defined differently but agree when the reply to a
+  cell is marked strictly after it and no other backward frame lies between them; if they agree on
+  every training cell, the rule of the distinguisher leaves r_idx out, the level line in the output
+  of the set prints it, and the report row carries it (unused_features).
+- A reply on loopback comes some tens of microseconds after its cell, so before the runs the set
+  measures the step of the host's monotonic clock and does not start at a step above 10 µs: on a
+  coarser clock the reply would be marked at the reading of its cell (LIMITATIONS). Every row and
+  the summary carry the step (clock_step).
+- At a constant rate the schedule, not the messages, sets the moments of the cells, so chance level
+  is expected for g_prev, g_next and dev. r_next and r_idx also carry the moment of the exit's
+  reply, which depends on the kind of cell for relays without own-clock sending: an AUC above 0.5 at
+  a constant rate can come from it rather than from the moment of sending. feature_auc shows which
+  feature separates the classes.
+
+Training, test and null levels:
+
+- Each level first runs -train training runs (5 by default), then the -repeats runs of the series.
+  The seeds of the training runs come from -seed through a stream of their own and never equal a
+  repeat seed of the series: training runs share no message gaps and no client phases with the
+  series. The repeat of a training row is the number of the training run, and it pairs with no row
+  of the series.
+- The distinguisher is trained once, on the cells of the clean training runs of the level without a
+  label mismatch, together; every run of the series is a test run. A training row carries the AUC
+  with that run left out of training. The pilot is the set with -repeats 0: s and the number of runs
+  are set from the AUCs of its training runs before the series.
+- Only the constant-rate level claims equivalence: the series asks whether a constant rate hides the
+  moment of sending with relays that forward at once (the set does not measure the setting
+  THREAT_MODEL claims, with relays sending on their own clocks), while add-1x is expected to
+  separate, and its summary has neither the quantile bounds for the corridor nor a verdict. Each
+  invocation of the set thus makes one claim, and m (-claims) is the number of invocations of the
+  series of block 7 whose verdict is read (for example c25519 at three hops and GOST at two and
+  three give m = 3); m is set before the series by the claim plan, not from the pilot.
+- D and TV are taken on g_prev of payload cells against cover cells: g_prev does not depend on
+  training, so a level without a direction has them as well. The null level: a circular shift of the
+  labels of each flow by a number uniform from 1 to n - 1 (n cells of the flow), from a seed stream
+  of the run, one draw per run; a flow of one cell is not shifted. Beside it, for comparison, a
+  permutation of the labels of all cells of the run (ks_permuted, tv_permuted).
+
+| Where | What |
+|---|---|
+| run row, cells-cover-*.json | role (training or claim); configuration, seeds, revision and host load as in block 1, and the clock step (clock_step); messages, dropped, cells, bandwidth_multiplier, payload_labels, label_mismatch; payload_cells, cover_cells, undefined_cells; lda_auc with the BCa interval over flows, feature_auc for every feature, unused_features, degenerate (missing_class for a run lacking one class, training_missing_class, training_no_feature, training_equal_means for a run without a training direction); ks_distance, ks_null, ks_permuted, tv, tv_null, tv_permuted; circuit closures and node limits as in block 1. The BCa interval is descriptive: its coverage on null runs is not checked and no conclusion rests on it; the conclusions rest on the distribution of the per-run AUC and on the corridor |
+| summary, summary-cover-*.json | for the set the clock step, s and m; for each level: whether it claims equivalence (equivalence_claim); training runs, run and used, the reason for no direction and the features left out; runs, broken_runs, limited_runs, label_mismatch_runs, clean_runs, degenerate_runs; medians over the clean runs of the series: lda_auc, ks_distance, ks_null, tv and tv_null with the interval by order statistics at level 0.95, the AUC minimum and maximum, medians of the per-feature AUCs; the runs the AUC median and the D and TV medians rest on (lda_auc_runs, ks_runs): a degenerate run gives no AUC, a run without one of the classes no D or TV either, and the printed summary marks a median of one run; at the constant-rate level the lower bound of the s-quantile and the upper bound of the (1 - s)-quantile of the per-run AUC of the series at level 1 - 0.05/m (auc_corridor_low, auc_corridor_high) at s (-corridor, 0.2 by default) and m (-claims, 1 by default), and the verdict whether they lie in the corridor [0.45, 0.55] (section "Comparisons"); the precision at the base rate with the TPR and the number of cover cells; the median bandwidth multiplier |
+| comparisons in the summary | the family against the null level: Wilcoxon of D against D_0 and of TV against TV_0 at each level; the family of modes: Wilcoxon by repeat number of AUC, D - D_0 and TV - TV_0 of the two levels; Holm within each family over the comparisons that are neither degenerate nor undefined, with the numbers of pairs and of dropped pairs |
+
 ## Statistics
 
 - Target for the full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)): at least 30
@@ -567,16 +676,17 @@ run.
 - Series run with the kind cluster stopped and no build on the host: concurrent load disturbs
   timing and lowers the AUC of individual runs. Tables report the median.
 - Within a run the AUC carries a 95 percent confidence interval: BCa bootstrap over flows, 10000
-  resamples. Across repeats the summary gives the median, the minimum and the maximum; an
-  interval for the median by order statistics is defined in section "Comparisons" and enters the
-  summary with the full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
+  resamples. Across repeats the summary gives the median, the minimum and the maximum; the summary
+  of block 7 adds the interval by order statistics at level 0.95 to its medians of the AUC, D, TV
+  and the null levels of D and TV (section "Comparisons"), the summaries of block 1 will add it with
+  the full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
 - Configurations and attacks are compared under one convention, section "Comparisons" below.
 - The linking attack of block 1 has no training step. The cell distinguisher (section "Traffic
-  indistinguishability") is trained on separate training runs of the same configuration, run
-  before the series with a base seed of their own and not part of it, and evaluated on every run
-  of the series. The calibration of the degree of anonymity by posterior is trained on the other
-  clean runs of the same configuration and evaluated on the held-out run; the training never holds
-  a run with the same repeat seed as the held-out one (such runs share the message gaps, section
+  indistinguishability") is trained on separate training runs of the same configuration, run before
+  the series with seeds from a stream of their own and not part of it, and evaluated on every run of
+  the series. The calibration of the degree of anonymity by posterior is trained on the other clean
+  runs of the same configuration and evaluated on the held-out run; the training never holds a run
+  with the same repeat seed as the held-out one (such runs share the message gaps, section
   "Comparisons"). A learned linking attack, once added, will be trained and evaluated on separate
   samples, split by time, with no feature leakage.
 - A relay closes a circuit when a counter breaks the order (a copy, a gap, a step back, a jump, or
@@ -622,11 +732,11 @@ run.
 
 One convention for the full series of block 1
 ([#23](https://github.com/jimichi-org/jimichi/issues/23)), blocks 2
-([#116](https://github.com/jimichi-org/jimichi/issues/116)) and 3
-([#117](https://github.com/jimichi-org/jimichi/issues/117)) and traffic indistinguishability
-([#119](https://github.com/jimichi-org/jimichi/issues/119)). The procedures are implemented once in
-lab/metrics (stats.go) and checked by tests with hand-computed answers; the block summaries will
-call them with their series.
+([#116](https://github.com/jimichi-org/jimichi/issues/116)), 3
+([#117](https://github.com/jimichi-org/jimichi/issues/117)) and 7. The procedures are implemented
+once in lab/metrics (stats.go) and checked by tests with hand-computed answers; the summary of block
+7 calls them (Wilcoxon, Holm, the quantile interval, equivalence), the summaries of the other blocks
+will call them with their series.
 
 Procedures:
 
@@ -720,39 +830,41 @@ Rules:
   distribution, and p is exact: if a series goes past the bound of either test, that bound is
   raised before the analysis.
 - Runs are paired when they share random streams. cmd/lab derives the seed of repeat r from -seed
-  and r alone, so runs with the same -seed and repeat number, from one set or from separate
+  and r alone (the training runs of block 7 take their seeds from a stream of their own and pair
+  with nothing), so runs with the same -seed and repeat number, from one set or from separate
   invocations, share the stream of message gaps and the stream of client phases. A phase is the
-  remainder of a shared random number divided by the schedule of the level, so levels with the
-  same schedule get the same phases, levels with different schedules share them for only part of
-  the flows, and a level without a schedule has no phases; relay clock phases are each run's own.
-  Such runs are compared as pairs by repeat number, by Wilcoxon's test, over the pairs where both
-  runs are clean; the number of dropped pairs is reported alongside, since a pair stays
-  only when both levels survived. A pair shares random numbers, not time: the levels of a set run
-  one after another, and a pair does not cancel drift in host load. Two quantities of one run are
-  compared as pairs in the same way: two attacks on the same links, a watermark and the null level
-  of the detector. Runs with different -seed values are independent and are compared by
-  Mann-Whitney's test.
+  remainder of a shared random number divided by the schedule of the level, so levels with the same
+  schedule get the same phases, levels with different schedules share them for only part of the
+  flows, and a level without a schedule has no phases; relay clock phases are each run's own. Such
+  runs are compared as pairs by repeat number, by Wilcoxon's test, over the pairs where both runs
+  are clean; the number of dropped pairs is reported alongside, since a pair stays only when both
+  levels survived. A pair shares random numbers, not time: the levels of a set run one after
+  another, and a pair does not cancel drift in host load. Two quantities of one run are compared as
+  pairs in the same way: two attacks on the same links, a watermark and the null level of the
+  detector. Runs with different -seed values are independent and are compared by Mann-Whitney's
+  test.
 - A p-value is reported only together with the effect size, and a significant but negligible
   difference is called negligible.
 - A Holm family holds only comparisons where rejecting the null hypothesis is the result. A
   comparison whose outcome is exact by construction (for Mann-Whitney the same value in every run
   of both groups, for Wilcoxon equal values in every pair; the procedure marks it as degenerate)
   and an undefined comparison (an empty group) are not tested and do not enter the family.
-- Agreement with a model and equality with guessing are not inferred from a non-significant p:
-  with few runs a non-significant p shows nothing, and Holm's correction would only make such a
-  claim easier. A proportion inside +-2 SE of the model is the same non-rejection, so the deviation
-  in SE is reported as a consistency check, not as agreement. Agreement is claimed as equivalence:
-  before the series the block sets a margin and claims agreement only when the 95 percent interval
-  for the measured quantity lies entirely inside the model value plus or minus the margin; with m
-  such claims in a block the intervals are taken at level 1 - 0.05/m. For AUC the default margin
-  is 0.05, the corridor [0.45, 0.55]. Under exact guessing the quantity a block compares with the
-  corridor must lie well inside it: the folded per-run AUC max(AUC, 1 - AUC) is pushed upward by
-  noise and with few flows can lie above 0.55 at any number of runs. It must also bound the share
-  of runs that separate, not only the centre: a mix of runs at AUC 0.2 and 0.8, and 22 runs at
-  AUC 0.5 next to 8 at 0.8, both have a median of 0.5 but are not guessing. The block sets the
-  quantity, its interval, the margin and the number of runs, given the step of the quantity
-  itself, before the series; the share of runs that separate is bounded by the intervals of
-  quantiles (procedures above); summaries with them are planned with the series
+- Agreement with a model and equality with guessing are not inferred from a non-significant p: with
+  few runs a non-significant p shows nothing, and Holm's correction would only make such a claim
+  easier. A proportion inside +-2 SE of the model is the same non-rejection, so the deviation in SE
+  is reported as a consistency check, not as agreement. Agreement is claimed as equivalence: before
+  the series the block sets a margin and claims agreement only when the 95 percent interval for the
+  measured quantity lies entirely inside the model value plus or minus the margin; with m such
+  claims in a block the intervals are taken at level 1 - 0.05/m. For AUC the default margin is 0.05,
+  the corridor [0.45, 0.55]. Under exact guessing the quantity a block compares with the corridor
+  must lie well inside it: the folded per-run AUC max(AUC, 1 - AUC) is pushed upward by noise and
+  with few flows can lie above 0.55 at any number of runs. It must also bound the share of runs that
+  separate, not only the centre: a mix of runs at AUC 0.2 and 0.8, and 22 runs at AUC 0.5 next to 8
+  at 0.8, both have a median of 0.5 but are not guessing. The block sets the quantity, its interval,
+  the margin and the number of runs, given the step of the quantity itself, before the series; the
+  share of runs that separate is bounded by the intervals of quantiles (procedures above); the
+  summary of block 7 gives these quantile bounds at the s and m set by its flags and the verdict for
+  the constant-rate level; in the summaries of the other blocks they are planned with the series
   ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
 - The degrees of anonymity and the effective set size are reported descriptively: no difference
   or equality is claimed for them until an interval for them is defined. The degree by rank is
@@ -786,7 +898,7 @@ Rules:
 | 1, full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run | attack AUC at each level of a factor against the baseline configuration of the same set | Wilcoxon by repeat number with the rank-biserial correlation, Holm over the levels of one factor; between sets with different seeds Mann-Whitney with Cliff's delta | repeat r of every level of a set is derived from one seed, so these are pairs |
 | 2 ([#116](https://github.com/jimichi-org/jimichi/issues/116)) | clean run | watermark detector AUC against its null level in the same run; configurations of the block against each other | against the null level Wilcoxon; configurations by the pairing rule above; Holm over the configurations; resistance threshold by equivalence | the null level is the same detector on unmarked flows of the same run |
 | 3 ([#117](https://github.com/jimichi-org/jimichi/issues/117)) | established echo chain and -peer client process (its first chain) for shares and the mean R; clean run for AUC, the request feature and the mean R with circuits set up at once | shares of chains and the mean share of the route recovered against the model; residual linking AUC from the vantage point of the rogue nodes against the A1 AUC on the same runs; scenarios of the block against each other | shares: Wilson interval, mean R: normal interval; agreement by equivalence with a margin set before the series at level 1 - 0.05/m, for the mean R only where linking is exact by construction; deviation in SE of the model as a consistency check; AUC: Wilcoxon for a claimed difference, "not lower" only as non-inferiority by an interval of the paired differences with a margin set before the series; Holm over non-degenerate comparisons | the model proportion is known exactly, so the question is agreement, not rejection; both attacks watch the same links of one run |
-| Traffic indistinguishability ([#119](https://github.com/jimichi-org/jimichi/issues/119)) | clean run of the series | AUC of the cell distinguisher on the run (unfolded), D and TV against the null level of the same run; the immediate mode with cover traffic against the constant rate by the per-run AUC and by the excess D - D_0 and TV - TV_0 over the null level, not by D and TV themselves: they depend on the group sizes, and the share of payload cells differs between the modes | a difference: D and TV against the null level by Wilcoxon over runs, the modes by the pairing rule above, Holm over the non-degenerate comparisons; equality with guessing: equivalence in which the lower bound of the s-quantile and the upper bound of the (1 - s)-quantile of the per-run AUC at level 1 - 0.05/m lie in the corridor [0.45, 0.55]; the per-run AUCs of the series are independent since the direction comes from training runs outside it; s and the number of runs are set before the series from the pilot | indistinguishability is claimed by equivalence of the AUC, not by a non-significant p, and bounds the share of runs that separate, not only the centre; D and TV serve only claims of a difference |
+| 7, series planned ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run of the series | AUC of the cell distinguisher on the run (unfolded), D and TV against the null level of the same run; the immediate mode with cover traffic against the constant rate by the per-run AUC and by the excess D - D_0 and TV - TV_0 over the null level, not by D and TV themselves: they depend on the group sizes, and the share of payload cells agrees between runs and modes only on average | a difference: D and TV against the null level by Wilcoxon over runs, the modes by the pairing rule above, Holm over the non-degenerate comparisons; equality with guessing: equivalence in which the lower bound of the s-quantile and the upper bound of the (1 - s)-quantile of the per-run AUC at level 1 - 0.05/m lie in the corridor [0.45, 0.55], at the constant-rate level only; the per-run AUCs of the series are independent since the direction comes from training runs outside it; s and the number of runs are set before the series from the pilot, m by the claim plan of the block | indistinguishability is claimed by equivalence of the AUC, not by a non-significant p, and bounds the share of runs that separate, not only the centre; D and TV serve only claims of a difference |
 
 ## Threats to validity
 
@@ -794,18 +906,20 @@ Rules:
 |---|---|---|
 | Internal | the adversary sees ideal timestamps, unlike a real network | planned: a separate series with network noise and jitter ([#46](https://github.com/jimichi-org/jimichi/issues/46)); until then the lab observer has ideal timestamps |
 | Internal | synthetic load is too regular | messages leave with exponential gaps, one profile; a heavy-tailed model and several activity profiles are planned |
+| Internal | the labels of block 7 are wrong, and the distinguisher is trained and tested against the wrong truth | the wrapper of the client's provider labels a cell by the AEAD instance of the innermost layer and the associated data of a data cell, not by length (a test with equal lengths on c25519 at three hops); in every run the labels are checked against the forward frames and the number of payload labels against the number of messages minus those dropped; a run that disagrees is left out and counted (label_mismatch) |
 | External | the testbed runs on one machine and the series in one process over loopback, network delays are not modelled | absolute latency figures belong to loopback and do not carry over to a network; network emulation profiles are planned ([#46](https://github.com/jimichi-org/jimichi/issues/46)) |
-| Construct | AUC alone does not imply a practical attack | TPR at FPR 0.01 and top-1 accuracy are reported alongside; precision at the base rate is defined (section "Linking sender and recipient"); the report rows are planned ([#119](https://github.com/jimichi-org/jimichi/issues/119)) |
+| Construct | AUC alone does not imply a practical attack | TPR at FPR 0.01 and top-1 accuracy are reported alongside; the precision at the base rate is in the summary: for linking at the F of the testbed and at a pi fixed before the series, for cells at the share of payload cells on the testbed |
 | Reproducibility | randomness across runs | fixed seeds, configuration and code version in every report |
-| Survival bias | medians without broken and limited runs describe the runs where every circuit survived; when closures depend on the configuration, such as a node period close to the client's, its medians describe the luckier runs | runs, broken_runs, limited_runs and clean_runs stand next to every median, and every row records which circuits closed and when (flow_closed, flow_closed_after); a survival series over the ratio of periods is planned (block 2) |
+| Survival bias | medians without broken and limited runs describe the runs where every circuit survived; when closures depend on the configuration, such as a node period close to the client's, its medians describe the luckier runs | runs, broken_runs, limited_runs and clean_runs, and in block 7 label_mismatch_runs as well, stand next to every median, and every row records which circuits closed and when (flow_closed, flow_closed_after); a survival series over the ratio of periods is planned (block 2) |
 
 ## Comparison with existing systems
 
 Planned: a table over the same features for Tor, Session, SimpleX, Briar and this work. Features:
 constant cell size, cover traffic, state kept on a node, deniability, primitive suite, published
 latency figures. Of the deniability properties this work has today deniability of sending at a
-constant rate, nothing to surrender after a session and offline deniable authentication between
-clients, shown by a forgery and not measured (THREAT_MODEL); the client container
+constant rate with relays sending on their own clocks, nothing to surrender after a session and
+offline deniable authentication between clients, shown by a forgery and not measured
+(THREAT_MODEL); the client container
 ([#20](https://github.com/jimichi-org/jimichi/issues/20)) is implemented, and the measurement of
 its property is planned (block 5). Numbers for other systems
 will come from their documentation and papers, ours will be measured. No direct performance

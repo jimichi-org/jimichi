@@ -271,3 +271,89 @@ func TestFailedSendLeavesNoMessageUnanswered(t *testing.T) {
 		t.Fatalf("%d messages left unanswered, want 0", p)
 	}
 }
+
+// every forward frame after the setup is a data cell the oracle labelled
+// before its write, so a flow holds as many labels as data frames, or one more
+// when the last write failed as the client closed; a message handed over and
+// not dropped by the schedule is sealed once, so the true labels count it
+func TestLabelsMatchTheCellsOfEveryFlow(t *testing.T) {
+	for _, cfg := range []Config{
+		{LabelCells: true, Flows: 2, Duration: 600 * time.Millisecond, SendEvery: 50 * time.Millisecond, CoverEvery: 40 * time.Millisecond, Seed: 17},
+		{LabelCells: true, Flows: 2, Duration: 600 * time.Millisecond, Mode: client.ConstantRate, Rate: 30 * time.Millisecond, SendEvery: 60 * time.Millisecond, Seed: 19},
+	} {
+		run, err := Execute(cfg)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if run.RelayBroken != 0 || run.BrokenFlows != 0 {
+			t.Fatalf("seed %d: %d circuits closed by relays, %d broken flows", cfg.Seed, run.RelayBroken, run.BrokenFlows)
+		}
+		if len(run.Labels) != len(run.Entry) {
+			t.Fatalf("seed %d: labels for %d flows of %d", cfg.Seed, len(run.Labels), len(run.Entry))
+		}
+		payload, cover := 0, 0
+		for f, l := range run.Labels {
+			cells, ok := l.Cells()
+			if !ok {
+				t.Fatalf("seed %d flow %d: the oracle saw a seal it cannot account for", cfg.Seed, f)
+			}
+			frames := run.Entry[f].Len()
+			if len(cells) < frames-1 || len(cells) > frames {
+				t.Errorf("seed %d flow %d: %d labels for %d forward frames", cfg.Seed, f, len(cells), frames)
+			}
+			for _, c := range cells {
+				if c {
+					payload++
+				} else {
+					cover++
+				}
+			}
+		}
+		if want := run.Sent - int(run.Dropped); payload != want {
+			t.Errorf("seed %d: %d payload labels, want %d sent less %d dropped", cfg.Seed, payload, run.Sent, run.Dropped)
+		}
+		if payload == 0 || cover == 0 {
+			t.Errorf("seed %d: %d payload and %d cover labels, want both", cfg.Seed, payload, cover)
+		}
+	}
+}
+
+// without relay clocks the exit answers every data cell with one cell and
+// nothing else comes back, so the k-th backward frame is the reply to data
+// cell k. Cells leave 50 ms apart and a reply takes some tens of µs on
+// loopback: an index off by one would put back[k] about 50 ms from data[k].
+// The reply to the last tick before Close may be lost
+func TestRepliesComeBackInTheOrderOfTheCells(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs a live chain for a second")
+	}
+	run, err := Execute(Config{
+		LabelCells: true, Flows: 1, Duration: time.Second, Mode: client.ConstantRate,
+		Rate: 50 * time.Millisecond, SendEvery: 100 * time.Millisecond, Seed: 23,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if run.RelayBroken != 0 || run.BrokenFlows != 0 {
+		t.Fatalf("%d circuits closed by relays, %d broken flows", run.RelayBroken, run.BrokenFlows)
+	}
+	data, back := run.Entry[0].Events()[1:], run.EntryBack[0].Events()
+	if len(back) > len(data) || len(data)-len(back) > 1 {
+		t.Fatalf("%d replies for %d data cells", len(back), len(data))
+	}
+	for k := range back {
+		if d := back[k] - data[k]; d <= -25*time.Millisecond || d >= 25*time.Millisecond {
+			t.Errorf("reply %d is %v from its cell", k, d)
+		}
+	}
+}
+
+func TestExecuteWithoutLabelCellsHasNoLabels(t *testing.T) {
+	run, err := Execute(Config{Flows: 1, Duration: 200 * time.Millisecond, SendEvery: 20 * time.Millisecond, Seed: 29})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if run.Labels != nil {
+		t.Fatalf("labels %v without LabelCells", run.Labels)
+	}
+}

@@ -5,6 +5,11 @@ const (
 	streamPhases uint64 = iota + 1
 	streamGaps
 	streamPaths
+	// the cover set of cmd/lab draws its training runs and null labels from
+	// these; appended, so the values above and every published seed stay
+	StreamTraining
+	StreamShift
+	StreamPermute
 )
 
 // Derive mixes the parts into the seed with splitmix64, so neighbouring seeds,
