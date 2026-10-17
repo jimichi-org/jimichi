@@ -23,7 +23,7 @@ func TestLimitedRunsStayOutOfTheMedians(t *testing.T) {
 	both := limitedRow
 	both.RelayBrokenCircuits = 1
 
-	sum := summarise([]result{limitedRow, cleanRow, both})
+	sum := summarise([]result{limitedRow, cleanRow, both}, 0.001)
 	if len(sum) != 1 {
 		t.Fatalf("%d summary lines, want 1", len(sum))
 	}
@@ -35,7 +35,7 @@ func TestLimitedRunsStayOutOfTheMedians(t *testing.T) {
 		t.Fatalf("median %s, want the clean run's 0.7", encode(t, s))
 	}
 
-	only := summarise([]result{limitedRow})
+	only := summarise([]result{limitedRow}, 0.001)
 	if only[0].AUC != nil || only[0].CleanRuns != 0 || only[0].LimitedRuns != 1 || only[0].BrokenRuns != 0 {
 		t.Fatalf("a line of limited runs alone was summarised: %s", encode(t, only[0]))
 	}

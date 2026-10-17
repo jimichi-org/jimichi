@@ -627,3 +627,33 @@ func TestEquivalenceSizeKnownAnswer(t *testing.T) {
 		}
 	}
 }
+
+// the family is the three exact p 0.01, 0.04 and 0.03: Holm of three gives
+// 3*0.01 = 0.03, 2*0.03 = 0.06 and 1*0.04 raised to 0.06; the undefined and the
+// degenerate comparison stay NaN and do not count
+func TestHolmTestsKnownAnswer(t *testing.T) {
+	nan := math.NaN()
+	exact := func(p float64) metrics.Test { return metrics.Test{P: p, Method: "exact"} }
+	degenerate := metrics.Test{P: 1, Method: "degenerate"}
+	for _, c := range []struct {
+		name  string
+		tests []metrics.Test
+		want  []float64
+	}{
+		{"mixed", []metrics.Test{exact(0.01), {P: nan, Statistic: nan, Effect: nan}, exact(0.04), degenerate, exact(0.03)}, []float64{0.03, nan, 0.06, nan, 0.06}},
+		{"two", []metrics.Test{exact(0.5), exact(0.02)}, []float64{0.5, 0.04}},
+		{"all degenerate", []metrics.Test{degenerate, degenerate}, []float64{nan, nan}},
+		{"none", nil, []float64{}},
+	} {
+		got := metrics.HolmTests(c.tests)
+		if len(got) != len(c.want) {
+			t.Fatalf("%s: %v, want %v", c.name, got, c.want)
+		}
+		for i := range got {
+			if !nearBound(got[i], c.want[i]) {
+				t.Errorf("%s: %v, want %v", c.name, got, c.want)
+				break
+			}
+		}
+	}
+}

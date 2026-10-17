@@ -450,3 +450,23 @@ func Holm(p []float64) []float64 {
 	}
 	return out
 }
+
+// Holm over the comparisons that can be tested: a degenerate or undefined one
+// gets NaN and does not count in the size of the family
+func HolmTests(tests []Test) []float64 {
+	out := make([]float64, len(tests))
+	var members []int
+	var p []float64
+	for i, t := range tests {
+		out[i] = math.NaN()
+		if t.Method == "degenerate" || math.IsNaN(t.P) {
+			continue
+		}
+		members = append(members, i)
+		p = append(p, t.P)
+	}
+	for k, adjusted := range Holm(p) {
+		out[members[k]] = adjusted
+	}
+	return out
+}

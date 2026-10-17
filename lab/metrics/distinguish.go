@@ -28,82 +28,25 @@ func DiscriminantScores(train [][]float64, truth []bool, test [][]float64) []flo
 		return nil
 	}
 
-	mu, mu1, mu0 := make([]float64, width), make([]float64, width), make([]float64, width)
-	lo, hi := slices.Clone(train[0]), slices.Clone(train[0])
+	mu1, mu0 := make([]float64, width), make([]float64, width)
 	for i, row := range train {
 		for j, v := range row {
-			mu[j] += v
 			if truth[i] {
 				mu1[j] += v
 			} else {
 				mu0[j] += v
 			}
-			lo[j], hi[j] = math.Min(lo[j], v), math.Max(hi[j], v)
 		}
 	}
-	varying := make([]bool, width)
 	for j := range width {
-		mu[j] /= float64(len(train))
 		mu1[j] /= float64(n1)
 		mu0[j] /= float64(n0)
-		varying[j] = !same(lo[j], hi[j])
 	}
-
-	scatter := make([][]float64, width)
-	for i := range scatter {
-		scatter[i] = make([]float64, width)
+	fit, ok := fitColumns(train)
+	if !ok {
+		return nil
 	}
-	for _, row := range train {
-		for i := range width {
-			if !varying[i] {
-				continue
-			}
-			di := row[i] - mu[i]
-			for j := range i + 1 {
-				if varying[j] {
-					scatter[i][j] += di * (row[j] - mu[j])
-				}
-			}
-		}
-	}
-	scale := make([]float64, width)
-	for j := range width {
-		if !varying[j] {
-			continue
-		}
-		scale[j] = math.Sqrt(scatter[j][j])
-		// a subnormal S_t,jj has lost digits, and the scores would move with the
-		// units of the feature
-		if !(scatter[j][j] >= 0x1p-1022) || math.IsInf(scale[j], 0) {
-			return nil
-		}
-	}
-
-	var kept []int
-	chol := make([][]float64, width)
-	for i := range width {
-		if !varying[i] {
-			continue
-		}
-		row := make([]float64, len(kept)+1)
-		pivot := scatter[i][i] / scale[i] / scale[i]
-		for p, j := range kept {
-			c := scatter[i][j] / scale[i] / scale[j]
-			for r := range p {
-				c -= row[r] * chol[j][r]
-			}
-			row[p] = c / chol[j][p]
-			pivot -= row[p] * row[p]
-		}
-		// 1 - R^2 at most 1e-9 marks a dependent or constant column; a
-		// combination spread below about 1e-4 sd is lost with it
-		if pivot <= 1e-9 {
-			continue
-		}
-		row[len(kept)] = math.Sqrt(pivot)
-		chol[i] = row
-		kept = append(kept, i)
-	}
+	scale, chol, kept := fit.scale, fit.chol, fit.kept
 	if !slices.ContainsFunc(kept, func(j int) bool { return !same(mu1[j], mu0[j]) }) {
 		return nil
 	}
@@ -150,6 +93,140 @@ func DiscriminantScores(train [][]float64, truth []bool, test [][]float64) []flo
 		scores[t] = s
 	}
 	return scores
+}
+
+// the column rule of DiscriminantScores, which depends on the training rows
+// alone: the scale and the Cholesky rows of the columns it keeps, in order
+type columnFit struct {
+	scale []float64
+	chol  [][]float64
+	kept  []int
+}
+
+func fitColumns(train [][]float64) (columnFit, bool) {
+	if len(train) == 0 {
+		return columnFit{}, false
+	}
+	width := len(train[0])
+	if width == 0 || !finiteRows(train, width) {
+		return columnFit{}, false
+	}
+	mu := make([]float64, width)
+	lo, hi := slices.Clone(train[0]), slices.Clone(train[0])
+	for _, row := range train {
+		for j, v := range row {
+			mu[j] += v
+			lo[j], hi[j] = math.Min(lo[j], v), math.Max(hi[j], v)
+		}
+	}
+	varying := make([]bool, width)
+	for j := range width {
+		mu[j] /= float64(len(train))
+		varying[j] = !same(lo[j], hi[j])
+	}
+
+	scatter := make([][]float64, width)
+	for i := range scatter {
+		scatter[i] = make([]float64, width)
+	}
+	for _, row := range train {
+		for i := range width {
+			if !varying[i] {
+				continue
+			}
+			di := row[i] - mu[i]
+			for j := range i + 1 {
+				if varying[j] {
+					scatter[i][j] += di * (row[j] - mu[j])
+				}
+			}
+		}
+	}
+	scale := make([]float64, width)
+	for j := range width {
+		if !varying[j] {
+			continue
+		}
+		scale[j] = math.Sqrt(scatter[j][j])
+		// a subnormal S_t,jj has lost digits, and the scores would move with the
+		// units of the feature
+		if !(scatter[j][j] >= 0x1p-1022) || math.IsInf(scale[j], 0) {
+			return columnFit{}, false
+		}
+	}
+
+	var kept []int
+	chol := make([][]float64, width)
+	for i := range width {
+		if !varying[i] {
+			continue
+		}
+		row := make([]float64, len(kept)+1)
+		pivot := scatter[i][i] / scale[i] / scale[i]
+		for p, j := range kept {
+			c := scatter[i][j] / scale[i] / scale[j]
+			for r := range p {
+				c -= row[r] * chol[j][r]
+			}
+			row[p] = c / chol[j][p]
+			pivot -= row[p] * row[p]
+		}
+		// 1 - R^2 at most 1e-9 marks a dependent or constant column; a
+		// combination spread below about 1e-4 sd is lost with it
+		if pivot <= 1e-9 {
+			continue
+		}
+		row[len(kept)] = math.Sqrt(pivot)
+		chol[i] = row
+		kept = append(kept, i)
+	}
+	return columnFit{scale: scale, chol: chol, kept: kept}, true
+}
+
+// the columns DiscriminantScores leaves out on this training set: constant, or
+// a linear function of the columns before them, which may be every column.
+// nil when it refuses the rows themselves: none, no columns, ragged, not
+// finite, or a varying column whose scatter is subnormal, zero or infinite
+func UnusedColumns(train [][]float64) []int {
+	fit, ok := fitColumns(train)
+	if !ok {
+		return nil
+	}
+	unused := []int{}
+	for j := range len(train[0]) {
+		if !slices.Contains(fit.kept, j) {
+			unused = append(unused, j)
+		}
+	}
+	return unused
+}
+
+// the null level of KSDistance and TotalVariation: each flow's labels turned
+// round by its offset, which keeps the group sizes and the clustering of
+// messages in time and breaks only the link between labels and features
+func CircularShift(truth []bool, flow []int, offsets []int) []bool {
+	if len(truth) != len(flow) {
+		return nil
+	}
+	members := make([][]int, len(offsets))
+	for i, f := range flow {
+		if f < 0 || f >= len(offsets) {
+			return nil
+		}
+		members[f] = append(members[f], i)
+	}
+	out := make([]bool, len(truth))
+	for f, rows := range members {
+		n := len(rows)
+		if n == 0 {
+			continue
+		}
+		k := (offsets[f]%n + n) % n
+		for j, i := range rows {
+			out[i] = truth[rows[(j+k)%n]]
+		}
+	}
+	return out
 }
 
 func finiteRows(rows [][]float64, width int) bool {

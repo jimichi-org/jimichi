@@ -9,6 +9,7 @@ import (
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/lab"
+	"github.com/jimichi-org/jimichi/lab/metrics"
 )
 
 // two flows with a few frames each, enough for analyse to score them
@@ -93,7 +94,7 @@ func TestFlowClosuresReachTheReport(t *testing.T) {
 		t.Fatalf("flow_closed %v, flow_closed_after %q; want [true false] and [250ms \"\"]", res.FlowClosed, res.FlowClosedAfter)
 	}
 	// no relay or client counted it, the flow alone makes the run broken
-	sum := summarise([]result{res})
+	sum := summarise([]result{res}, 0.001)
 	if sum[0].BrokenRuns != 1 || sum[0].AUC != nil {
 		t.Fatalf("a run with a closed flow was summarised as clean: %s", encode(t, sum[0]))
 	}
@@ -124,7 +125,7 @@ func TestBrokenRunsStayOutOfTheMedians(t *testing.T) {
 		{Suite: "c25519", Traffic: "x", Bin: "100ms", AUC: 0.1, TopOne: 0, Multiplier: 9, RelayMultiplier: 9, P50: "900ms",
 			CIDegenerate: true, RelayBrokenCircuits: 1},
 	}
-	sum := summarise(rows)
+	sum := summarise(rows, 0.001)
 	if len(sum) != 1 {
 		t.Fatalf("%d summary lines, want 1", len(sum))
 	}
@@ -170,15 +171,22 @@ func TestEveryRunBrokenLeavesNothingToSummarise(t *testing.T) {
 		{Suite: "c25519", Traffic: "x", Bin: "100ms", AUC: 0.9, P50: "10ms", BrokenFlows: 1},
 		{Suite: "c25519", Traffic: "x", Bin: "100ms", AUC: 0.4, P50: "20ms", RelayBrokenCircuits: 3},
 	}
-	sum := summarise(rows)
+	sum := summarise(rows, 0.001)
 	if len(sum) != 1 || sum[0].Runs != 2 || sum[0].BrokenRuns != 2 {
 		t.Fatalf("summary %s, want two runs, both broken", encode(t, sum))
 	}
 	m := fields(t, sum[0])
-	for _, f := range medianFields {
+	for _, f := range append(medianFields, "true_rank_median", "pooled_tpr_at_fpr_0.01", "pooled_negatives", "precision_at_1_over_f", "precision_at_base_rate") {
 		v, present := m[f]
 		if !present || v != nil {
 			t.Fatalf("%s is %v, want null: %s", f, v, encode(t, sum[0]))
+		}
+	}
+	for _, f := range []string{"rank_anonymity", "rank_anonymity_corrected"} {
+		for name, v := range m[f].(map[string]any) {
+			if v != nil {
+				t.Fatalf("%s.%s is %v, want null: %s", f, name, v, encode(t, sum[0]))
+			}
 		}
 	}
 }
@@ -186,7 +194,7 @@ func TestEveryRunBrokenLeavesNothingToSummarise(t *testing.T) {
 // clean runs without a single latency sample leave the latency median null:
 // Median of nothing is NaN, which JSON cannot hold
 func TestNoLatencySampleLeavesTheLatencyMedianNull(t *testing.T) {
-	sum := summarise([]result{{Suite: "c25519", Traffic: "x", Bin: "100ms", AUC: 0.6}})
+	sum := summarise([]result{{Suite: "c25519", Traffic: "x", Bin: "100ms", AUC: 0.6}}, 0.001)
 	m := fields(t, sum[0])
 	if v, present := m["latency_p50_ms_median"]; !present || v != nil {
 		t.Fatalf("latency median %v, want null", v)
@@ -212,7 +220,7 @@ func TestSummaryPrintsLatencyAsTheReportHoldsIt(t *testing.T) {
 		{Suite: "c25519", Traffic: "half", Bin: "100ms", AUC: 1, P50: "156µs"},
 		{Suite: "c25519", Traffic: "paced", Bin: "100ms", AUC: 1, P50: "82.59ms"},
 		{Suite: "c25519", Traffic: "paced", Bin: "100ms", AUC: 1, P50: "82.6ms"},
-	})
+	}, 0.001)
 	var out bytes.Buffer
 	printSummary(&out, sum)
 	lines := map[string][]string{}
@@ -243,7 +251,7 @@ func TestSummaryMarksLinesWithOneOrNoCleanRun(t *testing.T) {
 		{Suite: "c25519", Traffic: "none", Bin: "100ms", AUC: 0.9, BrokenFlows: 2},
 		{Suite: "c25519", Traffic: "two", Bin: "100ms", AUC: 0.6},
 		{Suite: "c25519", Traffic: "two", Bin: "100ms", AUC: 0.8},
-	})
+	}, 0.001)
 	var out bytes.Buffer
 	printSummary(&out, sum)
 	lines := map[string]string{}
@@ -260,5 +268,65 @@ func TestSummaryMarksLinesWithOneOrNoCleanRun(t *testing.T) {
 	}
 	if strings.Contains(lines["two"], "one clean run") || !strings.Contains(lines["two"], "0.700") {
 		t.Fatalf("a line of two clean runs lost its median: %q", lines["two"])
+	}
+}
+
+// entry and exit bins coincide per flow, [0, 0, 2, 0, ...] and [0, 0, 0, 0,
+// 1, 0, 0, 0, 1, 0], so the true pairs correlate at 1 and the false ones at
+// -0.4/sqrt(3.6 * 1.6) = -1/6: each true entry is the only best, true rank 1
+// and both places first
+func TestRowsCarryTheRankOfTheTrueSender(t *testing.T) {
+	res, _ := analyse(syntheticRun(0, 0), "x", 100*time.Millisecond)
+	if res.TrueRank == nil || *res.TrueRank != 1 || len(res.RankCounts) != 2 || res.RankCounts[0] != 2 || res.RankCounts[1] != 0 {
+		t.Fatalf("true_rank %v, rank_counts %v; want 1 and [2 0]", res.TrueRank, res.RankCounts)
+	}
+	if res.AUC != 1 || res.Cells != 4 || res.Messages != 5 || res.Multiplier != 0.8 {
+		t.Fatalf("existing fields moved: %s", encode(t, res))
+	}
+}
+
+// pooled places [2, 0] + [1, 1] = [3, 1]: H = -(3/4 log2 3/4 + 1/4 log2 1/4)
+// = 0.8112781 over log2 2, size 2^H = 1.7547654; Miller-Madow adds (2 -
+// 1)/(2 * 4 ln 2) = 1/(8 ln 2): 0.9916150, size 1.9884096. Median true rank of
+// 1 and 1.5 is 1.25. The false scores 0.5, 0.2, 0.6, 0.1 lie below the true
+// 0.9, 0.8 and 0.7, so the pooled TPR at FPR 0.01 is 3/4 over 4 wrong pairs;
+// at 1/2: 0.75/(0.75 + 0.01) = 75/76; at 0.001: 0.00075/(0.00075 + 0.00999) =
+// 25/358. The broken run is left out
+func TestBlockOneSummaryPoolsRanksAndPrecision(t *testing.T) {
+	scores := func(v ...float64) []metrics.Score {
+		var out []metrics.Score
+		for exit := 0; exit < 2; exit++ {
+			out = append(out, metrics.Score{Entry: exit, Exit: exit, Value: v[2*exit], True: true},
+				metrics.Score{Entry: 1 - exit, Exit: exit, Value: v[2*exit+1]})
+		}
+		return out
+	}
+	one, half := 1.0, 1.5
+	rows := []result{
+		{Suite: "c25519", Traffic: "x", Bin: "100ms", Flows: 2, AUC: 1, TrueRank: &one, RankCounts: []float64{2, 0}, scores: scores(0.9, 0.5, 0.8, 0.2)},
+		{Suite: "c25519", Traffic: "x", Bin: "100ms", Flows: 2, AUC: 0.75, TrueRank: &half, RankCounts: []float64{1, 1}, scores: scores(0.4, 0.6, 0.7, 0.1)},
+		{Suite: "c25519", Traffic: "x", Bin: "100ms", Flows: 2, AUC: 0, TrueRank: &half, RankCounts: []float64{0, 2}, scores: scores(0.1, 0.9, 0.1, 0.9), BrokenFlows: 1},
+	}
+	s := summarise(rows, 0.001)[0]
+	near := func(a *float64, b float64) bool { return a != nil && *a-b < 5e-8 && b-*a < 5e-8 }
+	if !near(s.RankAnonymity.Entropy, 0.8112781) || !near(s.RankAnonymity.Degree, 0.8112781) || !near(s.RankAnonymity.Size, 1.7547654) ||
+		!near(s.RankCorrected.Entropy, 0.9916150) || !near(s.RankCorrected.Degree, 0.9916150) || !near(s.RankCorrected.Size, 1.9884096) {
+		t.Errorf("rank anonymity: %s", encode(t, s))
+	}
+	if !near(s.TrueRank, 1.25) || !near(s.PooledTPR, 0.75) || s.PooledNegatives == nil || *s.PooledNegatives != 4 ||
+		!near(s.PrecisionAtF, 75.0/76) || s.BaseRate != 0.001 || !near(s.PrecisionAtBase, 25.0/358) {
+		t.Errorf("pooled: %s", encode(t, s))
+	}
+
+	// the first run alone is clean: its places [2, 0] give no H, and its true
+	// rank 1 is its own
+	single := summarise([]result{rows[0], rows[2]}, 0.001)[0]
+	for name, a := range map[string]anonymityOut{"plug-in": single.RankAnonymity, "corrected": single.RankCorrected} {
+		if a.Entropy != nil || a.Degree != nil || a.Size != nil {
+			t.Errorf("one clean run, %s rank anonymity: %s, want null", name, encode(t, a))
+		}
+	}
+	if single.CleanRuns != 1 || !near(single.TrueRank, 1) {
+		t.Errorf("one clean run: %s", encode(t, single))
 	}
 }

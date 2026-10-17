@@ -61,7 +61,7 @@ func TestRankCountsKnownAnswer(t *testing.T) {
 		// targets 1 and 2 are first. Target 3: a = 1 (0.95), t = 1 (0.9),
 		// places 2 and 3 get 1/2 each. Target 4: a = 1 (0.8), t = 1 (0.5),
 		// places 2 and 3 get 1/2 each. [2, 1, 1, 0], q = (1/2, 1/4, 1/4, 0) of
-		// BLOCKS
+		// the worked example in EXPERIMENT
 		{"four exits", fourExits, []float64{2, 1, 1, 0}},
 		// an exit with no True score has no partner and is skipped
 		{"an exit without a partner", unpartnered, []float64{2, 1, 1, 0}},
@@ -107,7 +107,7 @@ func TestTrueRankKnownAnswer(t *testing.T) {
 		want   float64
 	}{
 		// 0.95, 0.9 and the true 0.9 are >= 0.9
-		{"BLOCKS", exitRows([]float64{0.9, 0.95, 0.9, 0.3}), 3},
+		{"worked example", exitRows([]float64{0.9, 0.95, 0.9, 0.3}), 3},
 		// per target 1, 1, 3, 3; mean 8/4 (random tie breaking would give 2.5
 		// for target 3)
 		{"four exits", fourExits, 2},

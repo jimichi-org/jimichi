@@ -17,7 +17,7 @@ English | [Русский](../ru/GLOSSARY.md)
 | Transcript | the public data of one key exchange in an unambiguous layout: the version, the parameters of the exchange, the public keys of both sides and, when nodes are authenticated, the identity key of the node (CRYPTO, "Key derivation") |
 | Key context | the transcript hash together with the suite (Context); it enters every agreement and every key derivation, and the provider derives no key without it |
 | AEAD | authenticated encryption with associated data |
-| Cover traffic | cells with no payload, sent to mask when a real message leaves: on top of the messages or in the empty slots of a constant-rate schedule; how much they mask is measured, not assumed (EXPERIMENT, block 1) |
+| Cover traffic | cells with no payload, sent to mask when a real message leaves: on top of the messages or in the empty slots of a constant-rate schedule; how much they mask is measured, not assumed (EXPERIMENT, blocks 1 and 7) |
 | Link padding | a frame a node sends to its neighbour on an empty tick of its schedule; the neighbour drops it |
 | Own-clock sending | a node sends one cell per tick of its own timer, not at the moment the cell arrives |
 | Padding | bytes added to reach the constant cell size |
@@ -61,5 +61,10 @@ English | [Русский](../ru/GLOSSARY.md)
 | Certificate issuance | the CA checks a node's signed request, carrying a nonce the CA chose, against the operator roster and signs the certificate |
 | Counter order | on every link a node accepts only the counter one above the previous one, anything else closes the circuit; the client takes the numbers of replies the same way; the replay defence |
 | Memory dump | a snapshot of process memory; the key extraction scenarios that will search it are planned ([#24](https://github.com/jimichi-org/jimichi/issues/24)) |
-| ROC, AUC | the error curve and the area under it, the measure of attack success |
+| ROC, AUC | the error curve and the area under it, the measure of success of the correlation attack and of the cell distinguisher |
+| Discriminant | a linear rule that turns the features of a cell into one number, its score: w = S_t^-1 (mu1 - mu0), trained on the training runs (EXPERIMENT, "Traffic indistinguishability") |
+| Cell labels | the truth "the cell carries a message" for every data cell of a client; a wrapper of the client's provider in the lab gives it, and the observer has no access to it (EXPERIMENT, block 7) |
+| Rank of the true sender | for an exit flow, the number of entry flows scoring no lower than the true one, averaged over the exit flows; 1 when the true one is the only best |
+| Degree of anonymity | the entropy of the adversary's distribution of the sender divided by log2 F, from 0 to 1; computed from ranks, an upper bound, and from the posterior distribution (EXPERIMENT, "Linking sender and recipient") |
+| Effective anonymity set size | 2^H, the number of equally likely candidates with the same entropy H, from 1 to F |
 | Bootstrap | a resampling method for confidence intervals |

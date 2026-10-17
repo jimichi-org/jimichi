@@ -479,6 +479,25 @@ English | [Русский](../ru/LIMITATIONS.md)
   a learned correlator ([#67](https://github.com/jimichi-org/jimichi/issues/67)) and an active
   adversary with a timing watermark ([#116](https://github.com/jimichi-org/jimichi/issues/116))
   are planned.
+- The cell distinguisher of block 7 (EXPERIMENT) applies only to a client without -peer: its cover
+  cells travel on the link to the entry, and the exit answers every data cell. A -peer client sends
+  a request on every tick, and its fact of sending is a real or a dummy record inside a request;
+  block 7 does not measure that difference: at the mailbox the request feature of block 3 measures
+  it ([#117](https://github.com/jimichi-org/jimichi/issues/117)), on the links of the entries the
+  conversation topology ([#47](https://github.com/jimichi-org/jimichi/issues/47)), both planned. The
+  distinguisher sees ideal timestamps, on loopback in one process, without network noise
+  ([#46](https://github.com/jimichi-org/jimichi/issues/46)), and the labels of cells come from a
+  wrapper of the client's provider in the lab, which the observer does not have: this estimates
+  distinguishability with the truth known on the testbed, not an attack in a network.
+- The block 7 set runs relays without own-clock sending, so its result does not describe the testbed
+  relays, which send on their own clocks. Without it the exit answers a payload cell after handling
+  it and a cover cell at once, and the features r_next and r_idx see that difference at a constant
+  rate too. The feature r_idx exists only without relays sending on their own clocks: with it,
+  padding frames travel back to the client too, and the k-th backward frame is no longer the reply
+  to the k-th cell. A reply on loopback comes some tens of microseconds after its cell, so the set
+  does not start when the monotonic clock of the host moves in steps above 10 µs: the reply would be
+  marked at the reading of its cell. This happens on Windows, where the step is about 0.5 ms; on
+  Linux it is below a microsecond.
 - The correlation series run with as many nodes as hops, in a fixed order, all in one process over
   the loopback interface: without certificates or onion key rotation, with anonymous links
   between nodes and with the per-address limits off. The choice of the chain is measured

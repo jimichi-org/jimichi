@@ -32,6 +32,9 @@ type Config struct {
 	Suite   jcrypto.Suite
 	Payload int
 	Seed    int64
+	// wraps each client's provider in the labelling oracle and fills
+	// Run.Labels; relays always get the bare provider
+	LabelCells bool
 }
 
 func (c Config) withDefaults() Config {
@@ -95,6 +98,9 @@ type Run struct {
 	Latency []time.Duration
 	// messages whose echo had not come back when the run was read
 	Unanswered int
+	// with Config.LabelCells, per flow; read after Execute returns, when every
+	// client is closed and no cell can follow
+	Labels []*Labels
 }
 
 type node struct {
@@ -180,6 +186,10 @@ func Execute(cfg Config) (*Run, error) {
 
 	entry := make([]*Trace, cfg.Flows)
 	entryBack := make([]*Trace, cfg.Flows)
+	var labels []*Labels
+	if cfg.LabelCells {
+		labels = make([]*Labels, cfg.Flows)
+	}
 	clients := make([]*client.Client, cfg.Flows)
 	defer func() {
 		for _, c := range clients {
@@ -226,8 +236,13 @@ func Execute(cfg Config) (*Run, error) {
 			time.Sleep(time.Duration(phases.Int63n(int64(schedule))))
 		}
 		entry[i], entryBack[i] = NewTrace(start), NewTrace(start)
+		var p jcrypto.CryptoProvider = provider
+		if labels != nil {
+			labels[i] = &Labels{}
+			p = &oracle{CryptoProvider: provider, labels: labels[i]}
+		}
 		c, err := client.Dial(client.Config{
-			Provider:  provider,
+			Provider:  p,
 			Chain:     chain,
 			Mode:      cfg.Mode,
 			Rate:      cfg.Rate,
@@ -278,7 +293,7 @@ func Execute(cfg Config) (*Run, error) {
 	drain := 300*time.Millisecond + time.Duration(4*cfg.Hops)*(cfg.Rate+cfg.RelayPeriod+cfg.Jitter)
 	_ = waitFor(func() bool { return latency.pending() == 0 }, drain)
 
-	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples(), Origin: origin, Unanswered: latency.pending(), Closures: latency.closures()}
+	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples(), Origin: origin, Unanswered: latency.pending(), Closures: latency.closures(), Labels: labels}
 	for _, c := range clients {
 		run.Dropped += c.Dropped()
 		if c.Broken() {
