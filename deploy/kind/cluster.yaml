@@ -1,6 +1,11 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: jimichi
+networking:
+  apiServerAddress: 127.0.0.1
+  # below the dynamic range 49152-65535: after a restart Windows reserves blocks
+  # of it for WinNAT, and a port kind drew there keeps the control plane down
+  apiServerPort: 16443
 nodes:
   - role: control-plane
   - role: worker

@@ -1561,7 +1561,10 @@ is indistinguishable from it.
 ## Deployment
 
 - deploy/kind: kind cluster configurations, cluster.yaml for the testbed (a control plane and two
-  workers) and ci.yaml for CI (a single node).
+  workers) and ci.yaml for CI (a single node). The testbed's API server listens on 127.0.0.1:16443,
+  below the dynamic port range 49152-65535: Windows reserves blocks of that range after a restart,
+  and a control plane whose port falls in one does not start. A cluster created before the port
+  was fixed keeps its old port until it is recreated.
 - deploy/base: the jimichi namespace, five relays (relay-1 to relay-5), each a Deployment with
   its Service and with -exit mailbox, and two -peer clients, client-a and client-b, which list all
   five, keep their queues on the mailbox of relay-5 and draw chains of three that end on it.
