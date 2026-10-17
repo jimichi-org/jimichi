@@ -25,6 +25,7 @@ import (
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/internal/fetch"
+	"github.com/jimichi-org/jimichi/internal/verify"
 	"github.com/jimichi-org/jimichi/link"
 	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/wire"
@@ -140,75 +141,6 @@ func TestTrustPolicyIsSettledBeforeAnyFetch(t *testing.T) {
 		if (err == nil) != c.ok {
 			t.Errorf("%s: trustPolicy = %v, want ok %v", c.name, err, c.ok)
 		}
-	}
-}
-
-func TestReadNodeRefusesWhatDoesNotVerify(t *testing.T) {
-	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
-		t.Run(s.String(), func(t *testing.T) {
-			p := provider(t, s)
-			ca := newCA(t, p)
-			until := t0.Add(72 * time.Hour)
-			trust := pki.Policy{Anchor: ca.Anchor(), Skew: pki.Skew}
-			keys := make([]relayKeys, 3)
-			bundles := make([][]byte, 3)
-			nodes := make([]pki.Verified, 3)
-			for i := range keys {
-				keys[i], bundles[i] = enrolled(t, p, ca, fmt.Sprintf("relay-%d", i+1), until)
-				v, err := readNode(p, true, trust, keys[i].addr, bundles[i], t0)
-				if err != nil {
-					t.Fatalf("readNode: %v", err)
-				}
-				nodes[i] = *v
-			}
-			chain := chainOf(nodes, []int{0, 1, 2})
-			for i, k := range keys {
-				if chain[i].Addr != k.addr || !bytes.Equal(chain[i].StaticPub, k.onion) || !bytes.Equal(chain[i].LinkPub, k.link) {
-					t.Fatalf("hop %d: %+v, want the onion key as StaticPub and the link key as LinkPub", i, chain[i])
-				}
-				if !bytes.Equal(chain[i].Identity, k.identity) {
-					t.Fatalf("hop %d does not carry the identity its certificate certifies", i)
-				}
-			}
-
-			k2, b2 := keys[1], bundles[1]
-			foreign := pki.Policy{Anchor: newCA(t, p).Anchor(), Skew: pki.Skew}
-			_, eb := enrolled(t, p, newCA(t, p), "relay-2", until)
-			unsigned, err := pki.Unsigned(p, k2.link, k2.onion)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, c := range []struct {
-				name   string
-				trust  pki.Policy
-				bundle []byte
-				now    time.Time
-				want   error
-			}{
-				{"foreign anchor", foreign, b2, t0, pki.ErrUnknownCA},
-				{"node certified by another CA", trust, eb, t0, pki.ErrUnknownCA},
-				{"bundle of another address", trust, bundles[2], t0, pki.ErrWrongAddr},
-				{"unsigned bundle", trust, unsigned, t0, pki.ErrFormat},
-				{"descriptor expired", trust, b2, t0.Add(time.Hour), pki.ErrDescTime},
-				{"certificate expired", trust, b2, until, pki.ErrCertTime},
-				{"not yet valid", trust, b2, t0.Add(-pki.Skew - time.Second), pki.ErrCertTime},
-			} {
-				if v, err := readNode(p, true, c.trust, k2.addr, c.bundle, c.now); !errors.Is(err, c.want) || v != nil {
-					t.Errorf("%s: readNode = %v, %v, want %v", c.name, v, err, c.want)
-				}
-			}
-
-			v, err := readNode(p, false, pki.Policy{}, k2.addr, unsigned, t0.Add(1000*time.Hour))
-			if err != nil {
-				t.Fatalf("readNode without auth: %v", err)
-			}
-			if !bytes.Equal(v.OnionPub, k2.onion) || len(v.Identity) != 0 {
-				t.Fatal("readNode without auth lost the unsigned onion key or found an identity")
-			}
-			if v, err := readNode(p, false, pki.Policy{}, k2.addr, b2, t0); err != nil || len(chainOf([]pki.Verified{*v}, []int{0})[0].Identity) != 0 {
-				t.Fatalf("readNode without auth of a signed bundle: %v, or the chain binds an identity", err)
-			}
-		})
 	}
 }
 
@@ -406,11 +338,12 @@ func TestBundlesComeFromTheEntryOnly(t *testing.T) {
 			if err != nil {
 				t.Fatalf("nodeBundles: %v", err)
 			}
+			view, err := verify.Mirror(tb.p, true, tb.trust, tb.addrs, bundles, t0)
+			if err != nil || len(view.Nodes()) != len(tb.keys) {
+				t.Fatalf("verify.Mirror = %d nodes, %v, want all %d", len(view.Nodes()), err, len(tb.keys))
+			}
 			for i, k := range tb.keys {
-				v, err := readNode(tb.p, true, tb.trust, tb.addrs[i], bundles[i], t0)
-				if err != nil {
-					t.Fatalf("readNode %d: %v", i, err)
-				}
+				v := view.Nodes()[i]
 				if v.Addr != k.addr || !bytes.Equal(v.OnionPub, k.onion) || !bytes.Equal(v.LinkPub, k.link) {
 					t.Fatalf("node %d: %+v, want the keys of %s", i, v, k.addr)
 				}
@@ -816,7 +749,7 @@ func TestEntryMayLeaveOutABoundedNumberOfNodes(t *testing.T) {
 		chain, _, err := build(s, tb.p)
 		if err != nil {
 			// node 0 was drawn as the entry and its mirror does not hold itself
-			if !errors.Is(err, errNoBundle) || namesAny(err.Error(), tb.addrs) {
+			if !errors.Is(err, verify.ErrNoBundle) || namesAny(err.Error(), tb.addrs) {
 				t.Fatalf("draw %d: %v", i, err)
 			}
 			continue
@@ -877,8 +810,8 @@ func TestEntryWhoseOwnBundleFailsRefusesTheMirror(t *testing.T) {
 	tb.info[2].mirror.Store(&m)
 	s = tb.selection(3, words(7, 6, 5))
 	s.missing = 2
-	if _, _, err := build(s, tb.p); !errors.Is(err, errNoBundle) || !errors.As(err, &failed) {
-		t.Fatalf("mirror without the entry = %v, want the entry: %v", err, errNoBundle)
+	if _, _, err := build(s, tb.p); !errors.Is(err, verify.ErrNoBundle) || !errors.As(err, &failed) {
+		t.Fatalf("mirror without the entry = %v, want the entry: %v", err, verify.ErrNoBundle)
 	}
 }
 
@@ -898,8 +831,8 @@ func TestFixedChainNeedsItsOwnNodesOnly(t *testing.T) {
 	s = tb.selection(3, nil)
 	s.fixed, s.missing = true, 2
 	chain, _, err = build(s, tb.p)
-	if !errors.Is(err, errNoBundle) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[1]+": ") || chain != nil {
-		t.Fatalf("fixed chain with its second node left out = %v, %v, want node %s: %v", chain, err, tb.addrs[1], errNoBundle)
+	if !errors.Is(err, verify.ErrNoBundle) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[1]+": ") || chain != nil {
+		t.Fatalf("fixed chain with its second node left out = %v, %v, want node %s: %v", chain, err, tb.addrs[1], verify.ErrNoBundle)
 	}
 }
 
@@ -916,7 +849,7 @@ func TestFixedChainRefusesAnEntryItCannotVerify(t *testing.T) {
 				want   error
 			}{
 				{"altered", mirrorOf(t, tb.addrs, append([][]byte{altered(t, tb.bundles[0])}, tb.bundles[1:]...)), pki.ErrDescSignature},
-				{"missing", mirrorOf(t, tb.addrs[1:], tb.bundles[1:]), errNoBundle},
+				{"missing", mirrorOf(t, tb.addrs[1:], tb.bundles[1:]), verify.ErrNoBundle},
 			} {
 				tb.info[0].mirror.Store(&c.mirror)
 				sel := tb.selection(3, nil)
