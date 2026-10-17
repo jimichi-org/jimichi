@@ -669,3 +669,219 @@ func TestBinomialStdErrIsTheDeviationOfTheShare(t *testing.T) {
 		t.Errorf("BinomialStdErr(0.25, 4) squared = %v, want 0.046875", got*got)
 	}
 }
+
+// the mirrors of n nodes whose first k hold certificates of a second CA: their
+// bundles fail everywhere, in their own mirror as an entry too, so every entry
+// serves only the other nodes
+func foreignMirrors(n, k int) [][]bool {
+	mirrors := make([][]bool, n)
+	for entry := range mirrors {
+		mirrors[entry] = make([]bool, n)
+		for node := range mirrors[entry] {
+			mirrors[entry][node] = node >= k
+		}
+	}
+	return mirrors
+}
+
+// every chain a -peer client can choose with its exit pinned to node exit, and
+// the number of entries it refuses. The entry is any node but exit, each as
+// likely; a mirror without the entry itself, lacking more than min(missing,
+// n-hops) nodes, or without exit is refused; the middle hops are every ordered
+// choice of hops-2 nodes among the others the mirror holds, then exit. The
+// chains of each entry are repeated as in mirrorChains, so all those returned
+// are equally likely and each accepted entry holds each of them
+func pinnedChains(mirrors [][]bool, hops, missing, exit int) (chains [][]int, refused, each int) {
+	n := len(mirrors)
+	var perEntry [][][]int
+	multiple := 1
+	for entry, mirror := range mirrors {
+		if entry == exit {
+			continue
+		}
+		var held []int
+		for node, served := range mirror {
+			if served {
+				held = append(held, node)
+			}
+		}
+		if !mirror[entry] || n-len(held) > min(missing, n-hops) || !mirror[exit] {
+			refused++
+			continue
+		}
+		var own [][]int
+		var extend func(path []int)
+		extend = func(path []int) {
+			if len(path) == hops-1 {
+				own = append(own, append(append([]int(nil), path...), exit))
+				return
+			}
+		next:
+			for _, node := range held {
+				if node == exit {
+					continue
+				}
+				for _, taken := range path {
+					if taken == node {
+						continue next
+					}
+				}
+				extend(append(path, node))
+			}
+		}
+		extend([]int{entry})
+		perEntry = append(perEntry, own)
+		multiple = lcm(multiple, len(own))
+	}
+	for _, own := range perEntry {
+		for _, path := range own {
+			for range multiple / len(own) {
+				chains = append(chains, path)
+			}
+		}
+	}
+	return chains, refused, multiple
+}
+
+// worked by hand: the k rogue nodes hold certificates of a second CA, so an
+// honest mirror lacks exactly k nodes and is accepted within min(missing, N-h):
+//
+//	N=5 h=3 k=1 missing 1 or 2: the bound is 1 or 2, an honest mirror lacks 1
+//	node, within it, and its chains run through the 4 honest nodes; the
+//	second-CA entry (1/5) is refused: 0, 0, 1/5, 0
+//	N=5 h=3 k=1 missing 0: one absent node exceeds min(0, 2) = 0, every
+//	attempt is refused and there is no chain to take a share of
+//	N=5 h=3 k=2: missing 2 gives 0, 0, 2/5, 0; missing 1 refuses everything
+//	N=5 h=2 k=3 missing 3: k = 3 >= h = 2 and within min(3, 3): 0, 0, 3/5, 0
+//	N=5 h=3 k=3 missing 2: 3 absent nodes exceed min(2, 2), every attempt is
+//	refused, while MirrorCompromiseProbability(5, 3, 3, 2, 2, 3) = 1, 1, 2/5,
+//	0 lets the rogue entries through: k = 3 >= h and missing 2 >= N - k = 2
+//	pinned honest exit: the entry is one of the 4 non-mailbox nodes, k of them
+//	of the second CA: k = 1 refuses 1/4, k = 2 refuses 1/2, h = 2 and k = 3
+//	refuses 3/4; missing 0 with k = 1, and k = 4 above min(2, 2), refuse
+//	everything; k = 0 refuses nothing
+//	pinned rogue exit: no mirror holds the mailbox, every attempt is refused
+//
+// mapping the second CA to -leftout 2 and -withhold 1 instead,
+// MirrorCompromiseProbability(5, 3, 1, 2, 2, 1) gives a rogue node on 1/5 of
+// the chains and refuses nothing: the rogue entry would be let through, which
+// is why -leftout is N - k
+func TestSecondCAProbabilityKnownAnswer(t *testing.T) {
+	nan := math.NaN()
+	same := func(got, want float64) bool {
+		return near(got, want) || math.IsNaN(got) && math.IsNaN(want)
+	}
+	for _, c := range []struct {
+		nodes, hops, rogue, missing    int
+		exit                           metrics.ExitChoice
+		ends, touched, refused, failed float64
+	}{
+		{5, 3, 1, 1, metrics.DrawnExit, 0, 0, 0.2, 0},
+		{5, 3, 1, 2, metrics.DrawnExit, 0, 0, 0.2, 0},
+		{5, 3, 1, 0, metrics.DrawnExit, nan, nan, 1, 0},
+		{5, 3, 2, 2, metrics.DrawnExit, 0, 0, 0.4, 0},
+		{5, 3, 2, 1, metrics.DrawnExit, nan, nan, 1, 0},
+		{5, 2, 3, 3, metrics.DrawnExit, 0, 0, 0.6, 0},
+		{5, 3, 3, 2, metrics.DrawnExit, nan, nan, 1, 0},
+		{5, 3, 1, 1, metrics.PinnedHonestExit, 0, 0, 0.25, 0},
+		{5, 3, 1, 2, metrics.PinnedHonestExit, 0, 0, 0.25, 0},
+		{5, 3, 2, 2, metrics.PinnedHonestExit, 0, 0, 0.5, 0},
+		{5, 2, 3, 3, metrics.PinnedHonestExit, 0, 0, 0.75, 0},
+		{5, 3, 1, 0, metrics.PinnedHonestExit, nan, nan, 1, 0},
+		{5, 3, 4, 2, metrics.PinnedHonestExit, nan, nan, 1, 0},
+		{5, 3, 0, 0, metrics.PinnedHonestExit, 0, 0, 0, 0},
+		{5, 3, 1, 1, metrics.PinnedRogueExit, nan, nan, 1, 0},
+		{5, 3, 2, 2, metrics.PinnedRogueExit, nan, nan, 1, 0},
+	} {
+		ends, touched, refused, failed := metrics.SecondCAProbability(c.nodes, c.hops, c.rogue, c.missing, c.exit)
+		if !same(ends, c.ends) || !same(touched, c.touched) || !near(refused, c.refused) || !near(failed, c.failed) {
+			t.Errorf("SecondCAProbability(%d, %d, %d, %d, %d) = %v, %v, %v, %v, want %v, %v, %v, %v",
+				c.nodes, c.hops, c.rogue, c.missing, c.exit, ends, touched, refused, failed, c.ends, c.touched, c.refused, c.failed)
+		}
+	}
+	ends, touched, refused, failed := metrics.MirrorCompromiseProbability(5, 3, 3, 2, 2, 3)
+	if !near(ends, 1) || !near(touched, 1) || !near(refused, 0.4) || failed != 0 {
+		t.Errorf("MirrorCompromiseProbability(5, 3, 3, 2, 2, 3) = %v, %v, %v, %v, want 1, 1, 2/5 and 0", ends, touched, refused, failed)
+	}
+	for _, c := range []struct {
+		nodes, hops, rogue, missing int
+		exit                        metrics.ExitChoice
+	}{
+		{5, 0, 1, 1, metrics.DrawnExit}, {5, 6, 1, 1, metrics.DrawnExit}, {5, 3, -1, 1, metrics.DrawnExit},
+		{5, 3, 6, 1, metrics.DrawnExit}, {5, 3, 1, -1, metrics.DrawnExit}, {5, 1, 1, 1, metrics.PinnedHonestExit},
+		{5, 3, 5, 1, metrics.PinnedHonestExit}, {5, 3, 0, 1, metrics.PinnedRogueExit}, {5, 3, 1, 1, metrics.ExitChoice(3)},
+	} {
+		ends, touched, refused, failed := metrics.SecondCAProbability(c.nodes, c.hops, c.rogue, c.missing, c.exit)
+		if !math.IsNaN(ends) || !math.IsNaN(touched) || !math.IsNaN(refused) || !math.IsNaN(failed) {
+			t.Errorf("SecondCAProbability(%d, %d, %d, %d, %d) = %v, %v, %v, %v, want NaN",
+				c.nodes, c.hops, c.rogue, c.missing, c.exit, ends, touched, refused, failed)
+		}
+	}
+}
+
+// the closed form agrees with every chain counted one by one for each
+// configuration of up to six nodes, every bound and each exit choice: the
+// first k nodes are of the second CA, a pinned honest exit is node N-1 and a
+// pinned rogue one node 0. With a drawn exit and k < h it also agrees with the
+// mirror model at -leftout N-k and -withhold k
+func TestSecondCAProbabilityAgreesWithEveryChain(t *testing.T) {
+	same := func(got, want float64) bool {
+		return near(got, want) || math.IsNaN(got) && math.IsNaN(want)
+	}
+	checked := 0
+	for nodes := 1; nodes <= 6; nodes++ {
+		for hops := 1; hops <= nodes; hops++ {
+			for k := 0; k <= nodes; k++ {
+				for missing := 0; missing <= nodes; missing++ {
+					for _, exit := range []metrics.ExitChoice{metrics.DrawnExit, metrics.PinnedHonestExit, metrics.PinnedRogueExit} {
+						var chains [][]int
+						var refusedEntries, each int
+						entries := nodes - 1
+						switch {
+						case exit == metrics.DrawnExit:
+							chains, refusedEntries, each = mirrorChains(foreignMirrors(nodes, k), hops, missing)
+							entries = nodes
+						case hops < 2:
+							continue
+						case exit == metrics.PinnedHonestExit && k < nodes:
+							chains, refusedEntries, each = pinnedChains(foreignMirrors(nodes, k), hops, missing, nodes-1)
+						case exit == metrics.PinnedRogueExit && k > 0:
+							chains, refusedEntries, each = pinnedChains(foreignMirrors(nodes, k), hops, missing, 0)
+						default:
+							continue
+						}
+						rogue := make(map[int]bool, k)
+						for node := 0; node < k; node++ {
+							rogue[node] = true
+						}
+						up, failedChains := comeUp(chains, extendsOf(nodes, k, k))
+						wantEnds, wantTouched := metrics.CompromiseFraction(up, rogue)
+						wantRefused := float64(refusedEntries) / float64(entries)
+						wantFailed := float64(failedChains) / float64(entries*each)
+						ends, touched, refused, failed := metrics.SecondCAProbability(nodes, hops, k, missing, exit)
+						if !same(ends, wantEnds) || !same(touched, wantTouched) || !near(refused, wantRefused) || !near(failed, wantFailed) {
+							t.Errorf("SecondCAProbability(%d, %d, %d, %d, %d) = %v, %v, %v, %v, every chain gives %v, %v, %v, %v",
+								nodes, hops, k, missing, exit, ends, touched, refused, failed, wantEnds, wantTouched, wantRefused, wantFailed)
+						}
+						for _, share := range [][2]float64{{ends, wantEnds}, {touched, wantTouched}, {refused, wantRefused}, {failed, wantFailed}} {
+							if (share[1] == 0 || share[1] == 1) && share[0] != share[1] {
+								t.Errorf("SecondCAProbability(%d, %d, %d, %d, %d): share %v, want exactly %v", nodes, hops, k, missing, exit, share[0], share[1])
+							}
+						}
+						if exit == metrics.DrawnExit && k < hops {
+							e, to, r, f := metrics.MirrorCompromiseProbability(nodes, hops, k, missing, nodes-k, k)
+							if !same(ends, e) || !same(touched, to) || !near(refused, r) || !near(failed, f) {
+								t.Errorf("SecondCAProbability(%d, %d, %d, %d, drawn) = %v, %v, %v, %v, the mirror model gives %v, %v, %v, %v",
+									nodes, hops, k, missing, ends, touched, refused, failed, e, to, r, f)
+							}
+						}
+						checked++
+					}
+				}
+			}
+		}
+	}
+	if checked != 1484 {
+		t.Fatalf("%d configurations checked, want 1484", checked)
+	}
+}

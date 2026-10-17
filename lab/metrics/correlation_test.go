@@ -264,3 +264,39 @@ func TestBootstrapIsReproducible(t *testing.T) {
 		t.Fatalf("same seed gave %+v and %+v", a, b)
 	}
 }
+
+// entry 1 has no partner. Pearson (0,0) -1, (0,1) 1, (1,0) 1, (1,1) -1, and
+// only (0,1) is true: the positive 1 beats two -1 and ties (1,0), AUC 5/6;
+// top-1 1/2 over both entries, 1 over the partnered one. Reading the missing
+// key as exit 0 would mark (1,0) true as well, AUC 1 and top-1 1, as if entry
+// 1 had exit 0 for a partner
+func TestScorePairsPartialTruth(t *testing.T) {
+	entry := [][]float64{{1, 0, 1, 0}, {0, 1, 0, 1}}
+	exit := [][]float64{{0, 1, 0, 1}, {1, 0, 1, 0}}
+	truth := map[int]int{0: 1}
+	scores := metrics.ScorePairs(entry, exit, truth)
+	for _, s := range scores {
+		if s.True != (s.Entry == 0 && s.Exit == 1) {
+			t.Errorf("%+v: true %v, want only (0,1) true", s, s.True)
+		}
+	}
+	if got := metrics.AUC(scores); !near(got, 5.0/6) {
+		t.Errorf("AUC = %v, want 5/6", got)
+	}
+	if got := metrics.TopOneAccuracy(scores, 2); !near(got, 0.5) {
+		t.Errorf("top-1 = %v, want 1/2", got)
+	}
+	if got := metrics.TopOneAccuracy(metrics.Partnered(scores, truth)); !near(got, 1) {
+		t.Errorf("partnered top-1 = %v, want 1", got)
+	}
+}
+
+// a rogue node that saw no circuit leaves nothing to match: undefined, not a
+// measured zero
+func TestTopOneAccuracyWithoutScores(t *testing.T) {
+	for _, flows := range []int{3, 0} {
+		if got := metrics.TopOneAccuracy(nil, flows); !math.IsNaN(got) {
+			t.Errorf("TopOneAccuracy(nil, %d) = %v, want NaN", flows, got)
+		}
+	}
+}

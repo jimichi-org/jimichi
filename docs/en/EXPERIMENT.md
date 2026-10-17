@@ -64,7 +64,16 @@ are not computed yet ([#119](https://github.com/jimichi-org/jimichi/issues/119))
 | Share of chains with a rogue node | share of the chains that hold at least one rogue node; a uniform choice gives 1 - C(N-k,h)/C(N,h) |
 | Share of refused attempts | share of the attempts to build a chain whose entry serves a mirror the client refuses, one that lacks more than min(-missing, N - h) listed nodes or lacks a verified bundle of the entry itself; a listed bundle that fails the check counts as lacking |
 | Share of attempts failed at setup | share of the attempts in which the client chooses a chain the nodes do not set up: an honest node extends a circuit only to a node whose verified descriptor it holds, so a chain with an honest node directly before a node that withholds its descriptor fails. The two shares of chains above are taken over the chains that come up |
-| Standard error of a share | sqrt(p(1-p)/n) for a share of n independent draws at the value p the model gives; n is the number of chains that came up, and the number of attempts for the refused and the failed shares |
+| Share of the route recovered | R, the share of route positions whose occupant the adversary names right. Positions for echo: the client, then the nodes of the chain in order. For a -peer client the mailbox of the testbed is known to everyone and is not a position: a side is the client, the entry and the middle hop. A rogue node that follows the protocol knows the position before it (the client for the entry), its own and the next. The views of rogue nodes are joined only when the adversary has linked their circuits (linked pair below); a linked view that names some position otherwise than the views already joined is not added, so the result depends on the order of joining. The R of a chain is taken over one linked component of its rogue views and one order of joining the views of that component, those under which the most positions of the chain are named right; unlinked views are not joined. The harness, not the adversary, picks the component and the order by the truth, so R is an upper bound on what the adversary can claim by such joining. An order that starts with the chain's own views keeps all they know, so the R of a chain is at least the R of each of its views alone and, when all of them are in one component, at least the R of its views joined; when each echo chain has its own client and a -peer process keeps its entry, no joining at three hops names right more positions of the chain than its views know together, and when all its views share a component, R is exactly that. A position the adversary does not name, or names wrong, does not count. With three hops R is 3/4 for the echo entry, 3/4 for the middle and 2/4 for the exit; for a -peer side R is 1 for the entry, 2/3 for the middle and 1/3 for the mailbox. The attack in which a node hands its neighbours different onion keys is not part of it (THREAT_MODEL) |
+| Model of the share of the route recovered | the distribution of the number of known positions when the chain is drawn uniformly from full mirrors and the views of the rogue nodes of a chain are joined. The exit is drawn with the chain (echo) or pinned to an honest or a rogue node (the mailbox of a -peer client). It is summed over the positions of the chain, each holding a rogue or an honest node drawn without replacement, and gives the mean and the standard deviation of R, the share of chains with a rogue exit and the shares of chains with a rogue entry and exit and with a rogue node. In a chain longer than three nodes a middle does not know its index, so there the model is an upper bound |
+| Share of chains with content revealed | the share of chains at least one message of which was found byte for byte inside anything the rogue nodes recorded, among the chains that sent at least one message; the number of the others is given. In the compromise scenarios (planned, block 3) the messages are filled with random bytes after the flow and message numbers, since a containment search would otherwise find, for example, a message of zeros in any record that holds zeros; the metric refuses a message whose bytes are all equal. The unit is the chain, not the message: the messages of one chain are revealed together, and a binomial error over the messages would be too small. Model: the share of chains with a rogue exit for echo (k/N for a uniform choice); 0 for a -peer client, since the mailbox holds only end-to-end records. Over the revealed chains the share of messages found is given as well; it is close to 1, messages that had not reached the exit when the run ended are not found |
+| Lag score of a pair | two colluding nodes record on one clock one event of each of their circuits, setup or close: a_i at the first node and b_j at the second. When either event was not recorded the score is undefined. Setup: 1/(1 + (b_j - a_i) in seconds) when b_j is not before a_i; when it is, the order of events rules the pair out (the second node gets a setup only after the first has extended it), and the pair scores below the undefined score: a ruled-out pair is certainly false, while an undefined one only lacks a record. A close travels both ways along the circuit, and the exit may close it before the entry (idle time, age, a break further on), so the order of closes rules no pair out and the score is symmetric, 1/(1 + \|b_j - a_i\|). The score is bounded, so no lag drops an admissible pair below a ruled-out one. ROC AUC and TPR at FPR 0.01 are taken over all pairs, top-1 accuracy over the circuits of the first node that pass the second, as for linking sender and recipient |
+| Shared link score of a pair | for adjacent rogue nodes: 1 when the outgoing link of one and the incoming link of the other are one link (the address and port of each end match crosswise; an IPv4 address in IPv6 form equals the IPv4 address), 0 when not, undefined when the link was not recorded. A link carries one circuit, so as long as no address pair of a link repeats within a run (the block 3 scenario checks this in every run, planned), ROC AUC and top-1 are 1 here by construction |
+| Linked pair | the adversary links a circuit of the first node to a circuit of the second when the score of the pair is above 0 and the single highest both among the pairs of that circuit of the first node and among the pairs of that circuit of the second: a circuit passes each node once, so the link is mutual. When several pairs share the highest score (exact equality) there is no link: a pick between equals is not a link. A circuit of the first node that does not pass the second can link to another one; the share of false links among those made is given separately. The views of linked pairs are joined for the share of the route recovered |
+| Time to link | the smallest observation window of a grid set before the series from which on top-1 accuracy over the circuits that pass both nodes is 1 at that window and at every larger window of the grid; null when it is below 1 at the largest window. A single tie keeps top-1 below 1. The top-1 at every window is given next to it. The setup lag score does not depend on the window: the time is 0 when its top-1 is 1, and null otherwise. Over runs the median is given in which runs that never linked rank above every window of the grid (null when such a run falls in the middle), with the number of such runs |
+| Joining of conversations at the mailbox | the mailbox joins two circuits when one puts into the queue the other fetches from; one direction is enough. The share is the number of conversations at least two circuits of which are joined, over the number of conversations of the run; pairs of circuits of different conversations are counted separately as false |
+| Request feature at the mailbox | the ROC AUC of a feature of a request, such as "the request carries a put", against the truth "the request's record holds a message", over the requests sent while the sender's session is established and not stale: before the session is established a put carries only the handshake record until the mailbox has stored it, and while the session is stale no new record is sealed, so there the put follows the handshake, not the messages or the cover, even with -cover-puts. A message always rides a put, so the AUC of the put feature is 0.5 + q/2, q being the share of requests without a message that carry no put either. With -cover-puts a request lacks a put only on a tick where the window of puts is full, and the AUC is exactly 0.5 only when there was no such tick; the number of requests without a put is given, and equality with guessing is claimed only by equivalence. The requests of the two circuits of one conversation and of a rebuilt circuit are dependent, so the bootstrap runs over conversations and gives an interval inside one run; the unit of comparison is the run |
+| Standard error of a share | sqrt(p(1-p)/n) for a share of n independent draws at the value p the model gives; n is the number of chains that came up, and the number of attempts for the refused and the failed shares; for the mean share of the route recovered over n chains (over n processes for -peer clients) it is sigma/sqrt(n), sigma being the standard deviation of R the model gives: R takes several values, and the binomial formula does not apply to it |
 
 ### Traffic indistinguishability
 
@@ -163,17 +172,21 @@ exit. This is stronger than passive correlation and will test whether batching h
 
 ### Block 3. Node compromise, adversary A4
 
-Status: partly implemented. The choice of the chain is measured (`cmd/lab -set paths`). The other
-scenarios are planned ([#117](https://github.com/jimichi-org/jimichi/issues/117)): the lab has no
-scenario with a compromised or inserted node, and replay and tampering are covered by the tests
-of the node and of the client, not measured as a share.
+Status: partly implemented. The choice of the chain is measured (`cmd/lab -set paths`). The
+metrics of the scenarios with rogue nodes (section "Compromised chains") and the procedures of
+agreement with a model (section "Comparisons") are implemented in lab/metrics and checked by tests
+with hand-computed answers. The scenarios themselves are planned
+([#117](https://github.com/jimichi-org/jimichi/issues/117)): the lab has no scenario with a
+compromised or inserted node, and replay and tampering are covered by the tests of the node and
+of the client, not measured as a share.
 
 | Scenario | Metric |
 |---|---|
-| One node of three | what the node holds: neighbours, content, fraction of the route recovered |
-| Entry and exit nodes | fraction of correctly linked pairs, time to link |
-| Middle and one edge node | the same, for comparison |
-| Inserted node with a valid certificate | fraction of intercepted sessions, fraction decrypted |
+| One node of three | what the node holds: its neighbours and one layer, and at the echo exit also the messages and the cover flag; share of the route recovered and share of chains with content revealed, against the model |
+| Entry and exit nodes | ROC AUC, top-1 accuracy and TPR at FPR 0.01 by the lag of setup and of close and by the cell counts on their inbound links, time to link, share of false links; share of the route recovered with the views joined over linked pairs |
+| Middle and one edge node | linking by the shared link, exact by construction; share of the route recovered |
+| Inserted node with a valid certificate | for echo and for -peer clients, for a certificate of a second CA and of the compromised CA: shares of chains with a rogue node and with a rogue entry and exit, share of chains with content revealed, share of refused attempts |
+| Rogue mailbox (-peer clients) | joining of conversations, request feature, share of the route recovered per side |
 | Choice of the chain with k rogue nodes among N | share of chains with a rogue entry and exit and share of chains with a rogue node, over the chains that come up among those drawn with the client's own choice, against the values the model gives: with full mirrors, with rogue entries that leave honest nodes out of their mirrors, and with rogue nodes that withhold their descriptors |
 | Ordered pairs of nodes kept busy from one address (planned, [#125](https://github.com/jimichi-org/jimichi/issues/125)) | share of the surviving chains with a rogue entry and exit and with a rogue node, against the addresses and circuits the adversary spends (LIMITATIONS, node limits) |
 | Replay and tampering | share of replayed, reordered or altered cells that go no further than the first party able to check them: forward that is the first node that sees them (a cell out of turn closes the circuit, an altered one is dropped); backward the first node checks the order, and the altered body of a reply is checked only by the client, which closes the circuit; one hundred percent expected |
@@ -278,6 +291,120 @@ rogue mailbox that leaves the requests through an honest middle hop unanswered g
 as the middle hop with probability 19/27 under an honest entry, and so learns the entry.
 Measuring these cases in the lab is planned
 ([#117](https://github.com/jimichi-org/jimichi/issues/117)).
+
+The share of the route recovered by the model for N = 5, h = 3 and full mirrors. The echo route
+has four positions (for echo exactly one known position never occurs: a rogue node knows at least
+itself and a neighbour):
+
+| Configuration | Shares of chains with 0, 2, 3 and 4 known positions | E[R] | sigma(R) |
+|---|---|---|---|
+| echo, k = 1 | 2/5, 1/5, 2/5, 0 | 2/5 | sqrt(23/200), 0.339 |
+| echo, k = 2 | 1/10, 1/5, 1/2, 1/5 | 27/40 | 11/40 |
+
+A side of a -peer client has three positions (the client, the entry, the middle hop; the mailbox
+is known to everyone):
+
+| Configuration | Shares of sides with 0, 1, 2 and 3 known positions | E[R] | sigma(R) |
+|---|---|---|---|
+| honest mailbox, k = 1 | 1/2, 0, 1/4, 1/4 | 5/12 | sqrt(3)/4, 0.433 |
+| honest mailbox, k = 2 | 1/6, 0, 1/3, 1/2 | 13/18 | sqrt(41)/18, 0.356 |
+| rogue mailbox, k = 1 | 0, 1, 0, 0 | 1/3 | 0 |
+| rogue mailbox and one more node, k = 2 | 0, 1/2, 1/4, 1/4 | 7/12 | sqrt(11)/12, 0.276 |
+
+Echo, k = 1: the rogue node is the entry, the middle and the exit of 12 of the 60 chains each and
+knows 3, 3 and 2 positions, and it is absent from the other 24: E[R] = (3/4 + 3/4 + 2/4)/5 = 2/5,
+E[R^2] = 2/5 x 9/16 + 1/5 x 1/4 = 11/40, sigma^2 = 11/40 - 4/25 = 23/200. The binomial value
+sqrt(p(1-p)) at p = 0.4 would be 0.490, 1.44 times larger. Echo, k = 2: exactly one rogue node
+on 36 chains (12 per position), both on 18 (entry and middle know all four positions, middle and
+exit three, entry and exit four with the views joined), none on 6:
+E[R] = 36/60 x 2/3 + 18/60 x (1 + 3/4 + 1)/3 = 27/40. One side of a -peer client with an honest
+mailbox and k = 1: the entry is rogue with probability 1/4 and names the client, itself and the
+middle hop, R = 1; the middle hop is rogue with probability 3/4 x 1/3 = 1/4 and names the entry
+and itself, R = 2/3; E[R] = 1/4 + 1/6 = 5/12. A rogue mailbox names the middle hop, 1/3 of each
+side, exactly by construction. The tests of the metric enumerate all 60 and 12 chains and every
+configuration of up to six nodes and four hops.
+
+The model joins the views as if the rogue nodes of a chain had linked their circuits. Adjacent nodes
+link them by the shared link, exactly. Entry and exit link them by the setup lag: when circuits are
+set up one at a time and the next starts only once the setup of the previous one has reached its
+last node, the first exit event after an entry event belongs to the same circuit, top-1 accuracy
+over the circuits that pass both nodes is 1 by construction, and each such link is mutual. ROC AUC
+can still be below 1, since it compares pairs of different circuits: entries at 0, 310 and 320 ms
+and exits at 300, 315 and 325 ms give top-1 1 and AUC 17/18 (the true pair of the first circuit,
+1/1.3, is below the false pair of the second entry and the third exit, 1/1.015). A circuit of the
+rogue entry with an honest exit can then link to a circuit of an honest entry that passed the rogue
+exit; when every chain has its own client, such a false link neither raises nor lowers R: the view
+of the other chain names the positions of this one wrong or as its own view does, and a joining that
+starts with its own view keeps all that view knows. The measurement comes from setting up several circuits at once: there linking can
+miss, tie or fail to be mutual, and the R of a chain falls below its R with the views joined only
+when the chain passes both nodes and its circuit is left unlinked or linked to a wrong partner. The
+gap is measured for one linker, the mutual best without tie-breaking: a linker that breaks ties at
+random or matches the circuits one to one over all pairs can link circuits this one leaves unlinked,
+so the gap describes this linker and is not a property of the system. A score of minus the lag with
+the undefined score -2 for ruled-out pairs would put a true pair with a lag over 2 s below the
+ruled-out ones: entries at 0, 1 and 3 s with exits at 0.5, 1.2 and 5.5 s would give top-1 2/3 and
+AUC 7/9 instead of 1 and 17/18.
+
+The bundle of a node with a certificate of a second CA fails the check against the anchor. Such a
+node is in no mirror, honest nodes do not extend to it, and the mirror it serves as an entry is
+refused: it lacks a verified bundle of the entry itself. An honest mirror then lacks k nodes. When
+k is at most min(-missing, N - h), the chains of honest entries come up without these nodes: the
+shares of chains with a rogue node and with rogue ends are 0, failures 0, refusals k/N for echo
+and k/(N - 1) for a -peer client with an honest mailbox, which draws its entry among the N - 1
+nodes other than the mailbox; otherwise every attempt is refused. When the mailbox itself is of
+the second CA, it is in no mirror, and every attempt of a -peer client is refused. With N = 5,
+h = 3 and k = 1 that is 1/5 refused for echo and 1/4 for -peer at -missing 1 and 2, and every
+attempt refused at -missing 0. For echo and k < h these are the shares the mirror model gives
+with -leftout N - k and -withhold k: N - k exceeds the bound at any -missing, and the rogue entry
+is refused. For k of at least h and -missing of at least N - k that -leftout falls within the
+bound and would let the rogue entry through, so the model of a second CA is stated on its own;
+the tests enumerate every chain of up to six nodes with a drawn and a pinned exit. A node of the
+compromised CA is chosen like any other: for echo the shares of the uniform choice, 0 and 3/5 for
+k = 1, 1/10 and 9/10 for k = 2; for -peer the shares of the pinned exit (the table with the
+Mailbox column above).
+
+Exact by construction, not tested and not counted among the claims: R given the role (for echo
+entry 3/4, middle 3/4, exit 2/4; for a -peer side entry 1, middle 2/3, mailbox 1/3); content
+revealed for -peer, 0; linking of adjacent nodes by the shared link, AUC and top-1 1, as long as
+no address pair of a link repeats within the run; top-1 by setup lag over the circuits that pass
+both nodes when circuits are set up one at a time; the cover flag: 1 at the echo exit, 0 at the
+entry and the middle, while -peer has no cover cells at the node level and the mailbox tells only
+requests apart (request feature); joining of conversations at the mailbox with honest clients
+that make requests, 1 and no false pairs; model shares of 0 or 1, among them a node of a second
+CA in the chains that come up, 0. The AUC of the put feature with -cover-puts is not among them:
+it is 0.5 only when every tick carries a request with a put (row "Request feature at the
+mailbox").
+
+Agreement with the model in block 3. The shares and the mean R are compared with the model by
+equivalence (section "Comparisons"): the margin delta is set before the series, 0.05 by default
+as for AUC; m is the number of claims of the block without those exact by construction; the
+interval is taken at level 1 - 0.05/m, the Wilson interval for a share and the normal one for the
+mean R. For echo the unit is the chain. For a -peer client the unit is the process: the entry is
+drawn once per process, a rebuild dials the same chain, and the middle hops are drawn anew at
+most twice, so the R of a side is taken from the first chain of the process, rebuilds do not
+enter it, and the processes that drew new middle hops are given separately; a configuration has
+as many sides as processes, twice as many as conversations. The mean R is claimed only where
+linking is exact by construction: one rogue node in the chain, adjacent rogue nodes, or setup one
+at a time. With circuits set up at once the mean R is given against the model as the linking
+gap: there the unit is the run (the mean R of a run, the median over clean runs, next to it the
+shares of the circuits that pass both nodes left unlinked and linked to a wrong partner), and it
+is not counted among the claims. The number of chains per configuration is the largest over its
+claims of max(30, ceil((sigma (z_{1-0.025/m} + z_{0.9}) / delta)^2)), sigma being the model's
+standard deviation of one observation, sqrt(p(1-p)) for a share and sigma(R) for R: then a claim
+passes with probability about 0.8 when the model is exact. At m = 14 and delta = 0.05 a share
+near 0.6 needs 1690 chains, a share of 0.2 needs 1127, the mean R of echo at k = 1 needs 810, the
+mean R of a -peer side with an honest mailbox and k = 1 needs 1321 processes, that is 661
+conversations. The deviation in standard errors of the model is given next to it as a consistency
+check. The list of configurations, delta, m and the number of chains are set before the series.
+
+A worked example of the arithmetic: echo, k = 1, 1800 chains, each of which sent at least one
+message, m = 14 claims, z = 2.914 at level 1 - 0.05/14. 711 chains without a rogue node, 378 with
+it at the exit, 711 at the entry or in the middle. The mean R = (378 x 2/4 + 711 x 3/4)/1800 =
+0.40125, the sample variance 204.635/1799 = 0.1137, the standard error 0.00795, the interval
+[0.378, 0.424] inside [0.35, 0.45]: agreement is claimed. The deviation 0.00125 is 0.16 standard
+errors of the model, sqrt(0.115/1800) = 0.00799. Chains revealed 378 of 1800, exactly those with
+the rogue node at the exit, 0.21: the Wilson interval [0.183, 0.239] inside [0.15, 0.25]. Chains
+with a rogue node 1089, 0.605: the interval [0.571, 0.638] inside [0.55, 0.65].
 
 The correlation series of block 1 run with as many nodes as hops, in an order the harness sets
 itself: the choice of the chain does not enter them. The harness starts the nodes and the clients
@@ -450,10 +577,11 @@ Procedures:
 
 - Equal values: a and b count as equal when |a - b| is at most 1e-9 max(|a|, |b|), because the
   same number reached by different arithmetic differs in the last bits. The rule holds for ties
-  and zero differences in every procedure below. It is not transitive, so a group of equal values
-  starts at its smallest value and takes every value within 1e-9 of it. Values with a large
-  offset (absolute timestamps, counters) are not passed to the procedures: by this rule 1e10 + 5
-  and 1e10 are equal.
+  and zero differences in the Mann-Whitney and Wilcoxon tests and the effect sizes. It is not
+  transitive, so a group of equal values starts at its smallest value and takes every value
+  within 1e-9 of it. Values with a large offset (absolute timestamps, counters) are not passed to
+  the procedures: by this rule 1e10 + 5 and 1e10 are equal. The intervals and the equivalence
+  verdict compare values exactly.
 - Mann-Whitney U test, two independent samples: x of n values and y of m. U is the number of
   pairs where the x value is larger than the y value, plus half the pairs with equal values, over
   all nm pairs; U/(nm) reads as an AUC. The two-sided p is the share of splits of the pooled
@@ -486,6 +614,28 @@ Procedures:
 - Holm's correction for a family of k comparisons: the p-values are sorted ascending,
   p(1) <= ... <= p(k); the adjusted p(j) is the largest (k - i + 1) p(i) over i <= j, capped at 1.
   A hypothesis is rejected when its adjusted p is at most 0.05.
+- Interval of a share: x of n draws, p = x/n, z the standard normal quantile of level 1 - alpha/2
+  for an interval of level 1 - alpha. The Wilson interval:
+  (p + z^2/(2n) -+ z sqrt(p(1-p)/n + z^2/(4n^2))) / (1 + z^2/n); at x = 0 the lower bound is 0,
+  at x = n the upper bound 1. Unlike p -+ z sqrt(p(1-p)/n) it does not shrink to a point at
+  x = 0 and x = n and stays inside [0, 1] (Brown, Cai, DasGupta, 2001). Example: 600 of 1000 at
+  level 0.95 give [0.5693, 0.6299].
+- Interval of a mean: x̄ -+ z s/sqrt(n), s the sample standard deviation with divisor n - 1;
+  when all values are equal the interval is that value. The quantile is normal, not Student's: at
+  the block 3 sizes (533 chains and more) t is wider by under half a percent (0.45 percent at
+  n = 533 and 0.24 percent at n = 1000 at the level for 14 claims); it does not suit the 30 runs
+  of a point, where t is wider by 8.8 percent at the same level and 4.4 percent at level 0.95.
+- Equivalence verdict: "equivalent" when the interval lies entirely inside the model value plus or
+  minus the margin (edges included), "not shown" otherwise; an undefined interval and an infinite
+  margin give no verdict. "Not shown" does not mean the value differs from the model.
+- Size for an equivalence claim: with the model's standard deviation sigma of one observation,
+  margin delta, m claims and power pi,
+  n = max(30, ceil((sigma (z_{1-0.025/m} + z_{(1+pi)/2}) / delta)^2)); below 30 the normal
+  approximation does not hold. A claim passes when the deviation of the estimate from the model
+  is at most delta - z_{1-0.025/m} SE, which for an exact model and a normal estimate happens with
+  probability 2F(delta/SE - z_{1-0.025/m}) - 1. This is a normal approximation: for a share near
+  0 or 1 the exact power of the Wilson interval is a few points lower (0.74 instead of 0.8 for a
+  share of 0.1 at 634 chains). Example: sigma = 0.5, delta = 0.05, m = 1, pi = 0.8 give 1051.
 
 Rules:
 
@@ -520,8 +670,8 @@ Rules:
   claim easier. A proportion inside +-2 SE of the model is the same non-rejection, so the deviation
   in SE is reported as a consistency check, not as agreement. Agreement is claimed as equivalence:
   before the series the block sets a margin and claims agreement only when the 95 percent interval
-  for the measured quantity lies entirely inside the model value plus or minus the margin; with k
-  such claims in a block the intervals are taken at level 1 - 0.05/k. For AUC the default margin
+  for the measured quantity lies entirely inside the model value plus or minus the margin; with m
+  such claims in a block the intervals are taken at level 1 - 0.05/m. For AUC the default margin
   is 0.05, the corridor [0.45, 0.55]. Under exact guessing the quantity a block compares with the
   corridor must lie well inside it: the folded per-run AUC max(AUC, 1 - AUC) is pushed upward by
   noise and with few flows can lie above 0.55 at any number of runs. It must also bound the share
@@ -530,6 +680,14 @@ Rules:
   quantity, its interval, the margin and the number of runs, given the step of the quantity
   itself, before the series; the intervals are planned with the series
   ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
+- In block 3 the intervals are those above: Wilson for shares, normal for the mean R, the margin
+  set before the series (0.05 by default), size by the rule for equivalence at power 0.8 (block 3,
+  "Agreement with the model in block 3"). m is the number of equivalence claims of the block; in
+  block 3 the letter k is taken by the number of rogue nodes. Equivalence claims do not enter a
+  Holm family: their multiplicity is in the level 1 - 0.05/m. Goodness-of-fit tests (chi-square,
+  exact binomial) do not show agreement and are not used in block 3: a deviation from the model
+  shows in the deviation in SE, and the view of each chain is checked against its route
+  directly.
 - The smallest exact p that can be reached is 2/2^n' for Wilcoxon and 2/C(n+m, n) for
   Mann-Whitney with equal groups or without ties; with unequal groups and ties the null
   distribution can be asymmetric and the floor drops to 1/C(n+m, n). With five runs per group
@@ -549,7 +707,7 @@ Rules:
 |---|---|---|---|---|
 | 1, full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run | attack AUC at each level of a factor against the baseline configuration of the same set | Wilcoxon by repeat number with the rank-biserial correlation, Holm over the levels of one factor; between sets with different seeds Mann-Whitney with Cliff's delta | repeat r of every level of a set is derived from one seed, so these are pairs |
 | 2 ([#116](https://github.com/jimichi-org/jimichi/issues/116)) | clean run | watermark detector AUC against its null level in the same run; configurations of the block against each other | against the null level Wilcoxon; configurations by the pairing rule above; Holm over the configurations; resistance threshold by equivalence | the null level is the same detector on unmarked flows of the same run |
-| 3 ([#117](https://github.com/jimichi-org/jimichi/issues/117)) | established chain for proportions, clean run for AUC | proportions against the model; residual linking AUC from the vantage point of the rogue nodes against the A1 AUC on the same runs; scenarios of the block against each other | proportions: equivalence with a margin, deviation in SE as a consistency check; AUC: Wilcoxon; Holm over non-degenerate comparisons | the model proportion is known exactly, so the question is agreement, not rejection; both attacks watch the same links of one run |
+| 3 ([#117](https://github.com/jimichi-org/jimichi/issues/117)) | established echo chain and -peer client process (its first chain) for shares and the mean R; clean run for AUC, the request feature and the mean R with circuits set up at once | shares of chains and the mean share of the route recovered against the model; residual linking AUC from the vantage point of the rogue nodes against the A1 AUC on the same runs; scenarios of the block against each other | shares: Wilson interval, mean R: normal interval; agreement by equivalence with a margin set before the series at level 1 - 0.05/m, for the mean R only where linking is exact by construction; deviation in SE of the model as a consistency check; AUC: Wilcoxon for a claimed difference, "not lower" only as non-inferiority by an interval of the paired differences with a margin set before the series; Holm over non-degenerate comparisons | the model proportion is known exactly, so the question is agreement, not rejection; both attacks watch the same links of one run |
 | Traffic indistinguishability ([#119](https://github.com/jimichi-org/jimichi/issues/119)) | clean run | AUC of the cell distinguisher in the immediate mode against the constant rate | by the pairing rule above; equality with guessing by equivalence | indistinguishability is claimed by equivalence, not by a non-significant p |
 
 ## Threats to validity

@@ -79,10 +79,16 @@ func ScorePairs(entry, exit [][]float64, truth map[int]int) []Score {
 			// equal correlations computed in a different order differ in the last
 			// bits; rounding keeps them a tie instead of an accidental ranking
 			v = math.Round(v*1e9) / 1e9
-			scores = append(scores, Score{Entry: i, Exit: j, Value: v, True: truth[i] == j})
+			scores = append(scores, Score{Entry: i, Exit: j, Value: v, True: partner(truth, i, j)})
 		}
 	}
 	return scores
+}
+
+// a missing key is an entry without a partner, not one whose partner is exit 0
+func partner(truth map[int]int, entry, exit int) bool {
+	j, ok := truth[entry]
+	return ok && j == exit
 }
 
 // pairs whose correlation was undefined, all tied at the bottom of the ranking;
@@ -192,8 +198,12 @@ func TPRAtFPR(scores []Score, target float64) float64 {
 }
 
 // expected share of entry flows matched to their own exit when the adversary
-// picks the highest score and breaks ties at random
+// picks the highest score and breaks ties at random; NaN without scores, where
+// a zero would read as a measured miss
 func TopOneAccuracy(scores []Score, flows int) float64 {
+	if len(scores) == 0 {
+		return math.NaN()
+	}
 	best := make([]float64, flows)
 	for i := range best {
 		best[i] = math.Inf(-1)

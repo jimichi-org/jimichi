@@ -105,6 +105,39 @@ func MirrorCompromiseProbability(nodes, hops, rogue, missing, leftOut, withheld 
 	return bothEnds / up, anyNode / up, 1 - float64(accepted)/n, down / n
 }
 
+// the k rogue nodes hold certificates of a second CA, so they are in no mirror
+// and their own mirror as an entry is refused. For a drawn exit and k < h this
+// equals MirrorCompromiseProbability(N, h, k, missing, N-k, k), whose -leftout
+// N-k exceeds the bound at any -missing; for k >= h and missing >= N - k that
+// -leftout falls within the bound and would let a rogue entry through, so the
+// model is stated directly
+func SecondCAProbability(nodes, hops, rogue, missing int, exit ExitChoice) (ends, touched, refused, failed float64) {
+	nan := math.NaN()
+	if hops < 1 || hops > nodes || rogue < 0 || rogue > nodes || missing < 0 {
+		return nan, nan, nan, nan
+	}
+	entries := nodes
+	switch exit {
+	case DrawnExit:
+	case PinnedHonestExit:
+		if hops < 2 || rogue == nodes {
+			return nan, nan, nan, nan
+		}
+		entries = nodes - 1
+	case PinnedRogueExit:
+		if hops < 2 || rogue == 0 {
+			return nan, nan, nan, nan
+		}
+		return nan, nan, 1, 0
+	default:
+		return nan, nan, nan, nan
+	}
+	if rogue > min(missing, nodes-hops) {
+		return nan, nan, 1, 0
+	}
+	return 0, 0, float64(rogue) / float64(entries), 0
+}
+
 // the nodes a rogue entry has not yet drawn for its chain, by kind, and
 // whether the node drawn last is honest
 type undrawn struct {

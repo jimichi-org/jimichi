@@ -324,3 +324,205 @@ func TestHolmUndefined(t *testing.T) {
 		}
 	}
 }
+
+// the printed digits of a bound worked out to seven places
+func toSeven(a, b float64) bool { return math.Abs(a-b) < 5e-8 }
+
+// level erf(sqrt 2) gives z = 2 up to rounding: Erfinv returns 2 within a few
+// ulps, so these bounds are compared with near, except Low at x = 0 and High at
+// x = n, which are set exactly. With z = 2 and n = 4, z^2/n = 1 and d = 2:
+//
+//	x = 0: center (0 + 4/8)/2 = 1/4, half (2/2) sqrt(0 + 4/64) = 1/4: [0, 1/2]
+//	x = 1: center (1/4 + 1/2)/2 = 3/8; z/d = 1 and sqrt(3/64 + 4/64) =
+//	sqrt(7)/8, so [3/8 - sqrt(7)/8, 3/8 + sqrt(7)/8] = [0.0442811, 0.7057189]
+//	x = 2: center 1/2, half sqrt(1/16 + 1/16) = sqrt(1/8):
+//	[1/2 - sqrt(2)/4, 1/2 + sqrt(2)/4] = [0.1464466, 0.8535534]
+//	x = 4: the mirror of x = 0, [1/2, 1]
+//
+// x = 600 of 1000 at level 0.95: each bound b solves (0.6 - b)^2 =
+// z^2 b(1 - b)/1000 with z = 1.959963984540054, as
+// scipy.stats.binomtest(600, 1000).proportion_ci(method="wilson") gives. x = 0
+// of 1000: center and half are both z^2/(2n)/d, so High = z^2/(n + z^2) =
+// 0.0038268, where p +- z sqrt(p(1-p)/n) would give [0, 0]. The worked example
+// of block 3 at level 1 - 0.05/14, z = 2.9137263: 378 of 1800 and 1089 of 1800.
+// 4 of 4 at level 0.95: center (1 + z^2/8)/d and half z^2/(8d) with
+// d = 1 + z^2/4, so High = 1 and Low = 1/d = 4/(4 + z^2) = 0.5101092, but the
+// raw High rounds to 0.9999999999999999. 0 of 15 at level 0.95: center and half
+// are both z^2/30/d, so Low = 0 and High = z^2/(15 + z^2) = 0.2038833, but the
+// raw Low rounds to 2.78e-17. These two pin the bounds that are set exactly
+func TestWilsonIntervalKnownAnswer(t *testing.T) {
+	z2 := 1.959963984540054 * 1.959963984540054
+	two := math.Erf(math.Sqrt2)
+	for _, c := range []struct {
+		x, n             int
+		level            float64
+		point, low, high float64
+		close            func(a, b float64) bool
+	}{
+		{0, 4, two, 0, 0, 0.5, near},
+		{1, 4, two, 0.25, 3.0/8 - math.Sqrt(7)/8, 3.0/8 + math.Sqrt(7)/8, near},
+		{2, 4, two, 0.5, 0.5 - math.Sqrt2/4, 0.5 + math.Sqrt2/4, near},
+		{4, 4, two, 1, 0.5, 1, near},
+		{600, 1000, 0.95, 0.6, 0.5693094295142662, 0.6299252187886226, func(a, b float64) bool { return math.Abs(a-b) < 1e-12 }},
+		{0, 1000, 0.95, 0, 0, z2 / (1000 + z2), near},
+		{4, 4, 0.95, 1, 4 / (4 + z2), 1, near},
+		{0, 15, 0.95, 0, 0, z2 / (15 + z2), near},
+		{378, 1800, 1 - 0.05/14, 0.21, 0.1834211, 0.2393016, toSeven},
+		{1089, 1800, 1 - 0.05/14, 0.605, 0.5710095, 0.6380047, toSeven},
+	} {
+		got := metrics.WilsonInterval(c.x, c.n, c.level)
+		if !near(got.Point, c.point) || !c.close(got.Low, c.low) || !c.close(got.High, c.high) || got.Method != "wilson" {
+			t.Errorf("WilsonInterval(%d, %d, %v) = %+v, want %v in [%v, %v]", c.x, c.n, c.level, got, c.point, c.low, c.high)
+		}
+		if c.x == 0 && got.Low != 0 || c.x == c.n && got.High != 1 {
+			t.Errorf("WilsonInterval(%d, %d, %v) = %+v, want the bound at the edge exactly", c.x, c.n, c.level, got)
+		}
+	}
+	if got := metrics.WilsonInterval(0, 1000, 0.95); !toSeven(got.High, 0.0038268) {
+		t.Errorf("WilsonInterval(0, 1000, 0.95) = %+v, want High 0.0038268", got)
+	}
+	if got := metrics.WilsonInterval(4, 4, 0.95); !toSeven(got.Low, 0.5101092) {
+		t.Errorf("WilsonInterval(4, 4, 0.95) = %+v, want Low 0.5101092", got)
+	}
+	if got := metrics.WilsonInterval(0, 15, 0.95); !toSeven(got.High, 0.2038833) {
+		t.Errorf("WilsonInterval(0, 15, 0.95) = %+v, want High 0.2038833", got)
+	}
+	for _, c := range []struct{ x, n int }{{0, 0}, {5, 4}, {-1, 4}} {
+		if got := metrics.WilsonInterval(c.x, c.n, 0.95); !math.IsNaN(got.Point) || !math.IsNaN(got.Low) || !math.IsNaN(got.High) {
+			t.Errorf("WilsonInterval(%d, %d, 0.95) = %+v, want NaN", c.x, c.n, got)
+		}
+	}
+	for _, level := range []float64{1, 0, math.NaN()} {
+		if got := metrics.WilsonInterval(2, 4, level); got.Point != 0.5 || !math.IsNaN(got.Low) || !math.IsNaN(got.High) {
+			t.Errorf("WilsonInterval(2, 4, %v) = %+v, want 1/2 without bounds", level, got)
+		}
+	}
+}
+
+// worked by hand:
+//
+//	{0, 3/4, 3/4, 1/2, 0} at level erf(sqrt 2), z = 2: the echo k = 1 model
+//	distribution. Mean 2/5; deviations -2/5, 7/20, 7/20, 1/10, -2/5, squares
+//	sum 23/40; s^2 = 23/160; se^2 = 23/800; (2 se)^2 = 23/200 = 0.115, the
+//	model variance too: 2/5 -+ sqrt(0.115) = [0.0608835, 0.7391165]
+//	{0, 1, 1, 2} at level 0.95: mean 1, squares 2, s^2 = 2/3, se sqrt(2/3)/2:
+//	1 -+ 1.959964 x 0.4082483 = 1 -+ 0.8001519
+//	1800 values, 711 at 0, 378 at 1/2 and 711 at 3/4, at level 1 - 0.05/14:
+//	sum 722.25, mean 0.40125; sum of squares 494.4375, SS = 494.4375 - 1800 x
+//	0.40125^2 = 204.6346875, s^2 = SS/1799 = 0.1137491, se = sqrt(s^2/1800) =
+//	0.0079495, z = 2.9137263, half 0.0231626: [0.3780874, 0.4244126]
+//	{0.2} x 7 and {0.5} x 3: the value itself, where the plain two-pass
+//	formula gives Point 0.19999999999999998 and bounds 0.19999999999999996
+//	and 0.2
+//	{1.5e308, -1.5e308}: the mean is 0, but each squared deviation 2.25e616
+//	overflows, so s is +Inf and the bounds would be -Inf and +Inf
+func TestMeanIntervalKnownAnswer(t *testing.T) {
+	five := []float64{0, 0.75, 0.75, 0.5, 0}
+	got := metrics.MeanInterval(five, math.Erf(math.Sqrt2))
+	if !near(got.Point, 0.4) || !near(got.Low, 0.4-math.Sqrt(0.115)) || !near(got.High, 0.4+math.Sqrt(0.115)) || got.Method != "normal" {
+		t.Errorf("MeanInterval(%v) = %+v, want 2/5 -+ sqrt(0.115)", five, got)
+	}
+	if !toSeven(got.Low, 0.0608835) || !toSeven(got.High, 0.7391165) {
+		t.Errorf("MeanInterval(%v) = %+v, want [0.0608835, 0.7391165]", five, got)
+	}
+	half := 1.959963984540054 * math.Sqrt(2.0/3) / 2
+	got = metrics.MeanInterval([]float64{0, 1, 1, 2}, 0.95)
+	if !near(got.Point, 1) || !near(got.Low, 1-half) || !near(got.High, 1+half) || !toSeven(half, 0.8001519) {
+		t.Errorf("MeanInterval(0, 1, 1, 2) = %+v, want 1 -+ %v", got, half)
+	}
+	series := concat(repeat(0, 711), repeat(0.5, 378), repeat(0.75, 711))
+	got = metrics.MeanInterval(series, 1-0.05/14)
+	if !near(got.Point, 0.40125) || !toSeven(got.Low, 0.3780874) || !toSeven(got.High, 0.4244126) {
+		t.Errorf("MeanInterval of the worked example = %+v, want 0.40125 in [0.3780874, 0.4244126]", got)
+	}
+	for _, values := range [][]float64{repeat(0.2, 7), repeat(0.5, 3)} {
+		v := values[0]
+		if got := metrics.MeanInterval(values, 0.95); got.Point != v || got.Low != v || got.High != v {
+			t.Errorf("MeanInterval(%v) = %+v, want exactly %v", values, got, v)
+		}
+	}
+	if got := metrics.MeanInterval([]float64{0.75}, 0.95); got.Point != 0.75 || !math.IsNaN(got.Low) || !math.IsNaN(got.High) {
+		t.Errorf("MeanInterval(0.75) = %+v, want 0.75 without bounds", got)
+	}
+	// no values, an undefined or infinite one, a sum that overflows and squared
+	// deviations that overflow
+	for _, values := range [][]float64{nil, {1, math.NaN()}, {1, math.Inf(1)}, {1e308, 1.5e308}, {1.5e308, -1.5e308}} {
+		if got := metrics.MeanInterval(values, 0.95); !math.IsNaN(got.Point) || !math.IsNaN(got.Low) || !math.IsNaN(got.High) {
+			t.Errorf("MeanInterval(%v) = %+v, want NaN", values, got)
+		}
+	}
+	for _, level := range []float64{0, 1} {
+		if got := metrics.MeanInterval([]float64{0, 1}, level); got.Point != 0.5 || !math.IsNaN(got.Low) || !math.IsNaN(got.High) {
+			t.Errorf("MeanInterval(0, 1) at level %v = %+v, want 1/2 without bounds", level, got)
+		}
+	}
+}
+
+// edges binary-exact, since 0.4 - 0.05 is 0.35000000000000003 in float64
+func TestEquivalenceKnownAnswer(t *testing.T) {
+	for _, c := range []struct {
+		low, high, model, margin float64
+		want                     string
+	}{
+		// [3/8, 5/8] touches both edges of 1/2 -+ 1/8
+		{3.0 / 8, 5.0 / 8, 0.5, 1.0 / 8, "equivalent"},
+		{3.0 / 8, 11.0 / 16, 0.5, 1.0 / 8, "not shown"},
+		{1.0 / 4, 5.0 / 8, 0.5, 1.0 / 8, "not shown"},
+		// the worked example of block 3 inside [0.35, 0.45]
+		{0.3780874, 0.4244126, 0.4, 0.05, "equivalent"},
+		{math.NaN(), 5.0 / 8, 0.5, 1.0 / 8, ""},
+		{3.0 / 8, 5.0 / 8, 0.5, -0.1, ""},
+		{3.0 / 8, 5.0 / 8, 0.5, math.Inf(1), ""},
+		{3.0 / 8, 5.0 / 8, math.NaN(), 1.0 / 8, ""},
+	} {
+		iv := metrics.Interval{Point: (c.low + c.high) / 2, Low: c.low, High: c.high}
+		if got := metrics.Equivalence(iv, c.model, c.margin); got != c.want {
+			t.Errorf("Equivalence([%v, %v], %v, %v) = %q, want %q", c.low, c.high, c.model, c.margin, got, c.want)
+		}
+	}
+}
+
+// n = max(30, ceil((sd (z_{1-0.025/m} + z_{0.9}) / delta)^2)):
+//
+//	sd 0.5, delta 0.05, 1 claim: z_0.975 = 1.959964, z_0.9 = 1.281552, sum
+//	3.241516; (0.5 x 3.241516/0.05)^2 = 32.41516^2 = 1050.74, so 1051
+//	sd 0.5, 14 claims: z = 2.913726; (0.5 x 4.195278/0.05)^2 = 41.95278^2 =
+//	1760.04, so 1761
+//	at 14 claims: sqrt(0.24) (a share of 0.6 or 0.4) 1690, 0.4 (0.2) 1127,
+//	0.3 (0.1) 634, sqrt(23/200) (R of echo at k = 1) 810, 11/40 (k = 2) 533,
+//	sqrt(3)/4 (R of a -peer side, honest mailbox, k = 1) 1321, sqrt(41)/18
+//	(k = 2) 891, sqrt(11)/12 (a rogue mailbox and one more node) 538
+//	sd 0.01, 1 claim: the formula gives 0.42, the floor 30
+//
+// not asserted: the exact power of the Wilson claim at these sizes is 0.802
+// for 0.6 at 1690, 0.803 for 0.2 at 1127 and 0.738 for 0.1 at 634; at
+// n = 1000 a share of 0.6 passes only with 0.277 at 12 or 14 claims
+func TestEquivalenceSizeKnownAnswer(t *testing.T) {
+	for _, c := range []struct {
+		sd     float64
+		claims int
+		want   int
+	}{
+		{0.5, 1, 1051}, {0.5, 14, 1761},
+		{math.Sqrt(0.24), 14, 1690}, {0.4, 14, 1127}, {0.3, 14, 634},
+		{math.Sqrt(23.0 / 200), 14, 810}, {11.0 / 40, 14, 533},
+		{math.Sqrt(3) / 4, 14, 1321}, {math.Sqrt(41) / 18, 14, 891}, {math.Sqrt(11) / 12, 14, 538},
+		{0.01, 1, 30},
+	} {
+		if got, ok := metrics.EquivalenceSize(c.sd, 0.05, c.claims, 0.8); got != c.want || !ok {
+			t.Errorf("EquivalenceSize(%v, 0.05, %d, 0.8) = %d, %v, want %d", c.sd, c.claims, got, ok, c.want)
+		}
+	}
+	for _, c := range []struct {
+		sd, margin float64
+		claims     int
+		power      float64
+	}{
+		{0, 0.05, 14, 0.8}, {0.5, 0, 14, 0.8}, {0.5, math.Inf(1), 14, 0.8},
+		{0.5, 0.05, 0, 0.8}, {0.5, 0.05, 14, 1}, {1e10, 1e-10, 1, 0.8},
+	} {
+		if got, ok := metrics.EquivalenceSize(c.sd, c.margin, c.claims, c.power); got != 0 || ok {
+			t.Errorf("EquivalenceSize(%v, %v, %d, %v) = %d, %v, want 0 and false", c.sd, c.margin, c.claims, c.power, got, ok)
+		}
+	}
+}

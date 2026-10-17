@@ -94,3 +94,36 @@ func TestMedianKnownAnswer(t *testing.T) {
 		t.Fatal("Percentile accepted a NaN quantile")
 	}
 }
+
+// a NaN, a run that never linked, ranks above every value:
+//
+//	0, 0.5, NaN: the middle is 0.5, one censored; Median would give 0, since
+//	it sorts NaN first
+//	0, NaN, NaN: the middle is a NaN
+//	2, 0, 1, NaN sorts to 0 1 2 NaN: (1 + 2)/2 = 1.5
+//	0, 1, NaN, NaN: the upper middle value is censored
+//	5, 1, 0.5: 1, as Median gives
+func TestCensoredMedianKnownAnswer(t *testing.T) {
+	nan := math.NaN()
+	for _, c := range []struct {
+		values   []float64
+		median   float64
+		censored int
+	}{
+		{[]float64{0, 0.5, nan}, 0.5, 1},
+		{[]float64{0, nan, nan}, nan, 2},
+		{[]float64{2, 0, 1, nan}, 1.5, 1},
+		{[]float64{0, 1, nan, nan}, nan, 2},
+		{[]float64{5, 1, 0.5}, 1, 0},
+		{nil, nan, 0},
+		{[]float64{nan}, nan, 1},
+	} {
+		median, censored := metrics.CensoredMedian(c.values)
+		if !(near(median, c.median) || math.IsNaN(median) && math.IsNaN(c.median)) || censored != c.censored {
+			t.Errorf("CensoredMedian(%v) = %v, %d, want %v and %d", c.values, median, censored, c.median, c.censored)
+		}
+	}
+	if got := metrics.Median([]float64{0, 0.5, nan}); got != 0 {
+		t.Errorf("Median(0, 0.5, NaN) = %v, want 0, the bias CensoredMedian avoids", got)
+	}
+}
