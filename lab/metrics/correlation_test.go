@@ -300,3 +300,51 @@ func TestTopOneAccuracyWithoutScores(t *testing.T) {
 		}
 	}
 }
+
+// PPV = TPR base / (TPR base + FPR (1 - base)):
+//
+//	0.9, 0.01, 0.001: 0.0009/(0.0009 + 0.00999) = 900/10890 = 10/121 = 0.0826446
+//	1, 0.01, 0.001: 0.001/0.01099 = 100/1099 = 0.0909918, so even a perfect TPR
+//	at FPR 0.01 is wrong ten times in eleven at a thousand flows
+//	0.9, 0.01, 1/2: 0.45/0.455 = 90/91; 0.9, 0.01, 1/10: 0.09/0.099 = 10/11
+//	0.9, 0.01, 1/6 (six flows of one run): 0.15/(0.15 + 1/120) =
+//	0.15/(19/120) = 18/19
+//	1/2, 1/100, 1/6: (1/12)/(1/12 + 5/600) = (50/600)/(55/600) = 10/11
+//	0, 0.01, 1/2: no true decision among the positive ones, exactly 0; 1/2, 0,
+//	0.001: no false one, exactly 1
+func TestPrecisionAtBaseRateKnownAnswer(t *testing.T) {
+	for _, c := range []struct {
+		tpr, fpr, base, want float64
+	}{
+		{0.9, 0.01, 0.001, 10.0 / 121},
+		{1, 0.01, 0.001, 100.0 / 1099},
+		{0.9, 0.01, 0.5, 90.0 / 91},
+		{0.9, 0.01, 0.1, 10.0 / 11},
+		{0.9, 0.01, 1.0 / 6, 18.0 / 19},
+		{0.5, 0.01, 1.0 / 6, 10.0 / 11},
+		{0, 0.01, 0.5, 0},
+		{0.5, 0, 0.001, 1},
+	} {
+		if got := metrics.PrecisionAtBaseRate(c.tpr, c.fpr, c.base); !near(got, c.want) {
+			t.Errorf("PrecisionAtBaseRate(%v, %v, %v) = %v, want %v", c.tpr, c.fpr, c.base, got, c.want)
+		}
+	}
+	if got := metrics.PrecisionAtBaseRate(0, 0.01, 0.5); got != 0 {
+		t.Errorf("PrecisionAtBaseRate(0, 0.01, 0.5) = %v, want exactly 0", got)
+	}
+	if got := metrics.PrecisionAtBaseRate(0.5, 0, 0.001); got != 1 {
+		t.Errorf("PrecisionAtBaseRate(0.5, 0, 0.001) = %v, want exactly 1", got)
+	}
+}
+
+// no positive decision, a base rate of 0 or 1, rates outside [0, 1] and an
+// undefined TPR, which TPRAtFPR gives without one of the classes
+func TestPrecisionAtBaseRateUndefined(t *testing.T) {
+	for _, c := range []struct{ tpr, fpr, base float64 }{
+		{0, 0, 0.5}, {0.9, 0.01, 0}, {0.9, 0.01, 1}, {1.5, 0.01, 0.5}, {0.9, -0.1, 0.5}, {math.NaN(), 0.01, 0.5},
+	} {
+		if got := metrics.PrecisionAtBaseRate(c.tpr, c.fpr, c.base); !math.IsNaN(got) {
+			t.Errorf("PrecisionAtBaseRate(%v, %v, %v) = %v, want NaN", c.tpr, c.fpr, c.base, got)
+		}
+	}
+}
