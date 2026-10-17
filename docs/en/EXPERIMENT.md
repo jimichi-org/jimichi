@@ -172,20 +172,23 @@ exit. This is stronger than passive correlation and will test whether batching h
 
 ### Block 3. Node compromise, adversary A4
 
-Status: partly implemented. The choice of the chain is measured (`cmd/lab -set paths`). The
-metrics of the scenarios with rogue nodes (section "Compromised chains") and the procedures of
-agreement with a model (section "Comparisons") are implemented in lab/metrics and checked by tests
-with hand-computed answers. The scenarios themselves are planned
-([#117](https://github.com/jimichi-org/jimichi/issues/117)): the lab has no scenario with a
-compromised or inserted node, and replay and tampering are covered by the tests of the node and
-of the client, not measured as a share.
+Status: partly implemented. The choice of the chain is measured (`cmd/lab -set paths`). The trust
+boundary of the testbed is checked by a lab test with real nodes and a client in one process: a
+node certified by a second CA joins no chain of a client without -peer (below). The metrics of the
+scenarios with rogue nodes (section "Compromised chains") and the procedures of agreement with a
+model (section "Comparisons") are implemented in lab/metrics and checked by tests with
+hand-computed answers. The view of a node, that is what the testbed's nodes see and link, is not
+measured in this revision: what a node that follows the protocol knows is given by the model
+derived from the protocol ([#117](https://github.com/jimichi-org/jimichi/issues/117)). The lab
+has no scenario in which nodes record what they see, and replay and tampering are covered by the
+tests of the node and of the client, not measured as a share.
 
 | Scenario | Metric |
 |---|---|
 | One node of three | what the node holds: its neighbours and one layer, and at the echo exit also the messages and the cover flag; share of the route recovered and share of chains with content revealed, against the model |
 | Entry and exit nodes | ROC AUC, top-1 accuracy and TPR at FPR 0.01 by the lag of setup and of close and by the cell counts on their inbound links, time to link, share of false links; share of the route recovered with the views joined over linked pairs |
 | Middle and one edge node | linking by the shared link, exact by construction; share of the route recovered |
-| Inserted node with a valid certificate | for echo and for -peer clients, for a certificate of a second CA and of the compromised CA: shares of chains with a rogue node and with a rogue entry and exit, share of chains with content revealed, share of refused attempts |
+| Inserted node with a valid certificate | for echo and for -peer clients, for a certificate of a second CA and of the compromised CA: shares of chains with a rogue node and with a rogue entry and exit, share of chains with content revealed, share of refused attempts; for echo and one node of a second CA among five, chains of three and -missing 1, the shares of chains, the failures and the share refused are checked by the trust boundary test (below) |
 | Rogue mailbox (-peer clients) | joining of conversations, request feature, share of the route recovered per side |
 | Choice of the chain with k rogue nodes among N | share of chains with a rogue entry and exit and share of chains with a rogue node, over the chains that come up among those drawn with the client's own choice, against the values the model gives: with full mirrors, with rogue entries that leave honest nodes out of their mirrors, and with rogue nodes that withhold their descriptors |
 | Ordered pairs of nodes kept busy from one address (planned, [#125](https://github.com/jimichi-org/jimichi/issues/125)) | share of the surviving chains with a rogue entry and exit and with a rogue node, against the addresses and circuits the adversary spends (LIMITATIONS, node limits) |
@@ -288,9 +291,10 @@ A rogue entry that leaves one honest middle hop out of its mirror and closes the
 honest middle hop gets its colluder as the middle hop with probability 7/8 under an honest
 mailbox: a -peer client draws its middle hops at most three times per process (LIMITATIONS). A
 rogue mailbox that leaves the requests through an honest middle hop unanswered gets its colluder
-as the middle hop with probability 19/27 under an honest entry, and so learns the entry.
-Measuring these cases in the lab is planned
-([#117](https://github.com/jimichi-org/jimichi/issues/117)).
+as the middle hop with probability 19/27 under an honest entry, and so learns the entry. These
+cases are not measured in the lab: nodes that close circuits or leave requests unanswered are not
+part of the block; the values 7/8 and 19/27 are checked by enumerating every outcome of the draws
+(cmd/client tests, LIMITATIONS).
 
 The share of the route recovered by the model for N = 5, h = 3 and full mirrors. The echo route
 has four positions (for echo exactly one known position never occurs: a rogue node knows at least
@@ -363,17 +367,52 @@ compromised CA is chosen like any other: for echo the shares of the uniform choi
 k = 1, 1/10 and 9/10 for k = 2; for -peer the shares of the pinned exit (the table with the
 Mailbox column above).
 
-Exact by construction, not tested and not counted among the claims: R given the role (for echo
-entry 3/4, middle 3/4, exit 2/4; for a -peer side entry 1, middle 2/3, mailbox 1/3); content
-revealed for -peer, 0; linking of adjacent nodes by the shared link, AUC and top-1 1, as long as
-no address pair of a link repeats within the run; top-1 by setup lag over the circuits that pass
-both nodes when circuits are set up one at a time; the cover flag: 1 at the echo exit, 0 at the
-entry and the middle, while -peer has no cover cells at the node level and the mailbox tells only
-requests apart (request feature); joining of conversations at the mailbox with honest clients
-that make requests, 1 and no false pairs; model shares of 0 or 1, among them a node of a second
-CA in the chains that come up, 0. The AUC of the put feature with -cover-puts is not among them:
-it is 0.5 only when every tick carries a request with a put (row "Request feature at the
-mailbox").
+The trust boundary is checked by a lab test with real nodes: five nodes of the relay package in
+one process over loopback, enrolled the way enroll does it, four under the CA of the testbed and
+one under a second CA, each with an onion key of its own, peer checks and an echo exit. The test
+assembles each node's peer table and mirror by the rule of cmd/relay: a node takes a peer's keys
+with the node's function verify.Peer against the anchor of its own CA (the one its roster would
+name), and its mirror holds its own bundle and the bundles of the peers it took. The test has no
+roster and no descriptors or mirrors over HTTP (the cmd/relay tests and e2e cover them); the
+per-address limits are off as in the harness, the nodes forward at once rather than on their own
+clock, and no onion key rotates during the test. The client holds the anchor of the testbed's CA,
+node authentication (-auth, the default), -missing 1, chains of three nodes and a drawn exit,
+without -peer.
+
+| Check | Expected |
+|---|---|
+| verify.Peer at every node | 12 ordered pairs of nodes of the testbed's CA taken; the 8 ordered pairs where one of the two is the node of the second CA refused as a certificate from an unknown CA |
+| the mirror of an honest entry at the client | no bundle of the node of the second CA, one node not served: refused at -missing 0, taken at -missing 1 and 2; the same bundle added to the mirror fails the check and changes nothing |
+| the mirror of the entry of the second CA at the client | its own bundle fails the check: refused at any -missing |
+| the 24 chains the client can draw | each comes up and returns its echo; none holds the node of the second CA, and no link to it is opened |
+| 36 chains holding the node of the second CA, put together past the client's choice | the honest node before it refuses to extend without trying to connect, 24 of 24; the node itself, following the protocol with a roster under its own CA, extends to no honest node, 12 of 12 |
+| 3000 attempts of the choice on the stream of a seed | the chains and refusals are those that the sampling function of the paths set, lab.SampleMirrorPaths, gives on the masks of the mirrors the client read at the same seed; only the entry of the second CA is refused; every chain drawn comes up, failures 0; chains with the node of the second CA 0, and no link to it is opened; the share refused agrees with the model value 1/5: the Wilson interval at level 0.95 inside [0.15, 0.25] |
+
+Every row but the share refused is exact by construction and checked without an interval. A
+refusal happens exactly when the entry drawn is the node of the second CA, so the interval checks
+the choice of the entry, and the boundary itself is checked by the exact rows. The share refused
+is the one claim of the test, m = 1, margin 0.05; it is not among the claims of the block's
+series. 3000 attempts give it an exact power of 0.999998 at the model share, while the 673
+attempts the size formula below gives at m = 1 give 0.80: the test would then fail at about one
+seed in five. A client that draws the node of the second CA as its entry asks it for its mirror;
+the test reads the mirror without HTTP and does not model that request. An honest node accepts an
+inbound link from any address, as it does from a client, so the node of the second CA extends to
+no honest node only because it follows the protocol: one that departs from it can extend to
+honest nodes, though only as the entry of a chain a client composes past its own choice. A -peer
+client with a pinned mailbox is not covered by this test: its shares are derived above. On the
+GOST suite every row but the sample is checked.
+
+Exact by construction, not tested in the series and not counted among the claims: R given the
+role (for echo entry 3/4, middle 3/4, exit 2/4; for a -peer side entry 1, middle 2/3, mailbox
+1/3); content revealed for -peer, 0; linking of adjacent nodes by the shared link, AUC and top-1
+1, as long as no address pair of a link repeats within the run; top-1 by setup lag over the
+circuits that pass both nodes when circuits are set up one at a time; the cover flag: 1 at the
+echo exit, 0 at the entry and the middle, while -peer has no cover cells at the node level and
+the mailbox tells only requests apart (request feature); joining of conversations at the mailbox
+with honest clients that make requests, 1 and no false pairs; model shares of 0 or 1, among them
+a node of a second CA in the chains that come up, 0 (checked exactly by the trust boundary test
+above). The AUC of the put feature with -cover-puts is not among them: it is 0.5 only when every
+tick carries a request with a put (row "Request feature at the mailbox").
 
 Agreement with the model in block 3. The shares and the mean R are compared with the model by
 equivalence (section "Comparisons"): the margin delta is set before the series, 0.05 by default

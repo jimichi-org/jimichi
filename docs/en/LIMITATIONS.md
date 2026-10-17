@@ -248,8 +248,13 @@ English | [Русский](../ru/LIMITATIONS.md)
   [#96](https://github.com/jimichi-org/jimichi/issues/96)).
 - The exit of a -peer client is pinned to the mailbox: a rogue mailbox is in every conversation of
   its clients, and with a rogue entry it holds both ends of the chain with probability
-  (k - 1)/(N - 1), 1/4 on the testbed (EXPERIMENT, block 3). What such a mailbox learns is not
-  measured ([#117](https://github.com/jimichi-org/jimichi/issues/117)).
+  (k - 1)/(N - 1), 1/4 on the testbed (EXPERIMENT, block 3). What such a mailbox knows of the
+  route when it follows the protocol is derived from the protocol: on the side of a -peer client
+  it names only the middle hop, 1/3 of the positions (EXPERIMENT, block 3); a rogue mailbox that
+  leaves the requests through an honest middle hop unanswered gets its colluder as the middle hop
+  with probability 19/27 under an honest entry and so learns the entry (the item on rebuilding the
+  chain above); what it sees in the requests is listed in the previous item; neither is measured
+  on the testbed ([#117](https://github.com/jimichi-org/jimichi/issues/117)).
 - Before the session the puts carry handshake records only, so the mailbox sees the moment of the
   handshake. Without -cover-puts the mailbox also sees the moment and number of real messages,
   the initiator's first record after kk2 and a keepalive every 30 s; with a round trip longer than
@@ -394,9 +399,15 @@ English | [Русский](../ru/LIMITATIONS.md)
   counters line and in the client log.
 - Whoever holds the CA key, that is the operator or someone who stole it during issuance, can
   certify an identity of their own for any name and address and, with a position in the network,
-  substitute nodes. How often a uniformly drawn chain meets such nodes is computed and sampled
-  (EXPERIMENT, block 3); what they then learn from the traffic is yet to be measured in the lab
-  ([#117](https://github.com/jimichi-org/jimichi/issues/117)), and so is what it costs them to
+  substitute nodes. A node certified by another CA joins no chain of a client without -peer while
+  the client holds the testbed's anchor and node authentication is on (-auth, the default), which
+  a test with real nodes in one process checks (EXPERIMENT, block 3); for a -peer client this is
+  derived in the same section. A client that draws such a node as its entry still asks it for its
+  mirror before refusing it, so that node sees the client's address and the moment of its start
+  (the test does not model this request). How often a uniformly drawn chain meets the nodes of the
+  key holder is computed and sampled (EXPERIMENT, block 3); what each of them knows of the route
+  is derived from the protocol (same section), and what they see and link is not measured
+  ([#117](https://github.com/jimichi-org/jimichi/issues/117)); nor is what it costs them to
   keep the pairs of honest nodes busy and how far that raises the share of chains their nodes
   hold ([#125](https://github.com/jimichi-org/jimichi/issues/125),
   the node limits below). Past circuits stay closed to such a substitution.
