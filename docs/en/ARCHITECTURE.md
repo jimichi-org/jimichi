@@ -952,8 +952,9 @@ set to -1 itself.
 The client takes node keys only from a bundle verified against the trust anchor, and a node takes
 the link key of the next node only from such a bundle. The pki package implements the chain of
 trust from the CA key to the node keys, certificate issuance and verification; cmd/relay,
-cmd/client and cmd/jimichi use it. The CA key only signs certificates and takes no part in the
-layer agreement.
+cmd/client and cmd/jimichi use it. The client's check of the mirror bundles and a node's check of a
+peer bundle run over pki in internal/verify, shared by cmd/client and cmd/relay. The CA key only
+signs certificates and takes no part in the layer agreement.
 
 ### Chain of trust
 
@@ -1350,6 +1351,7 @@ forged conversation with the assumption and the records in hex, without a byte o
 | link | link encryption between neighbours, frames of one size | crypto, crypto/secmem, wire |
 | pki | certificate, descriptor and request of a node, roster and mirror formats, issuing and checking | crypto, crypto/secmem, wire |
 | internal/fetch | reading bundles and the mirror from an info port | pki |
+| internal/verify | node bundle checks over pki: the client reads every bundle of its entry's mirror on its own (one that fails counts as not served), applies the mirror rule and draws the other hops among those that pass; a node takes a peer's link key and identity only from a verified bundle. One implementation for cmd/client and cmd/relay, against which a lab test checks the chain sampler | client, crypto, pki, relay |
 | relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
 | client | choice of the chain, send, receive, cover traffic | crypto, crypto/secmem, link, wire |
 | noise | the Noise-shaped handshake machine over CryptoProvider, only the KK pattern today | crypto, crypto/secmem |

@@ -13,6 +13,7 @@ import (
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/internal/fetch"
+	"github.com/jimichi-org/jimichi/internal/verify"
 	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/relay"
 )
@@ -144,9 +145,8 @@ func (c *peerCache) mirrored(e *peerEntry, now int64) bool {
 
 // Verify bounds the descriptor by its certificate, so expires alone ends the entry
 func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []byte, time.Time) (*peerEntry, error) {
-	policy := pki.Policy{Anchor: anchor, Skew: pki.Skew}
 	return func(addr string, bundle []byte, now time.Time) (*peerEntry, error) {
-		v, err := pki.Verify(p, policy, addr, bundle, now)
+		peer, err := verify.Peer(p, anchor, addr, bundle, now)
 		if err != nil {
 			return nil, err
 		}
@@ -156,7 +156,7 @@ func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []by
 		}
 		e := &peerEntry{
 			bundle:  bundle,
-			peer:    relay.Peer{LinkPub: v.LinkPub, Identity: v.Identity},
+			peer:    peer,
 			from:    max(s.published, s.notBefore),
 			due:     s.published + (s.expires-s.published)/2,
 			expires: s.expires,
@@ -175,11 +175,11 @@ func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []by
 // times, so it is fetched again every minute and never runs out
 func unverifiedPeer(p jcrypto.CryptoProvider) func(string, []byte, time.Time) (*peerEntry, error) {
 	return func(addr string, bundle []byte, now time.Time) (*peerEntry, error) {
-		v, err := pki.Unverified(p, addr, bundle)
+		peer, err := verify.UnverifiedPeer(p, addr, bundle)
 		if err != nil {
 			return nil, err
 		}
-		return &peerEntry{bundle: bundle, peer: relay.Peer{LinkPub: v.LinkPub}, due: now.Add(maxCheckEvery).Unix(), expires: math.MaxInt64}, nil
+		return &peerEntry{bundle: bundle, peer: peer, due: now.Add(maxCheckEvery).Unix(), expires: math.MaxInt64}, nil
 	}
 }
 
@@ -417,7 +417,7 @@ func (n *node) handleRoster(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errRosterSelf.Error(), http.StatusBadRequest)
 		return
 	}
-	if _, err := pki.Verify(n.p, pki.Policy{Anchor: roster.Anchor, Skew: pki.Skew}, n.addr, bundle, now); err != nil {
+	if _, err := verify.Peer(n.p, roster.Anchor, n.addr, bundle, now); err != nil {
 		http.Error(w, fmt.Sprintf("this node's bundle does not verify under the roster's anchor: %v", err), http.StatusBadRequest)
 		return
 	}

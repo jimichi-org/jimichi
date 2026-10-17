@@ -23,6 +23,7 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/e2e"
 	"github.com/jimichi-org/jimichi/internal/fetch"
+	"github.com/jimichi-org/jimichi/internal/verify"
 	"github.com/jimichi-org/jimichi/mailbox"
 )
 
@@ -492,7 +493,7 @@ func (r *route) rebuild() (conversation.Circuit, error) {
 	err = errNotServed
 	if r.silent >= silentCircuits && !exhausted {
 		err = errSilent
-	} else if v.holds(r.path) {
+	} else if v.Holds(r.path) {
 		c, dialErr := r.open(v)
 		if dialErr == nil {
 			return c, nil
@@ -516,8 +517,8 @@ func (r *route) rebuild() (conversation.Circuit, error) {
 	return c, nil
 }
 
-func (r *route) open(v mirrorView) (conversation.Circuit, error) {
-	c, err := r.dial(v.chain(r.path))
+func (r *route) open(v verify.View) (conversation.Circuit, error) {
+	c, err := r.dial(v.Chain(r.path))
 	if err != nil {
 		return nil, err
 	}
@@ -525,22 +526,19 @@ func (r *route) open(v mirrorView) (conversation.Circuit, error) {
 	return r.last, nil
 }
 
-func (r *route) draw(v mirrorView) error {
-	rest, err := client.ChooseRestTo(v.at[r.entry], v.at[r.exit], len(v.nodes), r.sel.hops, r.sel.rnd)
+func (r *route) draw(v verify.View) error {
+	path, err := v.DrawTo(r.entry, r.exit, r.sel.hops, r.sel.rnd)
 	if err != nil {
 		return err
 	}
 	r.draws, r.silent = r.draws+1, 0
-	r.path = make([]int, len(rest))
-	for i, place := range rest {
-		r.path[i] = v.listed[place]
-	}
+	r.path = path
 	return nil
 }
 
 // the mirror of the entry when the client takes it: with a drawn chain the
 // rule of JudgeMirrorTo, with a fixed one every node of the chain
-func (r *route) mirror(attempts int) (mirrorView, error) {
+func (r *route) mirror(attempts int) (verify.View, error) {
 	sel := r.sel
 	sel.attempts = attempts
 	v, err := sel.mirror(r.p, r.entry)
@@ -549,39 +547,22 @@ func (r *route) mirror(attempts int) (mirrorView, error) {
 	}
 	if r.sel.fixed {
 		for i := 0; i < r.sel.hops; i++ {
-			if v.at[i] < 0 {
-				return v, &nodeError{v.missing(i)}
+			if err := v.Missing(i); err != nil {
+				return v, &nodeError{err}
 			}
 		}
 		return v, nil
 	}
-	switch verdict, absent, allowed := client.JudgeMirrorTo(v.usable(), r.entry, r.exit, r.sel.hops, r.sel.missing); verdict {
+	switch verdict, absent, allowed := v.JudgeTo(r.entry, r.exit, r.sel.hops, r.sel.missing); verdict {
 	case client.MirrorTaken:
 		return v, nil
 	case client.MirrorLacksEntry:
-		return v, &entryError{v.missing(r.entry)}
+		return v, &entryError{v.Missing(r.entry)}
 	case client.MirrorLacksExit:
 		return v, errNoMailbox
 	default:
 		return v, fmt.Errorf("%w: %d of %d listed nodes, at most %d may be", errTooFew, absent, len(r.sel.addrs), allowed)
 	}
-}
-
-func (v mirrorView) holds(path []int) bool {
-	for _, i := range path {
-		if v.at[i] < 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func (v mirrorView) chain(path []int) []client.Node {
-	places := make([]int, len(path))
-	for i, listed := range path {
-		places[i] = v.at[listed]
-	}
-	return chainOf(v.nodes, places)
 }
 
 // the messages of the stand: the sender's and the answers of -respond
