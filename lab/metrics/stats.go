@@ -257,6 +257,112 @@ func EffectMagnitude(e float64) string {
 	}
 }
 
+func twoSided(level float64) float64 { return math.Sqrt2 * math.Erfinv(level) }
+
+// unlike p +- z sqrt(p(1-p)/n) it keeps a width at x = 0 and x = n and stays in
+// [0, 1] (Brown, Cai and DasGupta, 2001); rounding leaves the raw bound up to
+// about 1e-16 off 0 or 1, either way, so both are set exactly
+func WilsonInterval(x, n int, level float64) Interval {
+	nan := math.NaN()
+	if n < 1 || x < 0 || x > n {
+		return Interval{Point: nan, Low: nan, High: nan, Method: "wilson"}
+	}
+	p := float64(x) / float64(n)
+	out := Interval{Point: p, Low: nan, High: nan, Method: "wilson"}
+	if !(level > 0 && level < 1) {
+		return out
+	}
+	z, size := twoSided(level), float64(n)
+	d := 1 + z*z/size
+	center := (p + z*z/(2*size)) / d
+	half := z / d * math.Sqrt(p*(1-p)/size+z*z/(4*size*size))
+	out.Low, out.High = 0, 1
+	if x > 0 {
+		out.Low = math.Max(center-half, 0)
+	}
+	if x < n {
+		out.High = math.Min(center+half, 1)
+	}
+	return out
+}
+
+// the quantile is normal, not Student's: at the block 3 sizes (533 and more) t
+// is wider by under half a percent (0.45 percent at n = 533, 0.24 at n = 1000,
+// at the level for 14 claims); it is not meant for the 30 runs of a point,
+// where t is wider by 8.8 percent at that level and 4.4 at 0.95. Constant
+// input is returned as is, since a two-pass mean of equal values can miss them
+// by an ulp ({0.2} x 7 gives 0.19999999999999998)
+func MeanInterval(values []float64, level float64) Interval {
+	nan := math.NaN()
+	undefinedMean := Interval{Point: nan, Low: nan, High: nan, Method: "normal"}
+	if len(values) == 0 {
+		return undefinedMean
+	}
+	var sum float64
+	constant := true
+	for _, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return undefinedMean
+		}
+		sum += v
+		constant = constant && v == values[0]
+	}
+	n := float64(len(values))
+	mean := sum / n
+	if constant {
+		mean = values[0]
+	}
+	if math.IsInf(mean, 0) {
+		return undefinedMean
+	}
+	out := Interval{Point: mean, Low: nan, High: nan, Method: "normal"}
+	if len(values) == 1 || !(level > 0 && level < 1) {
+		return out
+	}
+	if constant {
+		out.Low, out.High = mean, mean
+		return out
+	}
+	var squares float64
+	for _, v := range values {
+		squares += (v - mean) * (v - mean)
+	}
+	s := math.Sqrt(squares / (n - 1))
+	if math.IsInf(s, 0) {
+		return undefinedMean
+	}
+	half := twoSided(level) * s / math.Sqrt(n)
+	out.Low, out.High = mean-half, mean+half
+	return out
+}
+
+// "not shown" says only that agreement was not shown, not that the value
+// differs
+func Equivalence(iv Interval, model, margin float64) string {
+	if math.IsNaN(iv.Low) || math.IsNaN(iv.High) || math.IsNaN(model) || math.IsNaN(margin) || margin < 0 || math.IsInf(margin, 0) {
+		return ""
+	}
+	if model-margin <= iv.Low && iv.High <= model+margin {
+		return "equivalent"
+	}
+	return "not shown"
+}
+
+// the model sd is known before the series, so the size needs no pilot; a
+// normal approximation, and near 0 or 1 the exact power of the Wilson claim
+// falls a few points short
+func EquivalenceSize(sd, margin float64, claims int, power float64) (int, bool) {
+	if !(sd > 0) || !(margin > 0) || math.IsInf(margin, 0) || claims < 1 || !(power > 0 && power < 1) {
+		return 0, false
+	}
+	z := twoSided(1-0.05/float64(claims)) + twoSided(power)
+	n := math.Ceil(math.Pow(sd*z/margin, 2))
+	if !(n < 1<<53) {
+		return 0, false
+	}
+	return max(30, int(n)), true
+}
+
 // adjusted p-values in the order given. a family holding an undefined p has
 // no defined correction, so every value is NaN then
 func Holm(p []float64) []float64 {

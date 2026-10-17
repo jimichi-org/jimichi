@@ -37,6 +37,30 @@ func Median(values []float64) float64 {
 	}
 	sorted := slices.Clone(values)
 	slices.Sort(sorted)
+	return middle(sorted)
+}
+
+// a run that never linked took longer than every window of the grid; dropping
+// it, or Median, which sorts NaN first, would pull the median down
+func CensoredMedian(values []float64) (median float64, censored int) {
+	if len(values) == 0 {
+		return math.NaN(), 0
+	}
+	sorted := make([]float64, 0, len(values))
+	for _, v := range values {
+		if !math.IsNaN(v) {
+			sorted = append(sorted, v)
+		}
+	}
+	censored = len(values) - len(sorted)
+	slices.Sort(sorted)
+	for range censored {
+		sorted = append(sorted, math.NaN())
+	}
+	return middle(sorted), censored
+}
+
+func middle(sorted []float64) float64 {
 	mid := len(sorted) / 2
 	if len(sorted)%2 == 1 {
 		return sorted[mid]
