@@ -1,10 +1,12 @@
 package scripts
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -178,5 +180,30 @@ func TestRelayManifestsRunTheMailbox(t *testing.T) {
 	}
 	if relays != 5 {
 		t.Fatalf("%d relay deployments, want five", relays)
+	}
+}
+
+var (
+	apiAddress = regexp.MustCompile(`(?m)^  apiServerAddress:\s*(\S+)\s*$`)
+	apiPort    = regexp.MustCompile(`(?m)^  apiServerPort:\s*(\d+)\s*$`)
+)
+
+// certificate issuance trusts the path through the kube API, so the testbed
+// keeps it on loopback, and on a port below the dynamic range 49152-65535,
+// whose blocks Windows reserves after a restart
+func TestKindClusterKeepsTheAPIServerOnLoopback(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "deploy", "kind", "cluster.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, port := apiAddress.FindSubmatch(raw), apiPort.FindSubmatch(raw)
+	if addr == nil || port == nil {
+		t.Fatal("cluster.yaml does not set networking.apiServerAddress and apiServerPort")
+	}
+	if ip, err := netip.ParseAddr(string(addr[1])); err != nil || !ip.IsLoopback() {
+		t.Errorf("apiServerAddress %s, want a loopback address", addr[1])
+	}
+	if p, err := strconv.Atoi(string(port[1])); err != nil || p < 1024 || p >= 49152 {
+		t.Errorf("apiServerPort %s, want 1024 to 49151", port[1])
 	}
 }
