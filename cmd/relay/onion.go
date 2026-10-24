@@ -81,6 +81,11 @@ type onionKeys struct {
 	// attempts that left the published key in place, one a second while a
 	// rotation is overdue
 	failures atomic.Uint64
+	// expires of the descriptor in service at the last rotation that succeeded,
+	// the last descriptor of the epoch being replaced then: the floor of the
+	// next epoch but one, plus Skew, which the consistency rules require and a
+	// wall clock set back would miss
+	prevExpires int64
 }
 
 func checkRotateFlags(rotate, ttl time.Duration) error {
@@ -189,6 +194,17 @@ func (n *node) rotateIfDue() {
 	o.failed = ""
 	o.rotateAt = after(now, o.every)
 	o.retireAt = after(now, o.grace)
+	// only in the attempt that succeeded: a failed attempt must not raise the
+	// floor of the epoch it did not start
+	if n.id != nil {
+		if o.prevExpires > 0 {
+			n.id.SetFloor(o.prevExpires + int64(pki.Skew/time.Second))
+		}
+		o.prevExpires = 0
+		if s := n.out.Load(); s != nil {
+			o.prevExpires = s.expires
+		}
+	}
 	n.logger.Printf("onion key rotated epoch=%d", epoch)
 	// at once and not on the next tick of the signing timer: until then the
 	// node would hand out a descriptor for a key that is on its way out
