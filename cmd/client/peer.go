@@ -68,7 +68,8 @@ type peerFlags struct {
 	suite, keymem, ca, mode         string
 	message                         string
 	hops, count, missing            int
-	fixed, auth, harden             bool
+	fixed, auth, consistency        bool
+	harden                          bool
 	coverPuts, respond              bool
 	rate, jitter, cover, interval   time.Duration
 	skew, handshakeTimeout          time.Duration
@@ -125,7 +126,7 @@ func runPeer(f peerFlags, logger *log.Logger, stop <-chan os.Signal) int {
 		logger.Print(err)
 		return exitFlags
 	}
-	trust, err := trustPolicy(f.auth, f.ca, chosen, f.skew)
+	trust, err := trustPolicy(f.auth, f.ca, chosen, f.skew, f.consistency)
 	if err != nil {
 		logger.Print(err)
 		return exitFlags
@@ -155,7 +156,7 @@ func runPeer(f peerFlags, logger *log.Logger, stop <-chan os.Signal) int {
 		p: p, exit: exit, logger: logger,
 		sel: selection{
 			addrs: addrs, hops: f.hops, fixed: f.fixed, missing: f.missing, infoPort: f.infoPort,
-			auth: f.auth, trust: trust,
+			auth: f.auth, trust: trust, consistency: f.consistency,
 			web: fetch.NewClient(), attempts: fetchAttempts, pause: fetchPause,
 			rnd: rand.Reader, now: time.Now,
 		},

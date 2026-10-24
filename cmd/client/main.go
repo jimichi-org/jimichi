@@ -56,6 +56,7 @@ func main() {
 	ca := flag.String("ca", "", "trust anchor <suite>:<base64>, the CA public key printed by jimichi enroll")
 	skew := flag.Duration("skew", pki.Skew, "tolerated lag of this clock behind the nodes' clocks")
 	missing := flag.Int("missing", 1, "listed nodes the entry may leave out of its descriptors, at most the nodes beyond -hops; a listed node whose bundle does not pass the check counts as left out; the chain is drawn among the rest, and the entry's own bundle must pass")
+	consistency := flag.Bool("consistency", true, "refuse a listed node the entry serves a proof of inconsistency against, two descriptors it signed that contradict each other, both verified against -ca; such a node is counted apart from -missing, and a descriptor shorter than 16 min does not pass; false counts the node as left out and sets no least lifetime")
 	peer := flag.Bool("peer", false, "talk to one contact through a mailbox at the exit: print card_hash, hand out the card on GET /card of -admin and pin the contact's card on PUT /contact")
 	mailboxAddr := flag.String("mailbox", "", "with -peer: host:port of the node of -nodes that keeps the queues of the conversation and ends every chain")
 	admin := flag.String("admin", "127.0.0.1:9201", "with -peer: loopback IP literal and port of the admin listener")
@@ -73,7 +74,7 @@ func main() {
 			nodes: *nodes, mailbox: *mailboxAddr, admin: *admin, infoPort: *infoPort,
 			suite: *suiteName, keymem: *keymem, ca: *ca, mode: *mode, message: *message,
 			hops: *hops, count: *count, missing: *missing,
-			fixed: *fixed, auth: *auth, harden: *harden, coverPuts: *coverPuts, respond: *respond,
+			fixed: *fixed, auth: *auth, consistency: *consistency, harden: *harden, coverPuts: *coverPuts, respond: *respond,
 			rate: *rate, jitter: *jitter, cover: *cover, interval: *interval,
 			skew: *skew, handshakeTimeout: *handshakeTimeout,
 		}, logger, stop))
@@ -117,7 +118,7 @@ func main() {
 	if err := checkNodes(provider, addrs, *hops, *infoPort); err != nil {
 		logger.Fatal(err)
 	}
-	trust, err := trustPolicy(*auth, *ca, chosen, *skew)
+	trust, err := trustPolicy(*auth, *ca, chosen, *skew, *consistency)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -133,7 +134,7 @@ func main() {
 
 	sel := selection{
 		addrs: addrs, hops: *hops, fixed: *fixed, missing: *missing, infoPort: *infoPort,
-		auth: *auth, trust: trust,
+		auth: *auth, trust: trust, consistency: *consistency,
 		web: fetch.NewClient(), attempts: fetchAttempts, pause: fetchPause,
 		rnd: rand.Reader, now: time.Now,
 	}
@@ -267,7 +268,7 @@ func checkNodes(p jcrypto.CryptoProvider, addrs []string, hops int, infoPort str
 
 // settled before any network request, so a client that cannot check what it
 // fetches never asks for it
-func trustPolicy(auth bool, ca string, s jcrypto.Suite, skew time.Duration) (pki.Policy, error) {
+func trustPolicy(auth bool, ca string, s jcrypto.Suite, skew time.Duration, consistency bool) (pki.Policy, error) {
 	if !auth {
 		return pki.Policy{}, nil
 	}
@@ -284,7 +285,11 @@ func trustPolicy(auth bool, ca string, s jcrypto.Suite, skew time.Duration) (pki
 	if skew < 0 {
 		return pki.Policy{}, fmt.Errorf("-skew %v: must not be negative", skew)
 	}
-	return pki.Policy{Anchor: anchor, Skew: skew}, nil
+	pol := pki.Policy{Anchor: anchor, Skew: skew}
+	if consistency {
+		pol.MinLife = pki.MinDescriptorLife
+	}
+	return pol, nil
 }
 
 // how the chain is taken from the listed nodes
@@ -297,11 +302,14 @@ type selection struct {
 	infoPort string
 	auth     bool
 	trust    pki.Policy
-	web      *http.Client
-	attempts int
-	pause    time.Duration
-	rnd      io.Reader
-	now      func() time.Time
+	// verify the proofs of inconsistency in the entry's mirror and refuse the
+	// nodes they are against; without it a proof item is a node not served
+	consistency bool
+	web         *http.Client
+	attempts    int
+	pause       time.Duration
+	rnd         io.Reader
+	now         func() time.Time
 }
 
 // the entry is drawn first and asked for the bundles of every listed node, so
@@ -339,7 +347,11 @@ func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger) ([]client
 		}
 	}
 	if s.auth {
-		logger.Printf("%d of %d listed nodes verified", len(nodes), len(s.addrs))
+		line := fmt.Sprintf("%d of %d listed nodes verified", len(nodes), len(s.addrs))
+		if refused := refusedBy(view); refused > 0 {
+			line += fmt.Sprintf(", %d refused by proof", refused)
+		}
+		logger.Print(line)
 	}
 	path := make([]int, s.hops)
 	for i := range path {
@@ -356,12 +368,24 @@ func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger) ([]client
 // the entry lists a bundle from the moment its own clock reaches the bundle's
 // start, so the time is read once the mirror is here, after any retries
 func (s selection) mirror(p jcrypto.CryptoProvider, entry int) (verify.View, error) {
-	bundles, err := nodeBundles(s.web, s.addrs, entry, s.infoPort, s.attempts, s.pause)
+	entries, err := nodeBundles(s.web, s.addrs, entry, s.infoPort, s.attempts, s.pause)
 	if err != nil {
 		return verify.View{}, err
 	}
 	now := s.now()
-	return verify.Mirror(p, s.auth, s.trust, s.addrs, bundles, now)
+	return verify.MirrorEntries(p, verify.Options{Auth: s.auth, Trust: s.trust, Proofs: s.consistency}, s.addrs, entries, now)
+}
+
+// how many listed nodes the entry proved inconsistent, which the log counts
+// without naming them
+func refusedBy(v verify.View) int {
+	n := 0
+	for _, r := range v.Refused() {
+		if r {
+			n++
+		}
+	}
+	return n
 }
 
 // a mirror that waits for every node would let one node that withholds its
@@ -419,7 +443,8 @@ func (e *entryError) Unwrap() error { return e.err }
 var knownFailures = []error{
 	verify.ErrNoBundle, fetch.ErrTooLarge,
 	pki.ErrFormat, pki.ErrVersion, pki.ErrDuplicate, pki.ErrSuite, pki.ErrUnknownCA, pki.ErrCertSignature, pki.ErrCertTime,
-	pki.ErrWrongAddr, pki.ErrCertMismatch, pki.ErrDescSignature, pki.ErrDescTime, pki.ErrKeySize,
+	pki.ErrWrongAddr, pki.ErrCertMismatch, pki.ErrDescSignature, pki.ErrDescTime, pki.ErrDescLife, pki.ErrKeySize,
+	pki.ErrConflict, pki.ErrNoConflict,
 	link.ErrHandshake, client.ErrNodeKey, wire.ErrPayloadSize,
 }
 
@@ -441,26 +466,27 @@ func failureClass(err error) string {
 	return "connection failed"
 }
 
-// every bundle comes from the entry, the one node the client connects to
-// anyway; each is verified afterwards, so the entry can withhold a bundle, and
-// one it alters counts as withheld
-func nodeBundles(web *http.Client, addrs []string, entry int, infoPort string, attempts int, pause time.Duration) ([][]byte, error) {
+// every item comes from the entry, the one node the client connects to anyway;
+// each is verified afterwards, so the entry can withhold a bundle, one it
+// alters counts as withheld, and a proof it serves is checked under the
+// client's own anchor
+func nodeBundles(web *http.Client, addrs []string, entry int, infoPort string, attempts int, pause time.Duration) ([]pki.MirrorEntry, error) {
 	url, err := fetch.URL(addrs[entry], infoPort, "/descriptors")
 	if err != nil {
 		return nil, &entryError{err}
 	}
-	entries, err := fetch.Mirror(web, url, attempts, pause)
+	items, err := fetch.Mirror(web, url, attempts, pause)
 	if err != nil {
 		return nil, &entryError{err}
 	}
-	held := make(map[string][]byte, len(entries))
-	for _, e := range entries {
-		held[e.Addr] = e.Bundle
+	held := make(map[string]pki.MirrorEntry, len(items))
+	for _, e := range items {
+		held[e.Addr] = e
 	}
-	// a listed node the entry does not serve stays nil
-	bundles := make([][]byte, len(addrs))
+	// a listed node the entry does not serve keeps the zero entry
+	entries := make([]pki.MirrorEntry, len(addrs))
 	for i, addr := range addrs {
-		bundles[i] = held[addr]
+		entries[i] = held[addr]
 	}
-	return bundles, nil
+	return entries, nil
 }
