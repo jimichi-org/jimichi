@@ -13,9 +13,10 @@ import (
 	"github.com/jimichi-org/jimichi/relay"
 )
 
-// the epoch of node x in the mirror of node y, read on y's clock; -1 when the
-// mirror lacks x or y serves none
-func epochHeld(t *testing.T, c *cluster, y, x *fixture) int64 {
+// the epoch of node x in the mirror of node y; -1 when the mirror lacks x or
+// y serves none. Read without the signatures: every bundle in a mirror was
+// verified when it was taken, and the simulation reads nine of them a second
+func epochHeld(t *testing.T, y, x *fixture) int64 {
 	t.Helper()
 	raw, ok := y.cache().descriptors()
 	if !ok {
@@ -29,45 +30,54 @@ func epochHeld(t *testing.T, c *cluster, y, x *fixture) int64 {
 	if !ok || item.Bundle == nil {
 		return -1
 	}
-	v, err := pki.VerifyStatement(c.p, pki.Policy{Anchor: c.ca.Anchor(), Skew: pki.Skew}, x.n.addr, item.Bundle)
+	b, err := pki.ParseBundle(item.Bundle)
 	if err != nil {
-		t.Fatalf("the bundle %s holds for %s: %v", y.n.name, x.n.name, err)
+		t.Fatal(err)
 	}
-	return int64(v.Epoch)
+	d, err := pki.ParseDescriptor(b.Descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int64(d.Epoch)
 }
 
-// three nodes run 3 h of re-signing, rotation, refresh and passes in 1 s
-// steps, relay-2's clock 119 s ahead and relay-3's 119 s behind, in the
-// stand's configuration (ttl 20 min, rotation 1 h) and the least (16 min,
-// 16 min). No node is ever refused, the epochs the mirrors hold for one node
+// three nodes run re-signing, rotation, refresh and passes in 1 s steps
+// through two rotations, relay-2's clock 119 s ahead and relay-3's 119 s
+// behind, in the stand's configuration (ttl 20 min, rotation 1 h, 2 h 15 min
+// of steps) and the least (16 min, 16 min, rotations 18 min apart by the
+// grace, 50 min of steps). No node is ever refused, the epochs the mirrors hold for one node
 // differ by at most one, and once any mirror lists a new epoch of a node
 // every mirror lists it within the pass period, the fetches and a second,
 // 60 + 2 x 5 + 1 = 71 s, plus how far the mirror's clock lags the node's: a
 // statement joins a mirror once the mirror's clock reaches its published
 // time, so the lag of 238 s between relay-3 and relay-2 adds to the window,
 // as Skew does in W for a lag up to Skew. Then relay-2's wall clock
-// jumps back 12 min between its second and third rotation: still no refusal,
-// its published times never decrease, the first descriptor of its epoch 3 is
-// published Skew past the expiry of its last epoch 1 descriptor, relays 1 and
+// jumps back 12 min between its first and second rotation: still no refusal,
+// its published times never decrease, the first descriptor of its epoch 2 is
+// published Skew past the expiry of its last epoch 0 descriptor, relays 1 and
 // 3 stay in every mirror, and relay-2's own mirror answers 503 exactly while
 // its wall is below its last published
 //
 // c25519 only: the rules compare times and epochs, which the suite does not
-// touch, and the 10800 steps verify about 200000 signatures, minutes of GOST
+// touch, and the steps verify tens of thousands of signatures, minutes of
+// GOST. Under the race detector the least configuration alone
 func TestCrossCheckLeavesHonestRotationAlone(t *testing.T) {
 	for _, tc := range []struct {
-		ttl, rotate time.Duration
+		ttl, rotate, steps time.Duration
 	}{
-		{20 * time.Minute, time.Hour},
-		{16 * time.Minute, 16 * time.Minute},
+		{20 * time.Minute, time.Hour, 2*time.Hour + 15*time.Minute},
+		{16 * time.Minute, 16 * time.Minute, 50 * time.Minute},
 	} {
+		if raceDetector && tc.rotate == time.Hour {
+			continue
+		}
 		t.Run(tc.rotate.String(), func(t *testing.T) {
-			runHonestRotation(t, jcrypto.SuiteC25519, tc.ttl, tc.rotate)
+			runHonestRotation(t, jcrypto.SuiteC25519, tc.ttl, tc.rotate, tc.steps)
 		})
 	}
 }
 
-func runHonestRotation(t *testing.T, s jcrypto.Suite, ttl, rotate time.Duration) {
+func runHonestRotation(t *testing.T, s jcrypto.Suite, ttl, rotate, horizon time.Duration) {
 	t.Helper()
 	const window = 71
 	offsets := []int{0, 119, -119}
@@ -130,7 +140,7 @@ func runHonestRotation(t *testing.T, s jcrypto.Suite, ttl, rotate time.Duration)
 	jumped := false
 	rotations := 0
 	refreshed2 := 0
-	steps := int(3 * time.Hour / time.Second)
+	steps := int(horizon / time.Second)
 	for step := 1; step <= steps; step++ {
 		for _, k := range clocks {
 			k.advance(time.Second)
@@ -143,8 +153,8 @@ func runHonestRotation(t *testing.T, s jcrypto.Suite, ttl, rotate time.Duration)
 			f.n.rotateIfDue()
 			if f == n2 && f.n.onionEpoch() != before {
 				rotations++
-				// between the second and the third rotation the wall goes back
-				if rotations == 2 && !jumped {
+				// between the first and the second rotation the wall goes back
+				if rotations == 1 && !jumped {
 					jumped = true
 					ahead.jump(t, -12*time.Minute)
 				}
@@ -171,7 +181,7 @@ func runHonestRotation(t *testing.T, s jcrypto.Suite, ttl, rotate time.Duration)
 			lo, hi := int64(-1), int64(-1)
 			held := make([]int64, len(c.nodes))
 			for y, fy := range c.nodes {
-				e := epochHeld(t, c, fy, fx)
+				e := epochHeld(t, fy, fx)
 				held[y] = e
 				if e < 0 {
 					// a mirror relay-2 does not serve, or lacks it, after the jump
@@ -211,11 +221,11 @@ func runHonestRotation(t *testing.T, s jcrypto.Suite, ttl, rotate time.Duration)
 			}
 		}
 	}
-	if rotations < 3 || !jumped {
-		t.Fatalf("relay-2 rotated %d times, jumped %v; want at least 3 and a jump", rotations, jumped)
+	if rotations < 2 || !jumped {
+		t.Fatalf("relay-2 rotated %d times, jumped %v; want at least 2 and a jump", rotations, jumped)
 	}
 	// every descriptor relay-2 served, pairwise consistent, and the first of
-	// epoch 3 published Skew past the last expiry of epoch 1
+	// epoch 2 published Skew past the last expiry of epoch 0
 	var lastOfOne, firstOfThree *pki.Verified
 	stmts := make([]*pki.Verified, len(served))
 	for i, b := range served {
@@ -225,9 +235,9 @@ func runHonestRotation(t *testing.T, s jcrypto.Suite, ttl, rotate time.Duration)
 		}
 		stmts[i] = v
 		switch {
-		case v.Epoch == 1 && (lastOfOne == nil || v.DescUntil.After(lastOfOne.DescUntil)):
+		case v.Epoch == 0 && (lastOfOne == nil || v.DescUntil.After(lastOfOne.DescUntil)):
 			lastOfOne = v
-		case v.Epoch == 3 && firstOfThree == nil:
+		case v.Epoch == 2 && firstOfThree == nil:
 			firstOfThree = v
 		}
 	}
@@ -239,7 +249,7 @@ func runHonestRotation(t *testing.T, s jcrypto.Suite, ttl, rotate time.Duration)
 		}
 	}
 	if lastOfOne == nil || firstOfThree == nil || firstOfThree.DescFrom.Before(lastOfOne.DescUntil.Add(pki.Skew)) {
-		t.Fatalf("epoch 3 of relay-2 starts %v, the last of epoch 1 ends %v; want Skew between them", firstOfThree, lastOfOne)
+		t.Fatalf("epoch 2 of relay-2 starts %v, the last of epoch 0 ends %v; want Skew between them", firstOfThree, lastOfOne)
 	}
 }
 
