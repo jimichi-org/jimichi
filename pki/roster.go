@@ -87,16 +87,19 @@ func (r *Roster) Has(name, addr string) bool {
 	return false
 }
 
-// one node of a descriptor mirror: the address its certificate carries and the
-// bundle it serves
+// one node of a descriptor mirror: the address its certificate carries and
+// either the bundle it serves or, for a node the mirror's owner refuses, two
+// of its bundles that break a consistency rule
 type MirrorEntry struct {
 	Addr   string
 	Bundle []byte
+	Proof  *Proof
 }
 
 type mirrorItem struct {
-	Addr   string          `json:"addr"`
-	Bundle json.RawMessage `json:"bundle"`
+	Addr   string            `json:"addr"`
+	Bundle json.RawMessage   `json:"bundle,omitempty"`
+	Proof  []json.RawMessage `json:"proof,omitempty"`
 }
 
 // sorted by address, so one set of bundles has one encoding
@@ -104,6 +107,9 @@ func MarshalMirror(entries []MirrorEntry) ([]byte, error) {
 	items := make([]mirrorItem, len(entries))
 	for i, e := range entries {
 		items[i] = mirrorItem{Addr: e.Addr, Bundle: e.Bundle}
+		if e.Proof != nil {
+			items[i].Proof = []json.RawMessage{e.Proof.A, e.Proof.B}
+		}
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Addr < items[j].Addr })
 	if err := checkMirror(items); err != nil {
@@ -113,7 +119,7 @@ func MarshalMirror(entries []MirrorEntry) ([]byte, error) {
 }
 
 // a mirror only carries bundles: every one of them still has to pass Verify
-// under the reader's own anchor
+// under the reader's own anchor, and a proof VerifyConflict
 func ParseMirror(raw []byte) ([]MirrorEntry, error) {
 	var items []mirrorItem
 	if err := json.Unmarshal(raw, &items); err != nil {
@@ -128,10 +134,16 @@ func ParseMirror(raw []byte) ([]MirrorEntry, error) {
 	entries := make([]MirrorEntry, len(items))
 	for i, it := range items {
 		entries[i] = MirrorEntry{Addr: it.Addr, Bundle: it.Bundle}
+		if it.Proof != nil {
+			entries[i].Bundle = nil
+			entries[i].Proof = &Proof{A: it.Proof[0], B: it.Proof[1]}
+		}
 	}
 	return entries, nil
 }
 
+// an item carries either a bundle or a proof of exactly two bundles in their
+// canonical order, so one pair has one encoding
 func checkMirror(items []mirrorItem) error {
 	if len(items) == 0 {
 		return ErrFormat
@@ -146,8 +158,22 @@ func checkMirror(items []mirrorItem) error {
 		if i > 0 && items[i-1].Addr > it.Addr {
 			return ErrFormat
 		}
-		if _, err := ParseBundle(it.Bundle); err != nil {
-			return err
+		if (len(it.Bundle) == 0) == (len(it.Proof) == 0) {
+			return ErrFormat
+		}
+		if len(it.Bundle) > 0 {
+			if _, err := ParseBundle(it.Bundle); err != nil {
+				return err
+			}
+			continue
+		}
+		if len(it.Proof) != 2 || bytes.Compare(it.Proof[0], it.Proof[1]) >= 0 {
+			return ErrFormat
+		}
+		for _, b := range it.Proof {
+			if _, err := ParseBundle(b); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

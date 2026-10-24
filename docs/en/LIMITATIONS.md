@@ -125,10 +125,52 @@ English | [Русский](../ru/LIMITATIONS.md)
   chain that comes up enters through one of the two and ends at an honest node (EXPERIMENT,
   block 3). So -missing has to be at least the number of nodes assumed to misbehave, and a
   larger value gives a rogue entry more room to steer. There is no directory signed by several
-  parties that would settle which nodes exist.
-- A node can serve a different validly signed onion key to each of the other nodes. The key that
-  opens a setup cell then tells it whose mirror the client used, so a rogue exit can learn the
-  entry of a circuit and with it the whole chain of three.
+  parties that would settle which nodes exist. The withholding has to be from all: a node with
+  -consistency that holds no entry for a peer adopts that peer's statement from another peer's
+  mirror, so a node that withholds its descriptor from some peers only is mirrored by them through
+  the others (ARCHITECTURE, "Descriptor consistency").
+- A node can sign different onion keys for different peers. With -consistency (the default) nodes
+  read each other's mirrors once a minute, and two signed descriptors of one node that break a
+  consistency rule become a proof: the node is refused by every honest node and by the client
+  (ARCHITECTURE, "Descriptor consistency"). What remains is a bound, not zero:
+  - one verifier accepts at most two onion keys of a node at any instant, the adjacent epochs e
+    and e+1, which honest rotation needs; across clients whose clocks differ by up to 2 x Skew
+    three keys e, e+1 and e+2 are in play around an epoch boundary, for no longer than the
+    difference;
+  - a two-key window, with some honest mirrors carrying e and others e+1, lasts at most W after
+    the newer statement first reached any honest mirror: W = -consistency-every + Skew + 4 x 5 s +
+    1 s = 201 s on the testbed, plus 5 s per due peer that stalls before the pass (206 s with one
+    such peer), plus whatever the adopting node's clock lags the signer's beyond Skew; the newer
+    epoch can take minutes to reach the first honest mirror, but all honest mirrors agree on the
+    older one until then;
+  - a node can open such a window at most twice per 16 min: on the testbed at most 402 s of every
+    960 s;
+  - the key that opens a setup cell tells the node which group of mirrors, the holders of e or of
+    e+1, the client's entry belongs to: 1 bit per circuit set up inside the window. A mailbox
+    links the circuits of one -peer client by its queue and can end a circuit at will, and the
+    client rebuilds through the same entry at once, so a mailbox can place a rebuild inside each
+    window and collect one bit per window: 2 bits name the entry among the 4 other nodes of the
+    testbed in about 16 min;
+  - a statement published more than Skew ahead of the reader's clock is not recorded: a node can
+    keep such statements out of every record until they come due, when they are live anyway;
+  - a wall clock set back by s costs the node a 503 on its own /descriptors until its clock
+    reaches its last published, and a re-signing s later; that is so without the check. The clamp
+    on published adds only that a rotation by running time while the clock is behind signs
+    published no lower than the previous one and the floor, and the 503 lasts until that value.
+    Peers drop such a node from their mirrors when s exceeds about ttl/2 minus the mirror margin
+    minus the timer period (6 min 54 s on the testbed), until its late re-signing;
+  - a node or client with -consistency=false and a node with -auth=false have no protection: that
+    is the baseline;
+  - the cost at 58 nodes: 232 requests and 7.9 MiB per minute on the network (about 135 KB/s),
+    140 KiB per minute per node, against the 58 x 57 = 3306 requests and about 2 MB per 10 min of
+    the /descriptor fetches; -consistency-every 5m divides it by five and makes W about 7 min;
+  - a refused node shrinks every client's list by one: it is counted apart from -missing, so the
+    entry keeps its whole -missing budget over the smaller list; on the testbed (5 nodes, 3 hops,
+    -missing 1) a refused node plus one withheld node leaves two others, and the entry fixes the
+    chain, where today two absent nodes would exceed the budget. A node that gets itself refused
+    on purpose plus a rogue entry is two nodes, outside this item; while a refusal is live and the
+    node is not yet removed from the list, -missing 0 is advisable;
+  - two colluding nodes are other items: rogue nodes and the correlation attack.
 - The node list of a client is static: there is no node discovery and no directory. The setup
   cell bounds a chain at four hops on c25519 and three on GOST. The roster a node accepts bounds
   the network: 4 KiB hold 58 nodes of the testbed address form on c25519 and 57 on GOST.
@@ -210,7 +252,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   and goes on asking, with a 5 s pause between passes, for as long as the peer is missing or the
   entry stays due, which includes a peer that still serves the descriptor it has not signed
   again. A pass asks such peers in turn, each within the 5 s fetch timeout, so no roster address
-  is asked more often than once in 5 s. A roster names every host once, so the bound holds per
+  is asked for /descriptor more often than once in 5 s; with -consistency the node also sends GET
+  /descriptors/peer once per -consistency-every (1 min) to four roster peers drawn at random, the
+  refused ones excepted (ARCHITECTURE, "Descriptor consistency"). A roster names every host once,
+  so the bound holds per
   host as well, but only per spelling: a host reached under several names, or under a name and
   an IP address, gets one request per such address in a pass. An address whose answer does not
   verify is asked in every pass. A peer whose entry ended with its certificate is asked once a
@@ -412,7 +457,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   hold ([#125](https://github.com/jimichi-org/jimichi/issues/125),
   the node limits below). Past circuits stay closed to such a substitution.
 - Nodes publish their descriptors themselves and there is no directory: a node can show
-  different keys to different roster nodes, and so to the clients of different entries.
+  different keys to different roster nodes, and so to the clients of different entries. With
+  -consistency the cross-check of the mirrors detects such keys and the node is refused, within
+  the bounds of the onion-key item above.
 - The clocks of nodes and clients must agree within 2 minutes (the Skew allowance). kind nodes run
   on the host clock.
 - On the GOST suite every signature leaves heap copies of the signing scalar and the one-time

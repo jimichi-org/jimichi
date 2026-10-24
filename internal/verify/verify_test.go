@@ -262,11 +262,12 @@ func TestPeerTakesTheCertifiedKeys(t *testing.T) {
 			until := t0.Add(72 * time.Hour)
 			keys, _, bundles := enrolledNodes(t, p, ca, 3)
 			k, b := keys[1], bundles[1]
-			peer, err := Peer(p, ca.Anchor(), k.addr, b, t0)
+			trust := pki.Policy{Anchor: ca.Anchor(), Skew: pki.Skew}
+			peer, err := Peer(p, trust, k.addr, b, t0)
 			if err != nil || !bytes.Equal(peer.LinkPub, k.link) || !bytes.Equal(peer.Identity, k.identity) {
 				t.Fatalf("Peer = %+v, %v, want the link key and the certified identity", peer, err)
 			}
-			if _, err := Peer(p, ca.Anchor(), k.addr, b, t0.Add(-pki.Skew)); err != nil {
+			if _, err := Peer(p, trust, k.addr, b, t0.Add(-pki.Skew)); err != nil {
 				t.Fatalf("a bundle that starts Skew after the node's clock: %v", err)
 			}
 
@@ -277,23 +278,23 @@ func TestPeerTakesTheCertifiedKeys(t *testing.T) {
 			}
 			for _, c := range []struct {
 				name   string
-				anchor pki.Anchor
+				pol    pki.Policy
 				bundle []byte
 				now    time.Time
 				want   error
 			}{
-				{"another roster's anchor", newCA(t, p).Anchor(), b, t0, pki.ErrUnknownCA},
-				{"a node of a second CA", ca.Anchor(), second, t0, pki.ErrUnknownCA},
-				{"the bundle of another roster node", ca.Anchor(), bundles[2], t0, pki.ErrWrongAddr},
-				{"an unsigned bundle", ca.Anchor(), unsigned, t0, pki.ErrFormat},
-				{"altered", ca.Anchor(), altered(t, b), t0, pki.ErrDescSignature},
-				{"descriptor expired", ca.Anchor(), b, t0.Add(time.Hour), pki.ErrDescTime},
-				{"certificate expired", ca.Anchor(), b, until, pki.ErrCertTime},
-				{"beyond the skew", ca.Anchor(), b, t0.Add(-pki.Skew - time.Second), pki.ErrCertTime},
+				{"another roster's anchor", pki.Policy{Anchor: newCA(t, p).Anchor(), Skew: pki.Skew}, b, t0, pki.ErrUnknownCA},
+				{"a node of a second CA", trust, second, t0, pki.ErrUnknownCA},
+				{"the bundle of another roster node", trust, bundles[2], t0, pki.ErrWrongAddr},
+				{"an unsigned bundle", trust, unsigned, t0, pki.ErrFormat},
+				{"altered", trust, altered(t, b), t0, pki.ErrDescSignature},
+				{"descriptor expired", trust, b, t0.Add(time.Hour), pki.ErrDescTime},
+				{"certificate expired", trust, b, until, pki.ErrCertTime},
+				{"beyond the skew", trust, b, t0.Add(-pki.Skew - time.Second), pki.ErrCertTime},
 			} {
 				// the roster check sends this error back in its answer
-				_, direct := pki.Verify(p, pki.Policy{Anchor: c.anchor, Skew: pki.Skew}, k.addr, c.bundle, c.now)
-				if peer, err := Peer(p, c.anchor, k.addr, c.bundle, c.now); !errors.Is(err, c.want) || fmt.Sprint(err) != fmt.Sprint(direct) || peer.LinkPub != nil || peer.Identity != nil {
+				_, direct := pki.Verify(p, c.pol, k.addr, c.bundle, c.now)
+				if peer, err := Peer(p, c.pol, k.addr, c.bundle, c.now); !errors.Is(err, c.want) || fmt.Sprint(err) != fmt.Sprint(direct) || peer.LinkPub != nil || peer.Identity != nil {
 					t.Errorf("%s: Peer = %+v, %v, want %v as pki.Verify gives it (%v) and no keys", c.name, peer, err, c.want, direct)
 				}
 			}
@@ -342,7 +343,7 @@ func TestSecondCANodeIsLeftOutAndRefusedAsEntry(t *testing.T) {
 			addrs, bundles = append(addrs, rogue.addr), append(bundles, b)
 
 			for i := range addrs {
-				_, err := Peer(p, session.Anchor(), addrs[i], bundles[i], t0)
+				_, err := Peer(p, pki.Policy{Anchor: session.Anchor(), Skew: pki.Skew}, addrs[i], bundles[i], t0)
 				if i < 4 && err != nil || i == 4 && !errors.Is(err, pki.ErrUnknownCA) {
 					t.Fatalf("peer %d: %v", i, err)
 				}

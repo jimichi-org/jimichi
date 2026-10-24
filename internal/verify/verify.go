@@ -29,6 +29,18 @@ type View struct {
 	listed []int
 	// why a served bundle of a listed node did not pass
 	failed []error
+	// listed nodes the entry served a proof of inconsistency against, which
+	// passed under the reader's own anchor
+	refused []bool
+}
+
+// how a mirror is read
+type Options struct {
+	Auth  bool
+	Trust pki.Policy
+	// verify proof items under Trust and refuse the nodes they prove against;
+	// without it a proof item is a node the entry does not serve
+	Proofs bool
 }
 
 // bundles[i] is what the entry served for addrs[i], nil when it serves none.
@@ -39,13 +51,41 @@ func Mirror(p jcrypto.CryptoProvider, auth bool, trust pki.Policy, addrs []strin
 	if len(bundles) != len(addrs) {
 		return View{}, fmt.Errorf("verify: %d addresses for %d bundles", len(addrs), len(bundles))
 	}
-	v := View{at: make([]int, len(addrs)), failed: make([]error, len(addrs))}
+	entries := make([]pki.MirrorEntry, len(addrs))
 	for i, b := range bundles {
+		entries[i] = pki.MirrorEntry{Addr: addrs[i], Bundle: b}
+	}
+	return MirrorEntries(p, Options{Auth: auth, Trust: trust}, addrs, entries, now)
+}
+
+// MirrorEntries is Mirror over the items of a mirror: entries[i] is what the
+// entry served for addrs[i], the zero entry where it serves none. A proof that
+// pki.VerifyConflict accepts leaves the node out with pki.ErrConflict and marks
+// it refused; one it does not accept leaves the node out with that error
+func MirrorEntries(p jcrypto.CryptoProvider, o Options, addrs []string, entries []pki.MirrorEntry, now time.Time) (View, error) {
+	if len(entries) != len(addrs) {
+		return View{}, fmt.Errorf("verify: %d addresses for %d entries", len(addrs), len(entries))
+	}
+	v := View{at: make([]int, len(addrs)), failed: make([]error, len(addrs)), refused: make([]bool, len(addrs))}
+	for i, e := range entries {
 		v.at[i] = -1
-		if b == nil {
+		switch {
+		case e.Proof != nil:
+			if !o.Proofs || !o.Auth {
+				continue
+			}
+			c, err := pki.VerifyConflict(p, o.Trust, addrs[i], *e.Proof)
+			if err != nil {
+				v.failed[i] = err
+				continue
+			}
+			v.failed[i] = fmt.Errorf("%w: %s", pki.ErrConflict, c.Rule)
+			v.refused[i] = true
+			continue
+		case e.Bundle == nil:
 			continue
 		}
-		node, err := readNode(p, auth, trust, addrs[i], b, now)
+		node, err := readNode(p, o.Auth, o.Trust, addrs[i], e.Bundle, now)
 		if err != nil {
 			v.failed[i] = err
 			continue
@@ -95,12 +135,18 @@ func (v View) Usable() []bool {
 	return usable
 }
 
+// Refused reports which listed nodes the entry proved inconsistent; they
+// count neither as served nor as left out
+func (v View) Refused() []bool {
+	return slices.Clone(v.refused)
+}
+
 func (v View) Judge(entry, hops, missing int) (verdict client.MirrorVerdict, absent, allowed int) {
-	return client.JudgeMirror(v.Usable(), entry, hops, missing)
+	return client.JudgeMirrorAmong(v.Usable(), v.refused, entry, hops, missing)
 }
 
 func (v View) JudgeTo(entry, exit, hops, missing int) (verdict client.MirrorVerdict, absent, allowed int) {
-	return client.JudgeMirrorTo(v.Usable(), entry, exit, hops, missing)
+	return client.JudgeMirrorToAmong(v.Usable(), v.refused, entry, exit, hops, missing)
 }
 
 // client.ChooseRest among the nodes that passed, numbered in the listed order;
@@ -167,9 +213,9 @@ func chainOf(nodes []pki.Verified, path []int) []client.Node {
 }
 
 // what a node extends to at addr: the link key and the certified identity the
-// link binds. A node allows pki.Skew and takes no flag for it
-func Peer(p jcrypto.CryptoProvider, anchor pki.Anchor, addr string, bundle []byte, now time.Time) (relay.Peer, error) {
-	v, err := pki.Verify(p, pki.Policy{Anchor: anchor, Skew: pki.Skew}, addr, bundle, now)
+// link binds, from a bundle that passes under pol
+func Peer(p jcrypto.CryptoProvider, pol pki.Policy, addr string, bundle []byte, now time.Time) (relay.Peer, error) {
+	v, err := pki.Verify(p, pol, addr, bundle, now)
 	if err != nil {
 		return relay.Peer{}, err
 	}

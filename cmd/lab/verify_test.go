@@ -122,7 +122,7 @@ func TestMirrorsAndExtendsOfTheModelAreWhatTheNodesVerify(t *testing.T) {
 					fetched = kept(x, y)
 				}
 				if fetched != nil {
-					_, err := verify.Peer(p, session.Anchor(), addrs[y], fetched, at)
+					_, err := verify.Peer(p, pki.Policy{Anchor: session.Anchor(), Skew: pki.Skew}, addrs[y], fetched, at)
 					extends[x][y] = err == nil
 				}
 				switch {

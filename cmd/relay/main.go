@@ -37,6 +37,8 @@ type config struct {
 	onionRotate         time.Duration
 	peerInfoPort        string
 	peers               []string
+	consistency         bool
+	consistencyEvery    time.Duration
 	// refuse to run with keys in memory that could not be locked
 	lock bool
 	// for the startup line only
@@ -67,6 +69,9 @@ func main() {
 		logger.Fatal(err)
 	}
 	if err := checkRotateFlags(cfg.onionRotate, cfg.descriptorTTL); err != nil {
+		logger.Fatal(err)
+	}
+	if err := checkConsistencyFlags(cfg.consistencyEvery); err != nil {
 		logger.Fatal(err)
 	}
 	if err := checkExit(cfg.exit, cfg.mailbox); err != nil {
@@ -131,6 +136,8 @@ func registerFlags(fs *flag.FlagSet, cfg *config) (suiteName, peers *string) {
 	fs.DurationVar(&cfg.onionRotate, "onion-rotate", time.Hour, fmt.Sprintf("replace the onion key this often and release the replaced one -descriptor-ttl plus %v later, once no valid descriptor names it; a setup cell recorded before that no longer opens with what the node holds; the next rotation waits for that release; not shorter than -descriptor-ttl; 0 is the baseline for measurements: the link key is the onion key for the life of the process and recorded setups never stop opening", pki.Skew))
 	fs.StringVar(&cfg.peerInfoPort, "peer-info-port", "9100", "port where the other nodes publish their descriptors")
 	peers = fs.String("peers", "", "without -auth only: comma separated host:port of the other nodes, whose unsigned descriptors this node serves in /descriptors; with -auth they come from the roster")
+	fs.BoolVar(&cfg.consistency, "consistency", true, "with -auth: read the mirrors of roster peers once per -consistency-every, keep every descriptor a peer signed, refuse a peer whose descriptors contradict each other and carry the pair in /descriptors as proof; a peer's descriptor shorter than 16 min does not pass; false is the baseline without the check")
+	fs.DurationVar(&cfg.consistencyEvery, "consistency-every", defaultCrossEvery, fmt.Sprintf("how often a node reads the mirrors of %d roster peers drawn at random, from %v to %v", crossPeers, minCrossEvery, maxCrossEvery))
 	fs.DurationVar(&cfg.limits.HandshakeTimeout, "handshake-timeout", relay.DefaultHandshakeTimeout, "close a connection whose link handshake has not finished this long after it was accepted; an initiator sends its hello at once; negative turns it off")
 	fs.DurationVar(&cfg.limits.SetupTimeout, "setup-timeout", relay.DefaultSetupTimeout, "close a link that has opened no circuit this long after its handshake; clients and relays send the setup at once; negative turns it off")
 	fs.DurationVar(&cfg.limits.WriteTimeout, "write-timeout", 0, "longest one frame may wait to be written before its circuit is torn down, so a peer that stops reading cannot hold a sender; 0 picks 4 periods and at least 1s, or 5s without -period; negative turns it off")
@@ -171,8 +178,14 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 	n := &node{
 		p: provider, name: cfg.name, addr: cfg.advertise,
 		ttl: cfg.descriptorTTL, now: clock, logger: logger,
-		wake:      make(chan struct{}),
-		fetchPeer: peerFetcher(fetch.NewClient(), cfg.peerInfoPort),
+		wake:        make(chan struct{}),
+		fetchPeer:   peerFetcher(fetch.NewClient(), cfg.peerInfoPort),
+		fetchMirror: mirrorFetcher(fetch.NewClient(), cfg.peerInfoPort),
+		check:       cfg.auth && cfg.consistency,
+		crossEvery:  cfg.consistencyEvery,
+	}
+	if cfg.consistency && !cfg.auth {
+		logger.Print("WARNING: -consistency needs -auth, the check is off")
 	}
 	// a rotating node opens setups with a key of its own from the start: the
 	// link key lives as long as the process, so an epoch under it would not end
@@ -280,8 +293,8 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		go logCounters(r, n, cfg.logEvery, logger)
 	}
 
-	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v, onion_rotate=%v, exit=%s",
-		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth, cfg.onionRotate, cfg.exit)
+	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v, onion_rotate=%v, consistency=%v, exit=%s",
+		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth, cfg.onionRotate, n.check, cfg.exit)
 	return untilStopped(stop, served, logger)
 }
 
@@ -340,6 +353,17 @@ const (
 	exitMailbox = "mailbox"
 	exitNone    = "none"
 )
+
+// the period bounds the pass: above k fetch timeouts, so a pass never outlasts
+// its period, and below an hour, which is the longest a mirror may differ. It
+// is checked whatever the switch says, so the baseline differs from the
+// measured configuration in the switch alone
+func checkConsistencyFlags(every time.Duration) error {
+	if every < minCrossEvery || every > maxCrossEvery {
+		return fmt.Errorf("-consistency-every %v: want between %v and %v", every, minCrossEvery, maxCrossEvery)
+	}
+	return nil
+}
 
 func checkExit(exit string, lim mailbox.Limits) error {
 	switch exit {
@@ -405,13 +429,13 @@ func logCounters(r *relay.Relay, n *node, every time.Duration, logger *log.Logge
 	defer t.Stop()
 	for range t.C {
 		s := r.Stats().Snapshot()
-		roster, held := n.peerState()
+		roster, held, refused := n.peerState()
 		logger.Printf("counters accepted=%d forwarded=%d delivered=%d dropped=%d padding=%d broken=%d"+
 			" accept_retries=%d refused_links=%d refused_busy=%d refused_source=%d refused_rate=%d refused_setups=%d refused_extend=%d failed_extend=%d timed_out=%d expired=%d"+
-			" cert=%s roster=%d peers=%d descriptor_requests=%d mirror_requests=%d onion_epoch=%d onion_rotate_failed=%d",
+			" cert=%s roster=%d peers=%d descriptor_requests=%d mirror_requests=%d peer_mirror_requests=%d peers_refused=%d onion_epoch=%d onion_rotate_failed=%d",
 			s.Accepted, s.Forwarded, s.Delivered, s.Dropped, s.Padding, s.Broken,
 			s.AcceptRetries, s.RefusedLinks, s.RefusedBusy, s.RefusedSource, s.RefusedRate, s.RefusedSetups, s.RefusedExtend, s.FailedExtend, s.TimedOut, s.Expired,
-			n.certState(), roster, held, n.descriptorRequests.Load(), n.mirrorRequests.Load(), n.onionEpoch(), n.onionFailures())
+			n.certState(), roster, held, n.descriptorRequests.Load(), n.mirrorRequests.Load(), n.peerMirrorRequests.Load(), refused, n.onionEpoch(), n.onionFailures())
 	}
 }
 

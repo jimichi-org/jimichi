@@ -114,6 +114,37 @@ check_mailboxes() {
   done
 }
 
+# no relay refuses a roster peer: honest relays never give a proof of
+# inconsistency
+check_none_refused() {
+  local stats="$1" when="$2" refused relay value
+  refused=$(column "$stats" peers_refused) || { echo "the relays show no peers_refused counter" >&2; return 1; }
+  for value in $refused; do
+    if [ "$value" -ne 0 ]; then
+      echo "a relay refuses a roster peer $when: peers_refused per relay $refused" >&2
+      return 1
+    fi
+  done
+}
+
+# every relay read the mirrors of its peers between the two readings
+check_every_relay_crossed() {
+  local before="$1" after="$2" crossed count
+  crossed=$(grown "$before" "$after")
+  count=$(printf '%s
+' "$crossed" | awk '{ print NF }')
+  if [ "$count" -ne "$(printf '%s
+' "$relay_list" | awk 'END { print NR }')" ]; then
+    echo "the consistency check made no request at $(comm -23 <(printf '%s
+' $relay_list | sort) <(printf '%s
+' $crossed | sort) | tr '
+' ' ')" >&2
+    echo "peer mirror requests per relay before: $before" >&2
+    echo "peer mirror requests per relay after:  $after" >&2
+    return 1
+  fi
+}
+
 # the mailbox relay is never an entry: a -peer client draws its entry among
 # the other relays, so between two passes the mailbox relay answered no
 # request for the descriptors

@@ -49,6 +49,9 @@ type relayKeys struct {
 	onion    []byte
 	link     []byte
 	identity []byte
+	// the identity that signed the bundle, so a test can have the node sign
+	// another
+	signer *pki.Identity
 }
 
 // a node enrolled under ca the way jimichi enroll does it, serving a
@@ -85,7 +88,7 @@ func enrolledWith(t *testing.T, p jcrypto.CryptoProvider, ca *pki.CA, name strin
 	if err := id.Install(cert.Marshal(), t0); err != nil {
 		t.Fatal(err)
 	}
-	k := relayKeys{addr: addrOf(name), onion: onion, link: agreementKey(t, p), identity: id.Public()}
+	k := relayKeys{addr: addrOf(name), onion: onion, link: agreementKey(t, p), identity: id.Public(), signer: id}
 	id.SetKeys(k.link, k.onion, 0)
 	if err := id.Refresh(t0, time.Hour); err != nil {
 		t.Fatal(err)
@@ -137,7 +140,7 @@ func TestTrustPolicyIsSettledBeforeAnyFetch(t *testing.T) {
 		{"negative skew", true, anchor, -time.Second, false},
 		{"no anchor without auth", false, "", pki.Skew, true},
 	} {
-		_, err := trustPolicy(c.auth, c.ca, jcrypto.SuiteC25519, c.skew)
+		_, err := trustPolicy(c.auth, c.ca, jcrypto.SuiteC25519, c.skew, true)
 		if (err == nil) != c.ok {
 			t.Errorf("%s: trustPolicy = %v, want ok %v", c.name, err, c.ok)
 		}
@@ -257,8 +260,56 @@ func (tb *testbed) requests() []int32 {
 
 func (tb *testbed) selection(hops int, rnd io.Reader) selection {
 	return selection{
-		addrs: tb.addrs, hops: hops, infoPort: "9100", auth: true, trust: tb.trust,
+		addrs: tb.addrs, hops: hops, infoPort: "9100", auth: true, trust: tb.trust, consistency: true,
 		web: tb.web, attempts: 1, rnd: rnd, now: func() time.Time { return t0 },
+	}
+}
+
+// node i signs another descriptor of epoch 0 with the given onion key, at the
+// given time and for the given life, and the bundle it then serves comes back
+func (tb *testbed) resigned(t *testing.T, i int, onion []byte, at time.Time, ttl time.Duration) []byte {
+	t.Helper()
+	k := tb.keys[i]
+	k.signer.SetKeys(k.link, onion, 0)
+	if err := k.signer.Refresh(at, ttl); err != nil {
+		t.Fatal(err)
+	}
+	b, ok := k.signer.Bundle()
+	if !ok {
+		t.Fatal("no bundle")
+	}
+	return b
+}
+
+// the listed bundle of node i paired with one it signs a second later in the
+// same epoch under the given onion key: a proof when the key differs from the
+// listed one, two consistent statements when it is the same
+func (tb *testbed) proofAgainst(t *testing.T, i int, onion []byte) *pki.Proof {
+	t.Helper()
+	pr, err := pki.NewProof(tb.bundles[i], tb.resigned(t, i, onion, t0.Add(time.Second), time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pr
+}
+
+// every info server serves the listed bundles, with the proof in place of the
+// bundle for each node in proofs
+func (tb *testbed) publishWithProofs(t *testing.T, proofs map[int]*pki.Proof) {
+	t.Helper()
+	entries := make([]pki.MirrorEntry, len(tb.addrs))
+	for i, addr := range tb.addrs {
+		entries[i] = pki.MirrorEntry{Addr: addr, Bundle: tb.bundles[i]}
+		if pr, ok := proofs[i]; ok {
+			entries[i] = pki.MirrorEntry{Addr: addr, Proof: pr}
+		}
+	}
+	raw, err := pki.MarshalMirror(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, srv := range tb.info {
+		srv.mirror.Store(&raw)
 	}
 }
 
@@ -334,13 +385,13 @@ func TestBundlesComeFromTheEntryOnly(t *testing.T) {
 			tb.publish(t, tb.bundles)
 			tb.info[0].unready.Store(2)
 
-			bundles, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 5, time.Millisecond)
+			entries, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 5, time.Millisecond)
 			if err != nil {
 				t.Fatalf("nodeBundles: %v", err)
 			}
-			view, err := verify.Mirror(tb.p, true, tb.trust, tb.addrs, bundles, t0)
+			view, err := verify.MirrorEntries(tb.p, verify.Options{Auth: true, Trust: tb.trust}, tb.addrs, entries, t0)
 			if err != nil || len(view.Nodes()) != len(tb.keys) {
-				t.Fatalf("verify.Mirror = %d nodes, %v, want all %d", len(view.Nodes()), err, len(tb.keys))
+				t.Fatalf("verify.MirrorEntries = %d nodes, %v, want all %d", len(view.Nodes()), err, len(tb.keys))
 			}
 			for i, k := range tb.keys {
 				v := view.Nodes()[i]
@@ -367,9 +418,9 @@ func TestMissingNodeIsNotAskedItself(t *testing.T) {
 	m := mirrorOf(t, tb.addrs[:2], tb.bundles[:2])
 	tb.info[0].mirror.Store(&m)
 
-	bundles, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 3, time.Millisecond)
-	if err != nil || len(bundles) != 3 || bundles[0] == nil || bundles[1] == nil || bundles[2] != nil {
-		t.Fatalf("nodeBundles = %d bundles, %v, want the two the entry serves and none for the third", len(bundles), err)
+	entries, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 3, time.Millisecond)
+	if err != nil || len(entries) != 3 || entries[0].Bundle == nil || entries[1].Bundle == nil || entries[2].Bundle != nil || entries[2].Proof != nil {
+		t.Fatalf("nodeBundles = %d entries, %v, want the two the entry serves and none for the third", len(entries), err)
 	}
 	if got := tb.requests(); !slices.Equal(got, []int32{1, 0, 0}) {
 		t.Fatalf("requests per node %v, want one at the entry: a missing node is not asked itself", got)

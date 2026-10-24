@@ -145,11 +145,11 @@ func TestMirrorRoundTripIsSortedByAddress(t *testing.T) {
 		b1 := e.node(t, "relay-1").bundle(t, t0, time.Hour)
 		b2 := e.node(t, "relay-2").bundle(t, t0, time.Hour)
 		b3 := e.node(t, "relay-3").bundle(t, t0, time.Hour)
-		raw, err := MarshalMirror([]MirrorEntry{{addrOf("relay-3"), b3}, {addrOf("relay-1"), b1}, {addrOf("relay-2"), b2}})
+		raw, err := MarshalMirror([]MirrorEntry{{Addr: addrOf("relay-3"), Bundle: b3}, {Addr: addrOf("relay-1"), Bundle: b1}, {Addr: addrOf("relay-2"), Bundle: b2}})
 		if err != nil {
 			t.Fatalf("MarshalMirror: %v", err)
 		}
-		again, err := MarshalMirror([]MirrorEntry{{addrOf("relay-2"), b2}, {addrOf("relay-3"), b3}, {addrOf("relay-1"), b1}})
+		again, err := MarshalMirror([]MirrorEntry{{Addr: addrOf("relay-2"), Bundle: b2}, {Addr: addrOf("relay-3"), Bundle: b3}, {Addr: addrOf("relay-1"), Bundle: b1}})
 		if err != nil || !bytes.Equal(raw, again) {
 			t.Fatalf("the same bundles in another order encode differently: %v", err)
 		}
@@ -157,7 +157,7 @@ func TestMirrorRoundTripIsSortedByAddress(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseMirror: %v", err)
 		}
-		for i, want := range []MirrorEntry{{addrOf("relay-1"), b1}, {addrOf("relay-2"), b2}, {addrOf("relay-3"), b3}} {
+		for i, want := range []MirrorEntry{{Addr: addrOf("relay-1"), Bundle: b1}, {Addr: addrOf("relay-2"), Bundle: b2}, {Addr: addrOf("relay-3"), Bundle: b3}} {
 			if got[i].Addr != want.Addr || !bytes.Equal(got[i].Bundle, want.Bundle) {
 				t.Fatalf("entry %d: %s, want %s with its bundle byte for byte", i, got[i].Addr, want.Addr)
 			}
@@ -200,10 +200,10 @@ func TestMirrorHasOneSpelling(t *testing.T) {
 		_, err := ParseMirror([]byte(c.raw))
 		wantErr(t, c.name, err, c.want)
 	}
-	if _, err := MarshalMirror([]MirrorEntry{{addrOf("relay-1"), []byte(b1)}, {addrOf("relay-1"), []byte(b2)}}); err == nil {
+	if _, err := MarshalMirror([]MirrorEntry{{Addr: addrOf("relay-1"), Bundle: []byte(b1)}, {Addr: addrOf("relay-1"), Bundle: []byte(b2)}}); err == nil {
 		t.Fatal("MarshalMirror wrote one address twice")
 	}
-	if _, err := MarshalMirror([]MirrorEntry{{addrOf("relay-1"), []byte(`{"v":1}`)}}); err == nil {
+	if _, err := MarshalMirror([]MirrorEntry{{Addr: addrOf("relay-1"), Bundle: []byte(`{"v":1}`)}}); err == nil {
 		t.Fatal("MarshalMirror wrote something that is not a bundle")
 	}
 	if _, err := MarshalMirror(nil); err == nil {

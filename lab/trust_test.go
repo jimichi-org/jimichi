@@ -17,6 +17,7 @@ import (
 
 	"github.com/jimichi-org/jimichi/client"
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/internal/verify"
 	"github.com/jimichi-org/jimichi/lab/metrics"
@@ -66,23 +67,8 @@ type trustStand struct {
 // onward is the dial each relay's counting hook ends in
 func startTrustStand(t *testing.T, s jcrypto.Suite, onward dialFunc) *trustStand {
 	t.Helper()
-	p, err := suite.New(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st := &trustStand{p: p, at: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), session: mustCA(t, p), second: mustCA(t, p)}
-	listeners := make([]net.Listener, trustNodes)
-	for i := range listeners {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = ln.Close() })
-		tr := &trustRelay{name: fmt.Sprintf("relay-%d", i+1), addr: ln.Addr().String(), dials: map[string]int{}}
-		listeners[i] = countingListener{Listener: ln, accepted: &tr.links}
-		st.relays = append(st.relays, tr)
-		st.addrs = append(st.addrs, tr.addr)
-	}
+	st, listeners := newTrustStand(t, s)
+	p := st.p
 	configs := make([]relay.Config, trustNodes)
 	for i, tr := range st.relays {
 		ca := st.session
@@ -103,7 +89,7 @@ func startTrustStand(t *testing.T, s jcrypto.Suite, onward dialFunc) *trustStand
 			if y == x {
 				continue
 			}
-			peer, err := verify.Peer(p, anchor, other.addr, other.bundle, st.at)
+			peer, err := verify.Peer(p, pki.Policy{Anchor: anchor, Skew: pki.Skew}, other.addr, other.bundle, st.at)
 			if err != nil {
 				tr.refused[other.addr] = err
 				continue
@@ -116,10 +102,43 @@ func startTrustStand(t *testing.T, s jcrypto.Suite, onward dialFunc) *trustStand
 				entries = append(entries, pki.MirrorEntry{Addr: other.addr, Bundle: other.bundle})
 			}
 		}
+		var err error
 		if tr.mirror, err = pki.MarshalMirror(entries); err != nil {
 			t.Fatal(err)
 		}
 	}
+	st.serve(t, configs, listeners, onward)
+	return st
+}
+
+// the provider, both CAs and one listening socket per relay, counting the
+// links it accepts; nothing is enrolled or served yet
+func newTrustStand(t *testing.T, s jcrypto.Suite) (*trustStand, []net.Listener) {
+	t.Helper()
+	p, err := suite.New(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &trustStand{p: p, at: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), session: mustCA(t, p), second: mustCA(t, p)}
+	listeners := make([]net.Listener, trustNodes)
+	for i := range listeners {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		tr := &trustRelay{name: fmt.Sprintf("relay-%d", i+1), addr: ln.Addr().String(), dials: map[string]int{}}
+		listeners[i] = countingListener{Listener: ln, accepted: &tr.links}
+		st.relays = append(st.relays, tr)
+		st.addrs = append(st.addrs, tr.addr)
+	}
+	return st, listeners
+}
+
+// every relay comes up on its listener with the peer set the stand built for
+// it, dialling onward through a hook that counts the dials by address
+func (st *trustStand) serve(t *testing.T, configs []relay.Config, listeners []net.Listener, onward dialFunc) {
+	t.Helper()
 	for i, tr := range st.relays {
 		cfg := configs[i]
 		cfg.Peers = func(addr string) (relay.Peer, bool) {
@@ -144,7 +163,6 @@ func startTrustStand(t *testing.T, s jcrypto.Suite, onward dialFunc) *trustStand
 			_ = ln.Close()
 		})
 	}
-	return st
 }
 
 // the keys of cmd/relay with its default -onion-rotate, a link key and an
@@ -167,7 +185,18 @@ func (st *trustStand) enroll(t *testing.T, tr *trustRelay, ca *pki.CA) relay.Con
 		t.Fatal(err)
 	}
 	t.Cleanup(ring.Close)
-	id, err := pki.NewIdentity(p, tr.name, tr.addr)
+	id := st.certify(t, tr, ca)
+	id.SetKeys(linkPub, onionPub, 0)
+	tr.bundle = st.sign(t, id, st.at)
+	tr.identity, tr.linkPub = id.Public(), linkPub
+	return relayConfig(p, linkPriv, linkPub, tr.identity, ring)
+}
+
+// the identity of tr with the certificate the steps of jimichi enroll give it
+// under ca, valid for 72 h from the stand's clock
+func (st *trustStand) certify(t *testing.T, tr *trustRelay, ca *pki.CA) *pki.Identity {
+	t.Helper()
+	id, err := pki.NewIdentity(st.p, tr.name, tr.addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +213,7 @@ func (st *trustStand) enroll(t *testing.T, tr *trustRelay, ca *pki.CA) relay.Con
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := req.Check(p, nonce, tr.name, tr.addr); err != nil {
+	if err := req.Check(st.p, nonce, tr.name, tr.addr); err != nil {
 		t.Fatal(err)
 	}
 	cert, err := ca.Issue(req, st.at, st.at.Add(72*time.Hour))
@@ -194,20 +223,29 @@ func (st *trustStand) enroll(t *testing.T, tr *trustRelay, ca *pki.CA) relay.Con
 	if err := id.Install(cert.Marshal(), st.at); err != nil {
 		t.Fatal(err)
 	}
-	id.SetKeys(linkPub, onionPub, 0)
-	if err := id.Refresh(st.at, time.Hour); err != nil {
+	return id
+}
+
+// the bundle id signs at now for an hour, cmd/relay's default ttl, under the
+// keys and epoch set on it
+func (st *trustStand) sign(t *testing.T, id *pki.Identity, now time.Time) []byte {
+	t.Helper()
+	if err := id.Refresh(now, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	bundle, ok := id.Bundle()
 	if !ok {
 		t.Fatal("no bundle")
 	}
-	tr.bundle, tr.identity, tr.linkPub = bundle, id.Public(), linkPub
+	return bundle
+}
+
+func relayConfig(p jcrypto.CryptoProvider, linkPriv *secmem.Buffer, linkPub, identity []byte, ring *relay.OnionRing) relay.Config {
 	return relay.Config{
 		Provider:   p,
 		StaticPriv: linkPriv,
 		StaticPub:  linkPub,
-		Identity:   tr.identity,
+		Identity:   identity,
 		Onion:      ring,
 		Deliver:    func(_ uint64, payload []byte) []byte { return payload },
 		// every connection comes from the loopback address, as in the harness

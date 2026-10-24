@@ -30,7 +30,7 @@ const (
 	// bundle has to reach a mirror whose clock is up to Skew off before the held
 	// one leaves it, mirrorMargin before expiry: ttl/2 - 1 min - Skew -
 	// mirrorMargin is 174 s here
-	minDescriptorTTL = 16 * time.Minute
+	minDescriptorTTL = pki.MinDescriptorLife
 )
 
 const (
@@ -74,6 +74,16 @@ type node struct {
 	fetchPeer func(addr string) ([]byte, error)
 	// pause before a missing or due peer is asked again; zero picks peerRetry
 	peerRetry time.Duration
+	// the consistency check, -consistency with -auth: the mirrors of roster
+	// peers are read once a period and a peer whose statements contradict each
+	// other is refused with the pair as proof
+	check bool
+	// the policy the roster set, with the least lifetime when check is on
+	trust       pki.Policy
+	crossEvery  time.Duration
+	fetchMirror func(addr string) ([]pki.MirrorEntry, error)
+	// which peers a pass reads; nil draws at random
+	drawPeers func(n, k int) ([]int, error)
 
 	// nil until the roster arrives, or from the start without -auth
 	peers atomic.Pointer[peerCache]
@@ -82,6 +92,7 @@ type node struct {
 
 	descriptorRequests atomic.Uint64
 	mirrorRequests     atomic.Uint64
+	peerMirrorRequests atomic.Uint64
 
 	// replaced only by a signing that succeeded, so a failed re-signing leaves
 	// the last good bundle in service until it expires
@@ -228,24 +239,34 @@ func (n *node) infoMux() http.Handler {
 	// its entry alone; the bytes are ready before the request comes
 	mux.HandleFunc("GET /descriptors", func(w http.ResponseWriter, _ *http.Request) {
 		n.mirrorRequests.Add(1)
-		c := n.peers.Load()
-		if c == nil {
-			missing := "no descriptors: the node has no roster"
-			if n.id == nil {
-				missing = "no descriptors: without -auth the node lists itself only under -advertise, and the other nodes from -peers"
-			}
-			http.Error(w, missing, http.StatusServiceUnavailable)
-			return
-		}
-		b, ok := c.descriptors()
-		if !ok {
-			http.Error(w, "no descriptors: the node has no descriptor of its own in service", http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(b)
+		n.serveMirror(w)
+	})
+	// the same bytes for a roster peer running the consistency check, on a
+	// path of its own so the counters tell peer traffic from clients
+	mux.HandleFunc("GET /descriptors/peer", func(w http.ResponseWriter, _ *http.Request) {
+		n.peerMirrorRequests.Add(1)
+		n.serveMirror(w)
 	})
 	return mux
+}
+
+func (n *node) serveMirror(w http.ResponseWriter) {
+	c := n.peers.Load()
+	if c == nil {
+		missing := "no descriptors: the node has no roster"
+		if n.id == nil {
+			missing = "no descriptors: without -auth the node lists itself only under -advertise, and the other nodes from -peers"
+		}
+		http.Error(w, missing, http.StatusServiceUnavailable)
+		return
+	}
+	b, ok := c.descriptors()
+	if !ok {
+		http.Error(w, "no descriptors: the node has no descriptor of its own in service", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(b)
 }
 
 // counters polled every few milliseconds would show which ticks of a paced
@@ -256,31 +277,33 @@ func (n *node) adminMux(counters func() relay.Counters, mailboxStats func() mail
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
 		s := counters()
-		roster, held := n.peerState()
+		roster, held, refused := n.peerState()
 		out := map[string]any{
-			"accepted":            s.Accepted,
-			"forwarded":           s.Forwarded,
-			"delivered":           s.Delivered,
-			"dropped":             s.Dropped,
-			"padding":             s.Padding,
-			"broken":              s.Broken,
-			"accept_retries":      s.AcceptRetries,
-			"refused_links":       s.RefusedLinks,
-			"refused_busy":        s.RefusedBusy,
-			"refused_source":      s.RefusedSource,
-			"refused_rate":        s.RefusedRate,
-			"refused_setups":      s.RefusedSetups,
-			"refused_extend":      s.RefusedExtend,
-			"failed_extend":       s.FailedExtend,
-			"timed_out":           s.TimedOut,
-			"expired":             s.Expired,
-			"cert":                n.certState(),
-			"roster":              roster,
-			"peers":               held,
-			"descriptor_requests": n.descriptorRequests.Load(),
-			"mirror_requests":     n.mirrorRequests.Load(),
-			"onion_epoch":         n.onionEpoch(),
-			"onion_rotate_failed": n.onionFailures(),
+			"accepted":             s.Accepted,
+			"forwarded":            s.Forwarded,
+			"delivered":            s.Delivered,
+			"dropped":              s.Dropped,
+			"padding":              s.Padding,
+			"broken":               s.Broken,
+			"accept_retries":       s.AcceptRetries,
+			"refused_links":        s.RefusedLinks,
+			"refused_busy":         s.RefusedBusy,
+			"refused_source":       s.RefusedSource,
+			"refused_rate":         s.RefusedRate,
+			"refused_setups":       s.RefusedSetups,
+			"refused_extend":       s.RefusedExtend,
+			"failed_extend":        s.FailedExtend,
+			"timed_out":            s.TimedOut,
+			"expired":              s.Expired,
+			"cert":                 n.certState(),
+			"roster":               roster,
+			"peers":                held,
+			"descriptor_requests":  n.descriptorRequests.Load(),
+			"mirror_requests":      n.mirrorRequests.Load(),
+			"peer_mirror_requests": n.peerMirrorRequests.Load(),
+			"peers_refused":        refused,
+			"onion_epoch":          n.onionEpoch(),
+			"onion_rotate_failed":  n.onionFailures(),
 		}
 		if mailboxStats != nil {
 			m := mailboxStats()
