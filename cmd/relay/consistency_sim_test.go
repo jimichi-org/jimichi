@@ -51,21 +51,19 @@ func epochHeld(t *testing.T, c *cluster, y, x *fixture) int64 {
 // published Skew past the expiry of its last epoch 1 descriptor, relays 1 and
 // 3 stay in every mirror, and relay-2's own mirror answers 503 exactly while
 // its wall is below its last published
+//
+// c25519 only: the rules compare times and epochs, which the suite does not
+// touch, and the 10800 steps verify about 200000 signatures, minutes of GOST
 func TestCrossCheckLeavesHonestRotationAlone(t *testing.T) {
-	for _, s := range consistencySuites {
-		if s == jcrypto.SuiteGOST && testing.Short() {
-			continue
-		}
-		for _, tc := range []struct {
-			ttl, rotate time.Duration
-		}{
-			{20 * time.Minute, time.Hour},
-			{16 * time.Minute, 16 * time.Minute},
-		} {
-			t.Run(s.String()+"/"+tc.rotate.String(), func(t *testing.T) {
-				runHonestRotation(t, s, tc.ttl, tc.rotate)
-			})
-		}
+	for _, tc := range []struct {
+		ttl, rotate time.Duration
+	}{
+		{20 * time.Minute, time.Hour},
+		{16 * time.Minute, 16 * time.Minute},
+	} {
+		t.Run(tc.rotate.String(), func(t *testing.T) {
+			runHonestRotation(t, jcrypto.SuiteC25519, tc.ttl, tc.rotate)
+		})
 	}
 }
 
