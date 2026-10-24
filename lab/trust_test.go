@@ -103,7 +103,7 @@ func startTrustStand(t *testing.T, s jcrypto.Suite, onward dialFunc) *trustStand
 			if y == x {
 				continue
 			}
-			peer, err := verify.Peer(p, anchor, other.addr, other.bundle, st.at)
+			peer, err := verify.Peer(p, pki.Policy{Anchor: anchor, Skew: pki.Skew}, other.addr, other.bundle, st.at)
 			if err != nil {
 				tr.refused[other.addr] = err
 				continue

@@ -120,14 +120,27 @@ const (
 // refuses the mirror of its entry; served[i] says whether the mirror holds
 // listed node i. absent and allowed are the two numbers the rule compares
 func JudgeMirror(served []bool, entry, hops, missing int) (verdict MirrorVerdict, absent, allowed int) {
-	for _, held := range served {
+	return JudgeMirrorAmong(served, nil, entry, hops, missing)
+}
+
+// JudgeMirrorAmong is JudgeMirror over the listed nodes that are not refused:
+// a node the entry proved inconsistent, refused[i], is neither served nor
+// left out, so the list is shorter by it and the bound on absent nodes follows
+// the shorter list. A refused entry is an entry the mirror does not hold
+func JudgeMirrorAmong(served, refused []bool, entry, hops, missing int) (verdict MirrorVerdict, absent, allowed int) {
+	listed := 0
+	for i, held := range served {
+		if i < len(refused) && refused[i] {
+			continue
+		}
+		listed++
 		if !held {
 			absent++
 		}
 	}
-	allowed = MaxAbsent(len(served), hops, missing)
+	allowed = MaxAbsent(listed, hops, missing)
 	switch {
-	case entry < 0 || entry >= len(served) || !served[entry]:
+	case entry < 0 || entry >= len(served) || !served[entry] || entry < len(refused) && refused[entry]:
 		return MirrorLacksEntry, absent, allowed
 	case absent > allowed:
 		return MirrorLacksTooMany, absent, allowed
@@ -139,8 +152,14 @@ func JudgeMirror(served []bool, entry, hops, missing int) (verdict MirrorVerdict
 // takes is still refused when served[exit] is false or the exit is the entry,
 // for which ChooseRestTo draws no chain
 func JudgeMirrorTo(served []bool, entry, exit, hops, missing int) (verdict MirrorVerdict, absent, allowed int) {
-	verdict, absent, allowed = JudgeMirror(served, entry, hops, missing)
-	if verdict == MirrorTaken && (exit < 0 || exit >= len(served) || exit == entry || !served[exit]) {
+	return JudgeMirrorToAmong(served, nil, entry, exit, hops, missing)
+}
+
+// JudgeMirrorToAmong is JudgeMirrorTo over the listed nodes that are not
+// refused; a refused exit is an exit the mirror does not hold
+func JudgeMirrorToAmong(served, refused []bool, entry, exit, hops, missing int) (verdict MirrorVerdict, absent, allowed int) {
+	verdict, absent, allowed = JudgeMirrorAmong(served, refused, entry, hops, missing)
+	if verdict == MirrorTaken && (exit < 0 || exit >= len(served) || exit == entry || !served[exit] || exit < len(refused) && refused[exit]) {
 		verdict = MirrorLacksExit
 	}
 	return verdict, absent, allowed

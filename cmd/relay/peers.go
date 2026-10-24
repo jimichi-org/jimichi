@@ -144,9 +144,9 @@ func (c *peerCache) mirrored(e *peerEntry, now int64) bool {
 }
 
 // Verify bounds the descriptor by its certificate, so expires alone ends the entry
-func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []byte, time.Time) (*peerEntry, error) {
+func verifiedPeer(p jcrypto.CryptoProvider, pol pki.Policy) func(string, []byte, time.Time) (*peerEntry, error) {
 	return func(addr string, bundle []byte, now time.Time) (*peerEntry, error) {
-		peer, err := verify.Peer(p, anchor, addr, bundle, now)
+		peer, err := verify.Peer(p, pol, addr, bundle, now)
 		if err != nil {
 			return nil, err
 		}
@@ -417,7 +417,7 @@ func (n *node) handleRoster(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errRosterSelf.Error(), http.StatusBadRequest)
 		return
 	}
-	if _, err := verify.Peer(n.p, roster.Anchor, n.addr, bundle, now); err != nil {
+	if _, err := verify.Peer(n.p, pki.Policy{Anchor: roster.Anchor, Skew: pki.Skew}, n.addr, bundle, now); err != nil {
 		http.Error(w, fmt.Sprintf("this node's bundle does not verify under the roster's anchor: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -428,7 +428,7 @@ func (n *node) handleRoster(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	n.roster = raw
-	n.setPeers(addrs, verifiedPeer(n.p, roster.Anchor))
+	n.setPeers(addrs, verifiedPeer(n.p, pki.Policy{Anchor: roster.Anchor, Skew: pki.Skew}))
 	n.logger.Printf("roster installed nodes=%d ca=%x", len(roster.Nodes), roster.Anchor.ID(n.p))
 	w.WriteHeader(http.StatusNoContent)
 }
