@@ -831,18 +831,143 @@ func TestKeepPeersRunsThePassOnItsTimer(t *testing.T) {
 	}
 }
 
+// passes start one period apart however long the fetches of one take: the
+// pass is stamped before it runs, so with a period of 300 ms and mirrors that
+// take 200 ms to answer the starts come 300 ms apart, not 500
+func TestPassesStartOnePeriodApart(t *testing.T) {
+	names := []string{"relay-1", "relay-2", "relay-3"}
+	c := newCluster(t, jcrypto.SuiteC25519, names...)
+	c.checking(300*time.Millisecond, nil)
+	c.enroll(t, t0.Add(72*time.Hour))
+	n1 := c.nodes[0]
+	var mu sync.Mutex
+	var starts []time.Time
+	inner := c.fetchMirror
+	n1.n.fetchMirror = func(addr string) ([]pki.MirrorEntry, error) {
+		time.Sleep(200 * time.Millisecond)
+		return inner(addr)
+	}
+	n1.n.drawPeers = func(n, k int) ([]int, error) {
+		mu.Lock()
+		starts = append(starts, time.Now())
+		mu.Unlock()
+		return listedOrder(n, k)
+	}
+	n1.n.wake = make(chan struct{})
+	n1.n.peerRetry = 50 * time.Millisecond
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		n1.n.keepPeers(stop)
+		close(done)
+	}()
+	n1.takeRoster(t, c.roster())
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(starts)
+		mu.Unlock()
+		if n >= 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stop)
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(starts) < 3 {
+		t.Fatalf("%d passes within 5 s, want 3", len(starts))
+	}
+	for i := 1; i < 3; i++ {
+		gap := starts[i].Sub(starts[i-1])
+		if gap < 300*time.Millisecond || gap > 450*time.Millisecond {
+			t.Fatalf("pass %d started %v after the one before, want the period of 300 ms and not the period plus the fetches", i, gap)
+		}
+	}
+}
+
+// a proof against the node itself in the mirror of a peer is logged once,
+// with the rule and nothing else, and does not refuse anyone; the mirror
+// classes of one pass are logged one line each, and a class that stays is not
+// logged again
+func TestProofAgainstThisNodeIsLoggedOnce(t *testing.T) {
+	names := []string{"relay-1", "relay-2", "relay-3"}
+	c := newCluster(t, jcrypto.SuiteC25519, names...)
+	c.checking(time.Minute, listedOrder)
+	c.enroll(t, t0.Add(72*time.Hour))
+	n1, n2, n3 := c.nodes[0], c.nodes[1], c.nodes[2]
+	for _, f := range c.nodes {
+		f.takeRoster(t, rosterOf(c.ca.Anchor(), names...))
+		f.cache().refresh()
+	}
+	// two keys of relay-2 under epoch 0: a real proof against it
+	_, first := n2.descriptor(t)
+	n2.n.mu.Lock()
+	n2.n.id.SetKeys(n2.pub, agreement(t, c.p), 0)
+	n2.n.mu.Unlock()
+	c.clock.advance(time.Second)
+	n2.resign(t)
+	_, second := n2.descriptor(t)
+	pr, err := pki.NewProof(first, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, own := n1.descriptor(t)
+	_, three := n3.descriptor(t)
+	crafted, err := pki.MarshalMirror([]pki.MirrorEntry{
+		{Addr: n1.n.addr, Bundle: own}, {Addr: n2.n.addr, Proof: pr}, {Addr: n3.n.addr, Bundle: altered(t, three)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /descriptor", func(w http.ResponseWriter, _ *http.Request) {
+		b, _ := n1.n.descriptor()
+		_, _ = w.Write(b)
+	})
+	mux.HandleFunc("GET /descriptors/peer", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(crafted) })
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c.route(n1.n.addr, srv.URL)
+
+	n2.cache().draw = order(0, 1)
+	for range 3 {
+		n2.cache().cross()
+	}
+	log := n2.log.String()
+	accusation := "a peer serves a proof against this node: two onion keys in one epoch\n"
+	badItem := "peer " + n1.n.addr + ": mirror: " + pki.ErrDescSignature.Error() + "\n"
+	if strings.Count(log, accusation) != 1 || strings.Count(log, badItem) != 1 || strings.Contains(log, "refused") {
+		t.Fatalf("relay-2 logged %q, want the accusation and the altered bundle once each and no refusal", log)
+	}
+	if n2.cache().refusedCount() != 0 || n2.cache().held() != 2 {
+		t.Fatalf("relay-2 refuses %d and holds %d, want 0 and 2", n2.cache().refusedCount(), n2.cache().held())
+	}
+}
+
+// the bundle of an altered descriptor signature
+func altered(t *testing.T, bundle []byte) []byte {
+	t.Helper()
+	b, err := pki.ParseBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Descriptor[len(b.Descriptor)-1] ^= 1
+	return b.Marshal()
+}
+
+// the period is checked whatever the switch says
 func TestConsistencyFlags(t *testing.T) {
 	for _, c := range []struct {
-		on    bool
 		every time.Duration
 		ok    bool
 	}{
-		{true, time.Minute, true}, {true, 30 * time.Second, true}, {true, time.Hour, true},
-		{true, 29 * time.Second, false}, {true, 61 * time.Minute, false}, {true, 0, false},
-		{false, time.Minute, true}, {false, 0, true},
+		{time.Minute, true}, {30 * time.Second, true}, {time.Hour, true},
+		{29 * time.Second, false}, {61 * time.Minute, false}, {0, false}, {-time.Minute, false},
 	} {
-		if err := checkConsistencyFlags(c.on, c.every); (err == nil) != c.ok {
-			t.Errorf("checkConsistencyFlags(%v, %v) = %v, want ok %v", c.on, c.every, err, c.ok)
+		if err := checkConsistencyFlags(c.every); (err == nil) != c.ok {
+			t.Errorf("checkConsistencyFlags(%v) = %v, want ok %v", c.every, err, c.ok)
 		}
 	}
 }

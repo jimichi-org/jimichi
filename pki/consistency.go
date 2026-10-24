@@ -103,21 +103,28 @@ type Conflict struct {
 // pki error of the first bundle that fails comes back as it is, two consistent
 // bundles give ErrNoConflict
 func VerifyConflict(p jcrypto.CryptoProvider, pol Policy, addr string, pr Proof) (*Conflict, error) {
+	c, _, _, err := VerifyProof(p, pol, addr, pr)
+	return c, err
+}
+
+// VerifyProof is VerifyConflict that also hands back the two statements, so a
+// reader that records them does not verify the pair twice
+func VerifyProof(p jcrypto.CryptoProvider, pol Policy, addr string, pr Proof) (*Conflict, *Verified, *Verified, error) {
 	a, err := VerifyStatement(p, pol, addr, pr.A)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	b, err := VerifyStatement(p, pol, addr, pr.B)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	rule := Compare(a, b)
 	if rule == 0 {
-		return nil, ErrNoConflict
+		return nil, nil, nil, ErrNoConflict
 	}
 	canonical, err := NewProof(pr.A, pr.B)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
-	return &Conflict{Addr: addr, Rule: rule, Proof: *canonical}, nil
+	return &Conflict{Addr: addr, Rule: rule, Proof: *canonical}, a, b, nil
 }

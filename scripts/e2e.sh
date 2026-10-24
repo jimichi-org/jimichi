@@ -183,7 +183,14 @@ if [ "$asked_after" != "$asked" ]; then
   exit 1
 fi
 echo "entry only: the clients asked $entries for the descriptors, the refused client $entry_refused, and no relay was asked for its own descriptor"
-cross_2=$(column "$stats" peer_mirror_requests)
+# a pass runs once a minute at each relay, so the growth is waited for up to
+# a period and a half
+for _ in $(seq 1 9); do
+  cross_2=$(column "$stats" peer_mirror_requests)
+  if check_every_relay_crossed "$cross_0" "$cross_2" 2>/dev/null; then break; fi
+  sleep 10
+  stats=$(stats_pass) || { echo "no counters from the relays while waiting for the consistency check" >&2; exit 1; }
+done
 check_every_relay_crossed "$cross_0" "$cross_2" || exit 1
 check_none_refused "$stats" "while the clients ran" || exit 1
 echo "consistency: every relay cross-read its peers, none refused"

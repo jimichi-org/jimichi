@@ -71,7 +71,7 @@ func main() {
 	if err := checkRotateFlags(cfg.onionRotate, cfg.descriptorTTL); err != nil {
 		logger.Fatal(err)
 	}
-	if err := checkConsistencyFlags(cfg.consistency, cfg.consistencyEvery); err != nil {
+	if err := checkConsistencyFlags(cfg.consistencyEvery); err != nil {
 		logger.Fatal(err)
 	}
 	if err := checkExit(cfg.exit, cfg.mailbox); err != nil {
@@ -355,9 +355,11 @@ const (
 )
 
 // the period bounds the pass: above k fetch timeouts, so a pass never outlasts
-// its period, and below an hour, which is the longest a mirror may differ
-func checkConsistencyFlags(on bool, every time.Duration) error {
-	if on && (every < minCrossEvery || every > maxCrossEvery) {
+// its period, and below an hour, which is the longest a mirror may differ. It
+// is checked whatever the switch says, so the baseline differs from the
+// measured configuration in the switch alone
+func checkConsistencyFlags(every time.Duration) error {
+	if every < minCrossEvery || every > maxCrossEvery {
 		return fmt.Errorf("-consistency-every %v: want between %v and %v", every, minCrossEvery, maxCrossEvery)
 	}
 	return nil

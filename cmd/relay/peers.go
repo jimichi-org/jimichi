@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -155,10 +157,13 @@ type peerCache struct {
 	// the class of the last failure per peer, so a peer that stays down for one
 	// reason is one line
 	failed map[string]string
-	// the same for the last failure of a peer's mirror
-	failedMirror map[string]string
-	records      map[string]*verify.Record
-	refused      map[string]*pki.Conflict
+	// the classes of what went wrong with the mirror of a peer at the last
+	// pass that read it, one line per class while it stays
+	failedMirror map[string]map[string]bool
+	// whether the mirror of a peer was seen carrying a proof against this node
+	accused bool
+	records map[string]*verify.Record
+	refused map[string]*pki.Conflict
 	// on the running clock: the pass keeps its cadence whatever the wall says
 	lastCross time.Time
 
@@ -200,7 +205,7 @@ func newPeerCache(n *node, addrs []string, read func(string, []byte, time.Time) 
 		crossEvery:   every,
 		entries:      make(map[string]*peerEntry, len(addrs)),
 		failed:       make(map[string]string),
-		failedMirror: make(map[string]string),
+		failedMirror: make(map[string]map[string]bool),
 		records:      make(map[string]*verify.Record, len(addrs)),
 		refused:      make(map[string]*pki.Conflict),
 		lastCross:    time.Now(),
@@ -311,6 +316,15 @@ func (c *peerCache) refresh() bool {
 // entry. The result is the failure class, empty when the bundle was taken or
 // is simply not newer
 func (c *peerCache) take(addr string, bundle []byte, now time.Time) string {
+	c.mu.Lock()
+	same := c.check && c.entries[addr] != nil && bytes.Equal(c.entries[addr].bundle, bundle)
+	c.mu.Unlock()
+	// the bundle held: nothing to verify or compare, the peer stays due. An
+	// unsigned bundle carries no times, so the baseline takes it again to set
+	// the next minute
+	if same {
+		return ""
+	}
 	var stmt *pki.Verified
 	if c.check {
 		v, err := pki.VerifyStatement(c.p, c.trust, addr, bundle)
@@ -376,6 +390,7 @@ func (c *peerCache) refuse(addr string, conflict *pki.Conflict) {
 	c.refused[addr] = conflict
 	delete(c.entries, addr)
 	delete(c.failed, addr)
+	delete(c.failedMirror, addr)
 	c.mu.Unlock()
 	c.logger.Printf("peer %s: refused: %s", addr, conflict.Rule)
 	c.publish()
@@ -392,7 +407,6 @@ func (c *peerCache) isRefused(addr string) bool {
 // drawn among those not refused, every item of a roster peer fed to that
 // peer's record, a newer live statement adopted, a proof verified and acted on
 func (c *peerCache) cross() {
-	now := c.now()
 	c.mu.Lock()
 	candidates := make([]string, 0, len(c.addrs))
 	for _, addr := range c.addrs {
@@ -417,46 +431,55 @@ func (c *peerCache) cross() {
 		}
 		entries, err := c.fetchMirror(q)
 		if err != nil {
-			c.mirrorOutcome(q, failureClass(err, "no answer"))
+			c.mirrorOutcome(q, map[string]bool{failureClass(err, "no answer"): true})
 			continue
 		}
-		cause := ""
+		// the clock after the fetch: a pass may spend a timeout per peer
+		now := c.now()
+		causes := map[string]bool{}
 		for _, it := range entries {
-			if got := c.takeItem(it, now); got != "" && cause == "" {
-				cause = got
+			if got := c.takeItem(it, now); got != "" {
+				causes[got] = true
 			}
 		}
-		c.mirrorOutcome(q, cause)
+		c.mirrorOutcome(q, causes)
 	}
 	// what the pass adopted goes into the mirror now, not at the next refresh
 	c.publish()
 }
 
-// the class of what went wrong with a peer's mirror, one line while it stays
-// the same; an empty cause clears it
-func (c *peerCache) mirrorOutcome(q, cause string) {
+// the classes of what went wrong with the mirror of a peer at this pass: one
+// line per class that was not there at the pass before, none while they stay
+func (c *peerCache) mirrorOutcome(q string, causes map[string]bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if cause == "" {
+	if len(causes) == 0 {
 		delete(c.failedMirror, q)
 		return
 	}
-	if c.failedMirror[q] != cause {
-		c.failedMirror[q] = cause
-		c.logger.Printf("peer %s: mirror: %s", q, cause)
+	before := c.failedMirror[q]
+	for _, cause := range slices.Sorted(maps.Keys(causes)) {
+		if !before[cause] {
+			c.logger.Printf("peer %s: mirror: %s", q, cause)
+		}
 	}
+	c.failedMirror[q] = causes
 }
 
 // an item of a mirror about a roster peer other than this node; the result is
 // the failure class, empty when the item was taken or skipped
 func (c *peerCache) takeItem(it pki.MirrorEntry, now time.Time) string {
-	if it.Addr == c.self || !c.listed[it.Addr] || c.isRefused(it.Addr) {
+	if it.Addr == c.self {
+		c.accusation(it)
+		return ""
+	}
+	if !c.listed[it.Addr] || c.isRefused(it.Addr) {
 		return ""
 	}
 	if it.Proof == nil {
 		return c.take(it.Addr, it.Bundle, now)
 	}
-	conflict, err := pki.VerifyConflict(c.p, c.trust, it.Addr, *it.Proof)
+	conflict, a, b, err := pki.VerifyProof(c.p, c.trust, it.Addr, *it.Proof)
 	if err != nil {
 		if errors.Is(err, pki.ErrNoConflict) {
 			// two statements the peer made all the same
@@ -466,21 +489,33 @@ func (c *peerCache) takeItem(it pki.MirrorEntry, now time.Time) string {
 		}
 		return pki.ErrNoConflict.Error()
 	}
-	// the conflict comes out of this node's own record, as if it had fetched
+	// the conflict comes out of the record of this node, as if it had fetched
 	// both bundles: what it publishes is a proof it verified, not one it copied
-	a, err := pki.VerifyStatement(c.p, c.trust, it.Addr, conflict.Proof.A)
-	if err != nil {
-		return pki.ErrNoConflict.Error()
-	}
-	b, err := pki.VerifyStatement(c.p, c.trust, it.Addr, conflict.Proof.B)
-	if err != nil {
-		return pki.ErrNoConflict.Error()
-	}
 	c.mu.Lock()
 	found := c.record(it.Addr).TakeProof(conflict, a, b)
 	c.mu.Unlock()
 	c.refuse(it.Addr, found)
 	return ""
+}
+
+// a proof against this node in the mirror of a peer is the one sign its
+// operator gets that the peers refuse it: one line for the process, the rule
+// and no byte of the proof
+func (c *peerCache) accusation(it pki.MirrorEntry) {
+	if it.Proof == nil {
+		return
+	}
+	conflict, err := pki.VerifyConflict(c.p, c.trust, c.self, *it.Proof)
+	if err != nil {
+		return
+	}
+	c.mu.Lock()
+	first := !c.accused
+	c.accused = true
+	c.mu.Unlock()
+	if first {
+		c.logger.Printf("a peer serves a proof against this node: %s", conflict.Rule)
+	}
 }
 
 func (c *peerCache) forget() {
@@ -662,9 +697,11 @@ func (n *node) keepPeers(stop <-chan struct{}) {
 		wait := c.wait()
 		if c.check {
 			c.forget()
+			// stamped before the pass, so passes start one period apart however
+			// long the fetches of one take
 			if due, _ := c.crossDue(); due {
-				c.cross()
 				c.crossed()
+				c.cross()
 			}
 			_, left := c.crossDue()
 			wait = min(wait, left)
