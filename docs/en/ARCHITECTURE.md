@@ -841,6 +841,16 @@ Onion key epochs:
   then rotates once. A wall clock set back postpones neither moment: the running time still
   brings it. A wall clock set forwards brings both early, which costs clients a refused setup and
   no secrecy. A descriptor is always signed for the key that is current at that moment.
+- The published time of a descriptor never decreases within a process: Identity.Refresh takes
+  published = max(now, the previous published, the floor) and expires = min(published + ttl,
+  not_after). With correct clocks this changes nothing. After a wall clock set back the node's own
+  /descriptors waits for its clock to reach published, as it does today, at most until the
+  published of the rotation.
+- The first descriptor of an epoch is published no earlier than Skew after the expiry of the last
+  descriptor of the epoch before the replaced one: a rotation to e+2 that succeeds floors published
+  at expires(e) + Skew. With correct clocks the release of key e comes by the wall clock ttl + Skew
+  after the rotation to e+1, the floor lies below now, and nothing changes; the floor acts when the
+  release came by running time or the clock was set back (section "Descriptor consistency").
 - A rotation that fails, because there is no memory for the new key, its page cannot be
   locked or its key pair check (CRYPTO) does not pass, leaves the published key in place. The
   node tries again every second and counts the attempts (onion_rotate_failed). Between rotations
@@ -1031,9 +1041,16 @@ transmitted.
   node's own host its own info port. Hosts are compared in their one spelling, and an IPv4 address
   has no IPv6 spelling, but one host under two names, or under a name and an IP address, is not
   caught.
-- The descriptor mirror: JSON `[{"addr":"<host:port>","bundle":{...}},...]`, sorted by address,
-  every bundle in its own canonical spelling; parsing accepts only that. The mirror carries no
-  signature of its own: each bundle in it is verified like any other.
+- The descriptor mirror: JSON `[{"addr":"<host:port>","bundle":{...}},...]`, sorted strictly by
+  address, every bundle in its own canonical spelling; parsing accepts only that. An item carries
+  either `bundle` or `proof`: `{"addr":...,"proof":[lo,hi]}` is a proof of the node's
+  inconsistency, two of its bundles, the first bytewise smaller than the second (section
+  "Descriptor consistency"). Parsing rejects an item with both keys or with neither, a proof of
+  other than two elements, an element that fails bundle parsing, equal or reversed elements,
+  addresses out of order and any input that does not re-encode byte for byte (ErrFormat), and a
+  repeated address (ErrDuplicate). A mirror without proofs encodes exactly as before. The mirror
+  carries no signature of its own: each bundle in it is verified like any other, and a proof is
+  verified by every reader under its own anchor, so an entry cannot forge one.
 - The roster limit bounds the number of nodes: 4 KiB hold 58 nodes with names and addresses of
   the testbed form (relay-N, relay-N.jimichi.svc.cluster.local:9000) on c25519 and 57 on GOST.
   The mirror of five nodes takes about 3 KiB on c25519 and 3.6 KiB on GOST, the mirror of the
@@ -1046,8 +1063,13 @@ Validity:
 - A certificate whose not_after is not after its not_before is rejected (ErrCertTime), as it is at
   issuance.
 - A descriptor expires no later than its certificate (expires <= not_after) and lives at most 24 h.
-- Identity.Refresh signs a new descriptor with expires = min(now + ttl, not_after). Without a
-  certificate it returns ErrNoCert, and after not_after it withdraws the bundle.
+- Identity.Refresh signs a new descriptor with published = max(now, the previous published, the
+  floor) and expires = min(published + ttl, not_after) (section "Circuit setup", onion key
+  epochs). Without a certificate it returns ErrNoCert, and after not_after it withdraws the bundle.
+- The verification policy (pki.Policy) may set a lower bound MinLife on the lifetime: a descriptor
+  that lives less is rejected (ErrDescLife) unless the certificate cut it (expires == not_after).
+  A node and a client with -consistency set MinLife = pki.MinDescriptorLife, 16 min, the same as
+  the least -descriptor-ttl, so an honest node never fails the bound.
 
 ### Verification order
 
@@ -1067,6 +1089,25 @@ The first failure stops the check; every check after parsing has its own error:
 
 - The client, and a node for the descriptor of a peer, call pki.Verify for every bundle on its
   own.
+- pki.VerifyStatement makes the same check without the clock: the anchor, both signatures,
+  cert_hash, the address, the suite, not_after > not_before, expires > published, expires <=
+  not_after, a lifetime at most MaxLife and at least MinLife unless cut, the key sizes. The
+  certificate and descriptor windows against now are not checked, so an expired pair still
+  proves. Verify and VerifyStatement are one function with a flag for the clock checks, and the
+  error order of Verify stays.
+- pki.Compare applies the consistency rules C0..C6 to two statements of one address (section
+  "Descriptor consistency"): 0 when they are consistent, otherwise the first broken rule in the
+  order identity, certificate hash, link key, then within one epoch the onion key, across epochs
+  an equal onion key, then, with lo the smaller epoch, published(hi) < published(lo) and, with
+  the epochs at least 2 apart, published(hi) < expires(lo) + Skew. Compare is symmetric, and Skew
+  in it is the constant pki.Skew. The texts of the seven rules: `two identities at one address`,
+  `two certificates for one identity`, `two link keys`, `two onion keys in one epoch`, `one onion
+  key in two epochs`, `an older epoch published after a newer one`, `epochs two apart overlap`.
+- pki.VerifyConflict checks both bundles of a proof with VerifyStatement at the node's address and
+  returns the inconsistency Compare finds: ErrNoConflict (`pki: not a proof of inconsistency`)
+  when there is none, otherwise the pki error of the first bundle that fails. Every reader of a
+  proof makes this check. A refused node shows as ErrConflict (`pki: the node signed descriptors
+  that contradict each other`) with the text of the rule.
 - pki.VerifyChain runs this check for every node of the roster at enroll and requires addresses,
   signing keys and onion keys to be pairwise distinct (ErrDuplicate): the operator sees both
   names and can correct the roster.
@@ -1102,6 +1143,19 @@ The first failure stops the check; every check after parsing has its own error:
   -fixed-chain the descriptor validity as well (with a drawn chain it stays out: the entry's own
   descriptor is the freshest in its mirror and would point at the entry), and one line with the
   number of verified and of listed nodes.
+- A mirror item may be a proof of a node's inconsistency (section "Descriptor consistency"). With
+  -consistency (the default) the client verifies it itself under its own -ca (pki.VerifyConflict)
+  and refuses the node: it joins no chain and is counted apart from -missing: the list is one
+  node shorter, and the missing and failing nodes count against -missing among the rest
+  (client.JudgeMirrorAmong); a draw never numbers a refused node. A proof that holds no
+  contradiction or does not verify is a node the entry left out, within -missing. A proof about
+  the entry itself refuses the circuit, as a missing entry bundle does; a proof about the mailbox
+  gives a -peer client the same refusal `the entry holds no bundle for the mailbox`. With a
+  refusal the line on verified nodes becomes `<n> of <N> listed nodes verified, <k> refused by
+  proof`, with no address; with -fixed-chain a refused node of the chain stops the client with
+  `refusing to build the circuit: node <address>: pki: the node signed descriptors that
+  contradict each other: <rule>`. With -consistency=false a proof item is a node the entry left
+  out, within -missing, and there is no lower bound on the descriptor lifetime.
 - A -peer client differs: it logs no line per listed node, it logs refusals by class only, and a
   failure on a rebuild does not stop it (section "Choice of the chain").
 - The onion key from the descriptor goes into circuit setup, the entry node's link key into
@@ -1283,6 +1337,244 @@ finds by the label of their deployments (app=relay).
   client with the foreign anchor, and at no other relay; descriptor_requests of every relay must
   be what it was before the clients.
 
+### Descriptor consistency
+
+Nodes publish their descriptors themselves and there is no directory, so without a check a node
+could serve each peer a validly signed onion key of its own: the key that opens a setup cell would
+then name the mirror the client used, that is the entry. With -consistency (the default) nodes
+therefore check each other's descriptors for consistency: every node reads the mirrors of other
+roster nodes, compares every statement of every node with the others and refuses a node two of
+whose descriptors break a rule. Such a pair is a proof that anyone holding the anchor verifies.
+
+| Term | Meaning |
+|---|---|
+| node | one identity under one anchor at one roster address: a certificate binds the identity to a name and address, a process takes one certificate, and a restart is a new identity and a new enrollment of everything |
+| statement of a node | a bundle whose certificate verifies under the anchor at that address and whose descriptor the identity signed, whatever its time window: the window says when a client may use it, the signature says the node said it |
+| inconsistency | two statements of one address under one anchor that break a rule; the proof is self-contained: anyone with the anchor verifies both signatures and reads two descriptors |
+
+The rules. a and b are two statements of one address under one anchor with the fields identity,
+cert_hash, epoch, published, expires, link, onion. The rules are symmetric; C7 is about one
+statement. Skew is pki.Skew, 2 min, a protocol constant.
+
+| Rule | Statement | Why an honest node never breaks it |
+|---|---|---|
+| C0 one identity | a.identity == b.identity | one identity per process; a second identity at the address needs a second certificate from the CA, whose key enroll discards; a restart gives a new anchor as well |
+| C1 one certificate | a.cert_hash == b.cert_hash | a node refuses a second certificate per process; enroll issues one per address per run |
+| C2 one link key | a.link == b.link | the link key is set once per process and goes into every signing unchanged; no clock is involved |
+| C3 one onion key per epoch | a.epoch == b.epoch implies a.onion == b.onion | a rotation makes one key per epoch, every signing reads the ring's current (epoch, key), a failed rotation changes neither; with -onion-rotate 0 epoch 0 names the static key for the life of the process; no clock is involved |
+| C4 one epoch per onion key | a.onion == b.onion implies a.epoch == b.epoch | a rotation refuses a public key equal to the current one, and every key comes fresh from GenerateEphemeral (two equal keys by chance: 2^-256); no bound depends on this rule |
+| C5 epochs published in order | a.epoch < b.epoch implies a.published <= b.published | the epoch only grows, and a signing of the greater epoch comes later in real time than every signing of the smaller. Equality is allowed: the timer may sign e in the second a rotation signs e+1. A wall clock set back between the two signings would decrease the field; clamp 1 rules that out |
+| C6 an epoch ends Skew before the epoch after next begins | a.epoch + 2 <= b.epoch implies b.published >= a.expires + Skew | the rotation to e+2 waits for the release of key e, the grace period ttl + Skew after the rotation R1 to e+1. The last descriptor of e was signed at or before R1, so expires(e) <= R1 + ttl, and when the release comes by the wall clock, the wall at the rotation to e+2 reads at least R1 + ttl + Skew >= expires(e) + Skew. When it comes by running time, or the wall was set back since R1, clamp 2 floors published(e+2) at expires(e) + Skew. Equality is allowed |
+| C7 a lifetime of at least 16 min unless cut by the certificate | expires - published >= 16 min, or expires == not_after | -descriptor-ttl is at least 16 min (pki.MinDescriptorLife); Refresh signs expires = min(published + ttl, not_after); with clamp 1 the lifetime is counted from published and stays ttl |
+
+Why this is enough. C3 and C4 make the onion key a function of the epoch. By C5 and C6 any one
+clock with the Skew allowance (a descriptor is accepted when published <= t + Skew and expires > t)
+accepts at most two adjacent epochs of a node at an instant t: were e and e+k, k >= 2, both
+accepted, published(e+k) >= expires(e) + Skew > t + Skew. So any one verifier accepts at most two
+keys of a node at any instant. C7 bounds how often a new epoch can appear: published(e+2) >=
+expires(e) + Skew >= published(e) + 16 min + Skew, so at most two new epochs per 16 min; it also
+keeps a node from making its peers fetch it every minute with short descriptors. Without C6 a node
+would sign e, e+1, e+2, e+3 in one second and hand each of four mirrors its own epoch, and the key
+that opens a setup would name the mirror outright. Without the Skew gap in C6 a verifier with the
+allowance would accept e and e+1 ending at T together with e+2 and e+3 starting at T during the
+Skew before T: four keys, two bits per circuit at every boundary. Without C5 a node would sign e+1
+for one peer and a fresh e for another forever, and both would stay valid. Without C7 it would
+step epochs as often as the mirror margin allows and reopen the window as often. There is no rule
+"epoch e+1 published at least 16 min after epoch e": it is true only against the first descriptor
+of e, and a verifier of a pair cannot know which descriptor of e was first; on the testbed (ttl
+20 min, rotation 1 h) the last re-signing of e comes 10 min before the rotation, and such a rule
+would refuse every honest node.
+
+Two clamps at the node, inert with correct clocks. The only honest violations of C5 and C6 come
+from a wall clock set back, so published is computed with two clamps:
+
+| Clamp | Where | Effect |
+|---|---|---|
+| 1. published never decreases within a process: published = max(now, the previous published, the floor), expires = min(published + ttl, not_after) | Identity.Refresh | C5 holds under a set-back of any size. Peers with correct clocks accept the bundle: published is a real past moment |
+| 2. a floor at the rotation: after a rotation succeeded and before the new descriptor is published, the floor is set to the expires of the last descriptor of the replaced epoch plus Skew, and then the expires of the descriptor now in service is remembered | rotateIfDue | C6 holds under a set-back. With correct clocks the release by the wall clock gives now >= R1 + ttl + Skew >= the expires of the replaced epoch + Skew, the floor lies below now, and nothing changes. The moments of key release and rotation are untouched |
+
+The expires of the replaced epoch is remembered only in the attempt whose rotation succeeded: a
+rotation that fails and is retried every second moves neither it nor the floor. Otherwise the
+attempt that succeeds would floor published(e+1) at expires(e) + Skew, up to ttl ahead of the node's
+clock, and peers more than Skew behind would refuse the live bundle (ErrDescTime). The descriptor in
+service at a rotation is the latest signed one; it names the current epoch, or an older one when
+every signing since the previous rotation failed, and the floor then bounds every older epoch as C6
+needs, since no descriptor of the skipped epoch exists.
+
+What a set-back costs, and what of it the clamps add. After a set-back by s the node's own
+/descriptors answers 503 until its clock reaches its last published again, and the re-signing
+timer, which measures the age from published, fires s later; both happen today without clamp 1,
+since the descriptor signed before the set-back already carries that published. Clamp 1 adds only
+this: a rotation that comes by running time while the wall clock is behind signs published =
+max(the previous published, the floor) instead of the wall time, so the 503 lasts until the clock
+reaches that value instead of ending at the rotation. Peers drop the node from their mirrors when s
+exceeds about ttl/2 minus the mirror margin minus the timer period (6 min 54 s on the testbed,
+4 min 54 s at ttl 16 min), from expires minus the mirror margin of the held bundle until the late
+re-signing reaches them; meanwhile they ask it every 5 s and refuse nothing. /descriptor keeps
+answering throughout.
+
+| Case | C0 C1 C2 | C3 C4 | C5 | C6 | C7 |
+|---|---|---|---|---|---|
+| re-signing by the timer | same | same key, same epoch | later now | n/a | ttl |
+| rotation | same | new key, epoch + 1 | same or later second | floor | ttl |
+| grace period, the replaced key still opening | the descriptors of e keep their fields | | | | |
+| certificate truncation | same | same | n/a | expires only smaller, and e+2 is never signed under a cut e: its published would be at or past not_after, and Refresh refuses | exempt |
+| failed rotation, retried every second | same | unchanged | later only | later only; the expires of the replaced epoch is untouched until the attempt that succeeds | ttl |
+| host sleep | same | release, then one rotation on waking, by the wall clock | the wall clock advanced | wall clock >= R1 + grace period | ttl |
+| wall clock set forwards | same | the moments come early by the wall clock | published grows | expires(e) <= R1 + ttl, the wall clock at the rotation to e+2 >= R1 + ttl + Skew | ttl |
+| wall clock set back, any amount | same | same | clamp 1 | clamp 2 | lifetime from published |
+| clock skew between nodes up to Skew | the fields are the signer's own clock; the rules compare the fields of one signer | | | | |
+| restart and re-enrollment | a new identity, a new anchor: not the same node | | | | |
+| -onion-rotate 0 | same | epoch 0, onion == link, forever | one epoch | one epoch | ttl |
+| -auth=false | no identity, no statements, the check is off | | | | |
+
+What is checked and how often:
+
+| Party | Fetches | From | When | Limits |
+|---|---|---|---|---|
+| node | GET /descriptor, the peer's own bundle | every roster peer | when the entry is missing or due, as before | 5 s, 16 KiB; the bundle is also a statement fed to the peer's record under the admission rule; one not newer than the held entry is not taken |
+| node | GET /descriptors/peer, the peer's mirror, the same bytes as /descriptors | k = min(4, roster peers not refused at the start of the pass), drawn uniformly without replacement (client.Choose over crypto/rand); when no such peer is left the pass ends before the draw; a drawn peer refused during the pass, by a proof read earlier in it, is skipped when its turn comes | once per -consistency-every (1 min), inside the keepPeers loop after the refresh of the entries; the first pass one period after the roster | 5 s, 256 KiB, no redirects, strict parsing, one attempt |
+| client | GET /descriptors, the mirror of its entry | the entry only | at start and at every rebuild of a -peer client | as before; items may be proofs |
+
+The node draws whom to ask, so the request itself says nothing about its records. Refused peers
+are not asked. No request a node receives triggers a fetch. The refresh of the entries runs before
+the pass, peer by peer with a 5 s timeout each, so a due peer that stalls delays the pass by 5 s.
+
+The record of statements. Per roster peer X the cache keeps, besides the entry it kept before (the
+bundle, relay.Peer, from, due, expires, final), a record of statements (internal/verify Record)
+and, after a refusal, the inconsistency itself:
+
+| State | Content | Bound |
+|---|---|---|
+| record of statements | the identity and certificate hash of the first statement; the link key and its first bundle; per epoch seen the onion key and up to three bundles: the one with the smallest published, the one with the largest published and the one with the largest expires | an epoch is forgotten once its largest expires + Skew + 8 x -consistency-every has passed: a descriptor expired for every clock opens nothing, and 8 passes let a proof against it reach every node at 58 nodes. The bound MaxEpochs = 8 is a memory guard: a ninth epoch is compared first, then the smallest epoch other than that of the held entry is dropped. Under the admission rule and the default period at most four pairwise consistent epochs are held at once (e+4 would have published >= expires(e+2) + Skew >= expires(e) + 16 min + Skew, above now + Skew while e is not forgotten), so the guard is reached only with a period above about 5 min. At most 25 bundles, about 15 KiB per peer on c25519; an honest peer holds 1 or 2 epochs |
+| refusal | pki.Conflict: the rule and the canonical proof | one per peer, until the process ends: the identity cannot change under this anchor without a restart of everything |
+
+Statements enter the record from three places: the direct fetch of X's /descriptor, X's item in any
+mirror read in a pass (X's own mirror included), and both bundles of a proof item about X. Every
+statement passes pki.VerifyStatement under the roster's anchor at X's roster address; what fails
+gives a log class and nothing else.
+
+The admission rule: a bundle from a mirror or from a direct fetch enters the record only when its
+published <= now + Skew on the reader's clock, the lower bound pki.Verify applies to live bundles;
+one published further ahead is logged under the existing class `descriptor outside its validity`
+and not recorded. Without this a node could feed each reader eight pairwise consistent statements of
+future epochs, push the live epoch out of the record and then serve two keys of the live epoch to
+different readers unproven. Both bundles of a proof that VerifyConflict accepted enter
+unconditionally: the inconsistency is already found; the bundles of a proof that holds no
+contradiction are two ordinary bundles under the same rule. Record.Take compares an admitted
+statement with every held bundle (at most 25 comparisons) and returns the first conflict.
+
+Entry choice and adoption:
+
+- The entry for X is the newest live statement: newer means greater by the pair (epoch, published)
+  lexicographically, live means pki.Verify passes now. A statement not newer than the held entry is
+  not taken, from a direct fetch or from a mirror; the peer stays due and is asked again after the
+  pause, exactly as a re-fetched unchanged bundle is today.
+- A newer statement displaces the held entry under the existing mirror rule: not while the held one
+  is in the mirror and the new one cannot join it yet (its published is ahead of this node's clock).
+  due and expires come from the new one, so a direct fetch of X comes later, never sooner:
+  descriptor_requests does not grow because of adoption.
+- A node adopts into an empty slot as well: a peer with no entry (one that never answered, or whose
+  fetch failed) gets the live, mirrorable statement a mirror carries. The direct fetch still runs
+  while the peer is missing or due, so startup on a testbed where every peer answers is unchanged.
+- Adopting is safe: the bundle is X's own signature, verified here; the link key is the same by C2,
+  so relay.Peer for X does not change; X holds the replaced onion key for the grace period, so a
+  client that took the older bundle still builds its circuit.
+- Adoption is also what shortens the legitimate difference between honest mirrors. Today a mirror
+  that fetched e just before X rotated keeps e until it is due, ttl/2 later, and if X then fails to
+  answer, until expires minus the mirror margin: up to 17 min 54 s on the testbed. With adoption the
+  difference lasts at most W after the first honest mirror has listed the newer epoch.
+
+The window W = -consistency-every + Skew + k x the fetch timeout + 1 s, counted from the first
+second any honest mirror lists the newer statement, plus one fetch timeout per due peer that stalls
+the direct request before the pass. On the testbed 60 + 120 + 4 x 5 + 1 = 201 s with honest peers,
+206 s with one stalling peer. Skew in W is the lag of the adopting node's clock behind the
+signer's that pki.Verify allows: a statement joins a mirror once the adopter's clock reaches its
+published time, so a larger lag widens the window by the difference (the cmd/relay test with
+clocks 238 s apart bounds it per pair). Before the first honest mirror lists the newer epoch all
+honest mirrors agree on the older one: no peer fetches a node before its entry is due, half the
+lifetime after published, so the newer epoch can take minutes to reach the first mirror, and that
+is no window.
+
+What happens on detection:
+
+| Effect | Where | Detail |
+|---|---|---|
+| X leaves the cache | peerCache.refuse | the entry is deleted, the refusal is kept; the wait skips refused peers, since an empty entry would otherwise return the 5 s pause forever |
+| no extension to X | relay.Config.Peers does not return X | relay counts RefusedExtend and refuses without dialling, as for an address outside the roster; the relay package does not change |
+| X leaves the mirror, the proof enters | publish | the item becomes `{"addr":...,"proof":[lo,hi]}`; the mirror is re-encoded at once; until is computed from bundles only |
+| X is not fetched again | the refresh of the entries and the draw skip refused peers | nothing X serves would be taken |
+| one log line | `peer <roster addr>: refused: <rule text>` | one of seven fixed texts; never a byte X sent |
+| counters | peers_refused (the current number), peer_mirror_requests (GET /descriptors/peer answered) | in /stats and in the counters line; peers does not count a refused peer |
+| how long | until the process ends | the identity cannot change under this anchor without a restart of everything |
+
+A node that reads a proof in a peer's mirror verifies both bundles itself (pki.VerifyConflict) and
+feeds them into X's record; the conflict comes out of the record as if the node had fetched both, so
+what it then publishes is a proof it verified, not one it copied. A proof item whose bundles do not
+conflict or do not verify is logged once as `peer <addr>: mirror: not a proof of inconsistency` and
+counts as X not served by that mirror; two bundles that verify still go into the record under the
+admission rule. An item about the reader's own address is ignored.
+
+Propagation and convergence:
+
+| Question | 5 nodes (testbed) | 58 nodes |
+|---|---|---|
+| a holder of a divergent statement detects it | within one pass: each node reads all 4 others | a holder reads 4 of 57 per pass; with the other statement held by m of 57 a pass misses with probability about (1 - m/57)^4, 0.07 for an even split, so within 2 passes with probability 0.99 |
+| every honest node holds the proof | one more pass | each of the 57 uninformed nodes draws 4 of its 57 peers without replacement: the expected uninformed share is about 0.93, 0.64, 0.08, 0.00 after the passes following detection (hypergeometric, 1, 5, 22, 53 informed), so about 4 passes, 5 as a rounded-up bound |
+| every honest mirror holds the newest epoch of an honest node | W = 201 s | about 4 passes plus Skew |
+| what a client sees | the proof in its entry's mirror, verified under its own -ca; the node refused and counted apart from -missing | the same |
+
+The client verifies the evidence itself: two signatures under the anchor and a comparison of two
+parsed descriptors. It fetches no second mirror and keeps no state across processes; a -peer client
+keeps no record across rebuilds either: an honest entry that runs the check would have refused X
+before the client could see two statements of X through it, and an entry without the check is the
+mixed deployment the switch exists for.
+
+Cost. A bundle is about 600 bytes on c25519 and 720 on GOST; a mirror of 5 nodes about 3 KiB, of 58
+about 35 KiB (41 KiB on GOST).
+
+| Nodes | Requests per minute, network | Bytes per minute (c25519 / GOST) | Per node per minute | Today's /descriptor traffic |
+|---|---|---|---|---|
+| 5 | 5 x 4 = 20 | 60 KiB / 72 KiB | 4 requests, 12 KiB | 5 x 4 = 20 requests per 10 min at ttl 20 min |
+| 58 | 58 x 4 = 232 | 7.9 MiB / 9.3 MiB (about 135 KB/s) | 4 requests, 140 KiB | 58 x 57 = 3306 requests and about 2 MB per 10 min: each node fetches each peer every ttl/2, plus one request per 5 s per peer that is due and has not re-signed yet |
+
+A proof is two bundles where one was: 58 proofs make a 70 KiB mirror (82 KiB on GOST), within the
+256 KiB a reader takes. At 58 nodes `-consistency-every 5m` divides the traffic by five and makes W
+about 7 min.
+
+The switch:
+
+| Flag | Where | Default | Meaning |
+|---|---|---|---|
+| -consistency | cmd/relay | true | read the mirrors of roster peers, keep a record of every peer's statements, refuse a peer whose descriptors contradict each other, carry the proof in /descriptors, apply pki.MinDescriptorLife to the peers' descriptors. With -auth=false one line `WARNING: -consistency needs -auth, the check is off`, and the check is off |
+| -consistency-every | cmd/relay | 1m | the pass period, 30 s to 1 h (the lower bound is above k x the timeout = 20 s, so a pass never outlasts its period); refused with -consistency=false only when set explicitly |
+| -consistency | cmd/client | true | verify the proofs in the entry's mirror, refuse the nodes they name, counted apart from -missing; apply pki.MinDescriptorLife. false: a proof item is a node the entry left out, within -missing; no lower bound on the lifetime |
+
+The startup line of a node carries consistency=<value>. The baseline (nodes with
+-consistency=false): no pass, no records, no proofs, mirrors as before, a node with two keys stays a
+peer everywhere; /descriptors/peer still answers. The testbed manifests (deploy/base/relay.yaml)
+set -consistency=true explicitly, as they set -onion-rotate. The lab harness changes nothing:
+-auth=false, no rosters.
+
+What is left to a node that breaks the rules is collected in LIMITATIONS: at most two onion keys
+accepted by one verifier at any instant, and three across clients whose clocks differ, around an
+epoch boundary; a two-key window of at most W and at most twice per 16 min, on the testbed at most
+402 s of every 960 s; one bit about the entry per circuit set up inside the window, which a mailbox
+can collect across the rebuilds of one -peer client; a refused node shrinks every client's list by
+one.
+
+scripts/e2e.sh (the bullet on the mirror above) tells the traffic of peers and of clients apart by
+path: clients fetch GET /descriptors (mirror_requests), nodes fetch GET /descriptors/peer
+(peer_mirror_requests), and adoption leaves descriptor_requests alone (it can only postpone a direct
+fetch), so both checks it made before keep their meaning. Beyond them, after the settle loop the
+script reads peer_mirror_requests and requires peers_refused to be 0 at every relay (otherwise
+`a relay refuses a roster peer before the clients started`), and at the final reading of the
+counters it requires peer_mirror_requests to have grown at every relay (otherwise `the consistency
+check made no request at <relays>`) and peers_refused to still be 0, and prints `consistency: every
+relay cross-read its peers, none refused`. The negative case, a two-key node on the kind testbed, is
+not an e2e step: it needs a relay that signs two keys, which lives in the Go tests and not in the
+testbed's binary.
+
 ### Key lifetime and revocation
 
 | Key | Created by | Held in | Lives |
@@ -1293,7 +1585,7 @@ finds by the label of their deployments (app=relay).
 | Link key | cmd/relay at start, GenerateEphemeral | secmem | until the process ends; with -onion-rotate 0 it is the onion key as well |
 | Onion key | cmd/relay at start and at every rotation, GenerateEphemeral | secmem; with memory locking on, a key that is not locked is not taken | with -onion-rotate one period as the published key and the grace period after it, 1 h 22 min on the testbed; a rotation that fails keeps the published key until one succeeds; released at the end of the grace period and when the process ends |
 | Certificate, descriptor | CA, node | node heap, public; the bundle is kept encoded | certificate until not_after or the node restarts; descriptor 1 h by default (-descriptor-ttl), 20 min on the testbed |
-| Roster, peer descriptors | enroll, the other nodes | node heap, public | the roster until the node restarts; a peer descriptor until its expires |
+| Roster, peer descriptors | enroll, the other nodes | node heap, public | the roster until the node restarts; a peer descriptor until its expires; a peer's record of statements and its refusal by a proof of inconsistency until the node restarts |
 
 - A node restart gives a new signing key, no certificate and no roster. The node is ready
   (readiness on /healthz), but /descriptor and /descriptors answer 503, it extends no circuit,
@@ -1304,6 +1596,9 @@ finds by the label of their deployments (app=relay).
   make stop or scripts/e2e.sh on certified nodes stops with a restart hint. Certificates of the
   previous CA die when the nodes restart with new identities and the clients with the new anchor:
   revocation by forgetting. There is no other revocation.
+- A peer refused by a proof of inconsistency (section "Descriptor consistency") stays refused until
+  the process ends: it can change its identity under this anchor only by a restart, and the restart
+  of one node needs a new issuance for all. The refusal is lifted by the same forgetting.
 - The certificate lifetime comes from -cert-ttl: 72 h on the testbed, 1 h in CI.
 - The descriptor is signed when the certificate is installed, at every rotation of the onion key
   and otherwise only by the timer; a /descriptor request serves the ready bundle and never
@@ -1326,7 +1621,7 @@ those come from the nodes' agreement keys, which the CA never sees.
 | Source | Data |
 |---|---|
 | client | on the testbed the -peer clients: the lines of subsection "The -peer client", that is the round-trip time of every own message through the mailbox, every minute the state and the counters of the conversation, ends and rebuilds of the circuit by class only, the hashes of the own and of the pinned card, with no path, address, text or key. A client without -peer (cmd/client), per message: the size of the reply and the round-trip time, or a line when no reply comes within 5 s; at the end of the circuit the line `circuit closed`, or `circuit closed: client: reply refused: <check>` with the class of the reply or frame the client refused, naming neither a node nor a cell number, or `send: <class>` with the class of a failed send (with -fixed-chain the error itself, which can name the entry address and the local port); at start the name, fingerprint and certificate validity of every listed node whose bundle it verified, in the listed order (with -fixed-chain the descriptor validity as well), how many of the listed nodes were verified, and the number of hops; with a drawn chain never which nodes form it. In the lab harness, per run: the round-trip time of every message whose echo came back, matched by flow and sequence number, the number of messages a constant-rate schedule dropped, the number left unanswered, the number of clients that refused a reply or a link frame, and per flow whether and when its circuit closed; in the block 7 set also, for every data cell, whether it carries a message, from a wrapper of the client's provider (EXPERIMENT, block 7), a labelling the relays and the observer never see |
-| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests), the epoch of the onion key and the failed attempts to rotate it (onion_epoch, onion_rotate_failed). With -exit mailbox also the mailbox counters (section "End-to-end layer and mailbox"), on loopback on request only, not on stdout. No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, on every rotation of the onion key a line with the new epoch and no key material, on a failed rotation one line per kind of cause (pages not mapped, pages not locked, key not locked, key refused by the ring, other), a fixed class with no size and no text of the underlying error, with no new line while consecutive failures share the class and a line again for the first failure after a success, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified |
+| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests), mirror requests answered to peers and peers refused by a proof of inconsistency (peer_mirror_requests, peers_refused), the epoch of the onion key and the failed attempts to rotate it (onion_epoch, onion_rotate_failed). With -exit mailbox also the mailbox counters (section "End-to-end layer and mailbox"), on loopback on request only, not on stdout. No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, on every rotation of the onion key a line with the new epoch and no key material, on a failed rotation one line per kind of cause (pages not mapped, pages not locked, key not locked, key refused by the ring, other), a fixed class with no size and no text of the underlying error, with no new line while consecutive failures share the class and a line again for the first failure after a success, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified, the classes `descriptor shorter than the least lifetime` and `not a proof of inconsistency` among them; with -consistency also one line `peer <addr>: refused: <rule>` with one of the seven rule texts when a peer is refused by a proof of inconsistency, one line per kind of cause `peer <addr>: mirror: <class>` when a peer's mirror cannot be fetched or parsed or its proof does not verify, and at start with -auth=false one line `WARNING: -consistency needs -auth, the check is off` |
 | network | in the lab harness only, inside its process and without a packet capture: the moment every frame crosses the client-entry link and the last link between nodes, the one into the exit, in both directions. There is no link past the exit to observe yet ([#47](https://github.com/jimichi-org/jimichi/issues/47)) |
 | memory | planned: dumps of the relay process in the key extraction scenario ([#24](https://github.com/jimichi-org/jimichi/issues/24)); nothing takes a dump yet |
 
@@ -1350,11 +1645,11 @@ scripts/stats.sh prints the counters to the terminal.
 | crypto/providertest | contract conformance tests | crypto |
 | wire | cell format, layers, counter order | crypto, crypto/secmem |
 | link | link encryption between neighbours, frames of one size | crypto, crypto/secmem, wire |
-| pki | certificate, descriptor and request of a node, roster and mirror formats, issuing and checking | crypto, crypto/secmem, wire |
+| pki | certificate, descriptor and request of a node, roster and mirror formats, issuing and checking, descriptor consistency rules and the proof of inconsistency | crypto, crypto/secmem, wire |
 | internal/fetch | reading bundles and the mirror from an info port | pki |
-| internal/verify | node bundle checks over pki: the client reads every bundle of its entry's mirror on its own (one that fails counts as not served), applies the mirror rule and draws the other hops among those that pass; a node takes a peer's link key and identity only from a verified bundle. One implementation for cmd/client and cmd/relay, against which a lab test checks the chain sampler | client, crypto, pki, relay |
+| internal/verify | node bundle checks over pki: the client reads every bundle of its entry's mirror on its own (one that fails counts as not served), applies the mirror rule and draws the other hops among those that pass; a node takes a peer's link key and identity only from a verified bundle; the record of a node's statements, mirrors carrying proofs, refused nodes counted apart from -missing. One implementation for cmd/client and cmd/relay, against which a lab test checks the chain sampler | client, crypto, pki, relay |
 | relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
-| client | choice of the chain, send, receive, cover traffic | crypto, crypto/secmem, link, wire |
+| client | choice of the chain, send, receive, cover traffic; the mirror rule with refused nodes (JudgeMirrorAmong) | crypto, crypto/secmem, link, wire |
 | noise | the Noise-shaped handshake machine over CryptoProvider, only the KK pattern today | crypto, crypto/secmem |
 | e2e | the end-to-end layer: contact card, identity, KK session, hash ratchet, session recovery | crypto, crypto/secmem, noise, wire, pki |
 | mailbox | queue store at the exit, request and reply format | crypto |
