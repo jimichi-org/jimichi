@@ -25,6 +25,12 @@ type Identity struct {
 	link    []byte
 	onion   []byte
 	epoch   uint32
+	// the published time never decreases within a process and never falls
+	// below the floor: the consistency rules a peer applies to two descriptors
+	// hold then under a wall clock set back, and with correct clocks neither
+	// value is ever above now
+	lastPublished int64
+	floor         int64
 
 	// kept encoded, so serving it never waits for a signature
 	bundle atomic.Pointer[[]byte]
@@ -82,7 +88,7 @@ func (id *Identity) Install(raw []byte, now time.Time) error {
 	case c.Name != id.name || c.Addr != id.addr:
 		return ErrRoster
 	}
-	if err := certWindow(c, now, Skew); err != nil {
+	if err := certWindow(c, now, Skew, true); err != nil {
 		return err
 	}
 	id.mu.Lock()
@@ -99,6 +105,16 @@ func (id *Identity) SetKeys(link, onion []byte, epoch uint32) {
 	id.mu.Lock()
 	defer id.mu.Unlock()
 	id.link, id.onion, id.epoch = bytes.Clone(link), bytes.Clone(onion), epoch
+}
+
+// SetFloor keeps every descriptor signed from now on from being published
+// before the given unix second: a node sets it at a rotation to the expiry of
+// the epoch before the replaced one plus Skew, which the rules require of the
+// new epoch and which a wall clock set back would otherwise miss
+func (id *Identity) SetFloor(unix int64) {
+	id.mu.Lock()
+	defer id.mu.Unlock()
+	id.floor = unix
 }
 
 // the descriptor never outlives the certificate; once the certificate has
@@ -122,12 +138,12 @@ func (id *Identity) Refresh(now time.Time, ttl time.Duration) error {
 	if len(id.link) != size || len(id.onion) != size {
 		return ErrKeySize
 	}
-	published := now.Unix()
+	published := max(now.Unix(), id.lastPublished, id.floor)
 	if published >= id.cert.NotAfter {
 		id.bundle.Store(nil)
 		return ErrCertTime
 	}
-	expires := min(now.Add(ttl).Unix(), id.cert.NotAfter)
+	expires := min(published+int64(ttl/time.Second), id.cert.NotAfter)
 	if expires <= published {
 		return ErrDescTime
 	}
@@ -149,6 +165,7 @@ func (id *Identity) Refresh(now time.Time, ttl time.Duration) error {
 	}
 	b := Bundle{V: Version, Suite: id.p.Suite().String(), Cert: id.certRaw, Descriptor: d.Marshal()}.Marshal()
 	id.bundle.Store(&b)
+	id.lastPublished = published
 	return nil
 }
 

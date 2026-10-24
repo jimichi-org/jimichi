@@ -217,7 +217,9 @@ func TestRefreshBoundsTheDescriptor(t *testing.T) {
 			{"within a second", t0.Add(700 * time.Millisecond), time.Hour, t0.Add(time.Hour)},
 			{"in the last second", until.Add(-500 * time.Millisecond), time.Hour, until},
 		} {
-			b := n.bundle(t, c.now, c.ttl)
+			// a fresh node per case: within one identity published never goes back
+			fresh := e.node(t, "relay-1")
+			b := fresh.bundle(t, c.now, c.ttl)
 			parsed, err := ParseBundle(b)
 			if err != nil {
 				t.Fatal(err)
