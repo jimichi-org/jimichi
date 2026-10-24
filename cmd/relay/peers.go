@@ -317,11 +317,13 @@ func (c *peerCache) refresh() bool {
 // is simply not newer
 func (c *peerCache) take(addr string, bundle []byte, now time.Time) string {
 	c.mu.Lock()
-	same := c.check && c.entries[addr] != nil && bytes.Equal(c.entries[addr].bundle, bundle)
+	e := c.entries[addr]
+	same := c.check && e != nil && now.Unix() < e.expires && bytes.Equal(e.bundle, bundle)
 	c.mu.Unlock()
-	// the bundle held: nothing to verify or compare, the peer stays due. An
-	// unsigned bundle carries no times, so the baseline takes it again to set
-	// the next minute
+	// the bundle held and still live: nothing to verify or compare, the peer
+	// stays due. One that ran out goes through the check, which names the
+	// class and sets the pause; an unsigned bundle carries no times, so the
+	// baseline takes it again to set the next minute
 	if same {
 		return ""
 	}
@@ -353,7 +355,8 @@ func (c *peerCache) take(addr string, bundle []byte, now time.Time) string {
 	if _, refused := c.refused[addr]; refused {
 		return ""
 	}
-	e := c.entries[addr]
+	// read again: the refresh may have replaced the entry meanwhile
+	e = c.entries[addr]
 	if c.check && e != nil && e.stmt != nil && !verify.Newer(e.stmt, stmt) {
 		// the peer stays due and is asked again after the retry pause
 		return ""

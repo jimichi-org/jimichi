@@ -107,8 +107,9 @@ func VerifyConflict(p jcrypto.CryptoProvider, pol Policy, addr string, pr Proof)
 	return c, err
 }
 
-// VerifyProof is VerifyConflict that also hands back the two statements, so a
-// reader that records them does not verify the pair twice
+// VerifyProof is VerifyConflict that also hands back the two statements, in
+// the order of the canonical proof it returns, so a reader that records them
+// does not verify the pair twice
 func VerifyProof(p jcrypto.CryptoProvider, pol Policy, addr string, pr Proof) (*Conflict, *Verified, *Verified, error) {
 	a, err := VerifyStatement(p, pol, addr, pr.A)
 	if err != nil {
@@ -125,6 +126,9 @@ func VerifyProof(p jcrypto.CryptoProvider, pol Policy, addr string, pr Proof) (*
 	canonical, err := NewProof(pr.A, pr.B)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	if !bytes.Equal(canonical.A, pr.A) {
+		a, b = b, a
 	}
 	return &Conflict{Addr: addr, Rule: rule, Proof: *canonical}, a, b, nil
 }

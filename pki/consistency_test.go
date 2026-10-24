@@ -148,6 +148,18 @@ func TestVerifyConflictOnBothSuites(t *testing.T) {
 		if _, err := NewProof(e0, e0); !errors.Is(err, ErrNoConflict) {
 			t.Errorf("NewProof of one bundle twice: %v, want %v", err, ErrNoConflict)
 		}
+		// the statements come back in the order of the canonical proof
+		second := at(0, k2, k, t0.Add(time.Second), t0.Add(h))
+		for _, order := range [][2][]byte{{e0, second}, {second, e0}} {
+			c, a, b, err := VerifyProof(p, e.pol, n.addr, Proof{A: order[0], B: order[1]})
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, _ := VerifyStatement(p, e.pol, n.addr, c.Proof.A)
+			if !bytes.Equal(a.OnionPub, first.OnionPub) || bytes.Equal(a.OnionPub, b.OnionPub) {
+				t.Fatal("VerifyProof does not hand the statements back in the order of its proof")
+			}
+		}
 		pr, err := NewProof(e1, e0)
 		if err != nil || bytes.Compare(pr.A, pr.B) >= 0 {
 			t.Fatalf("NewProof = %v, or the smaller bundle is not first", err)

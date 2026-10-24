@@ -832,8 +832,9 @@ func TestKeepPeersRunsThePassOnItsTimer(t *testing.T) {
 }
 
 // passes start one period apart however long the fetches of one take: the
-// pass is stamped before it runs, so with a period of 300 ms and mirrors that
-// take 200 ms to answer the starts come 300 ms apart, not 500
+// pass is stamped before it runs, so with a period of 300 ms and the two
+// mirrors of a three-node roster taking 100 ms each the starts come 300 ms
+// apart, not 500; a pass that outlasts its period would start the next at once
 func TestPassesStartOnePeriodApart(t *testing.T) {
 	names := []string{"relay-1", "relay-2", "relay-3"}
 	c := newCluster(t, jcrypto.SuiteC25519, names...)
@@ -844,7 +845,7 @@ func TestPassesStartOnePeriodApart(t *testing.T) {
 	var starts []time.Time
 	inner := c.fetchMirror
 	n1.n.fetchMirror = func(addr string) ([]pki.MirrorEntry, error) {
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		return inner(addr)
 	}
 	n1.n.drawPeers = func(n, k int) ([]int, error) {
