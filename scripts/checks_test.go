@@ -127,7 +127,7 @@ func standStats(change func(i int, c map[string]int)) string {
 	var b strings.Builder
 	for i := range 5 {
 		c := map[string]int{
-			"peers": 4, "descriptor_requests": 10, "mirror_requests": 3,
+			"peers": 4, "descriptor_requests": 10, "mirror_requests": 3, "peer_mirror_requests": 7, "peers_refused": 0,
 			"mailbox_requests": 0, "mailbox_puts": 0, "mailbox_put_full": 0, "mailbox_put_refused": 0,
 			"mailbox_hits": 0, "mailbox_queues": 0,
 		}
@@ -195,6 +195,51 @@ func TestMailboxChecksReadEveryRelay(t *testing.T) {
 				`check_mailboxes "$STATS_1" || exit 1
 check_mailbox_not_entry "$STATS_0" "$STATS_1" || exit 1`)
 			if status != c.status || strings.TrimSpace(stderr) != c.why {
+				t.Errorf("status %d, stderr %q; want %d and %q", status, stderr, c.status, c.why)
+			}
+		})
+	}
+}
+
+// no relay refuses a peer at either reading, and every relay read the
+// mirrors of its peers between the readings
+func TestConsistencyChecksReadTheCounters(t *testing.T) {
+	good := standStats(nil)
+	later := standStats(func(i int, c map[string]int) { c["peer_mirror_requests"] = 7 + i + 1 })
+	for _, c := range []struct {
+		name   string
+		before string
+		after  string
+		status int
+		why    string
+	}{
+		{"every relay crossed, none refused", good, later, 0, ""},
+		{"a relay that refuses a peer", good, standStats(func(i int, c map[string]int) {
+			c["peer_mirror_requests"] = 9
+			if i == 1 {
+				c["peers_refused"] = 1
+			}
+		}), 1, "a relay refuses a roster peer while the clients ran: peers_refused per relay 0 1 0 0 0"},
+		{"a relay that made no request", good, standStats(func(i int, c map[string]int) {
+			if i != 2 {
+				c["peer_mirror_requests"] = 9
+			}
+		}), 1, "the consistency check made no request at relay-3"},
+		{"a relay without the counter", good, standStats(func(i int, c map[string]int) {
+			c["peer_mirror_requests"] = 9
+			if i == 3 {
+				delete(c, "peers_refused")
+			}
+		}), 1, "the relays show no peers_refused counter"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			status, _, stderr, _, _ := runChecks(t, []string{"STATS_0=" + c.before, "STATS_1=" + c.after},
+				`cross_0=$(column "$STATS_0" peer_mirror_requests)
+cross_1=$(column "$STATS_1" peer_mirror_requests)
+check_every_relay_crossed "$cross_0" "$cross_1" || exit 1
+check_none_refused "$STATS_1" "while the clients ran" || exit 1`)
+			if status != c.status || !strings.HasPrefix(strings.TrimSpace(stderr), c.why) {
 				t.Errorf("status %d, stderr %q; want %d and %q", status, stderr, c.status, c.why)
 			}
 		})
@@ -292,9 +337,12 @@ func TestE2ERunsEveryCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	order := []string{
+		`check_none_refused "$stats" "before the clients started" || exit 1`,
 		`check_mailboxes "$stats" || exit 1`,
 		`check_mailbox_not_entry "$stats_0" "$stats" || exit 1`,
 		`put_share || exit 1`,
+		`check_every_relay_crossed "$cross_0" "$cross_2" || exit 1`,
+		`check_none_refused "$stats" "while the clients ran" || exit 1`,
 		`refuse_other_cards || exit 1`,
 		`JIMICHI="$jimichi" bash scripts/introduce.sh || exit 1`,
 		`await_round_trip || exit 1`,
