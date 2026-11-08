@@ -15,6 +15,7 @@ import (
 	"github.com/pedroalbanese/gogost/mgm"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/internal/noisekdf"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
@@ -32,13 +33,48 @@ var errUKMSize = errors.New("gost: ukm must be 8 bytes")
 // protocols; its cofactor of 4 is cleared inside VKO
 var curve = sync.OnceValue(gost3410.CurveIdtc26gost341012256paramSetA)
 
-type Provider struct{}
+type Provider struct {
+	noiseAlloc func(int) (*secmem.Buffer, error)
+}
 
 func New() *Provider { return &Provider{} }
 
 func (p *Provider) Suite() jcrypto.Suite { return jcrypto.SuiteGOST }
 
 func (p *Provider) KeySize() int { return keySize }
+
+func (p *Provider) HandshakeInfo() jcrypto.HandshakeInfo {
+	return jcrypto.HandshakeInfo{DHName: "JimichiVKO1", CipherName: "JimichiKuznyechikMGM", HashName: "Streebog256",
+		PublicKeySize: 64, DHSize: 32, HashSize: 32, KeySize: keySize, NonceSize: nonceSize, TagSize: tagSize}
+}
+
+func (p *Provider) noiseBuffer(size int) (*secmem.Buffer, error) {
+	if p.noiseAlloc != nil {
+		return p.noiseAlloc(size)
+	}
+	return secmem.New(size)
+}
+
+func (p *Provider) NoiseDH(priv *secmem.Buffer, peerPub []byte) (*secmem.Buffer, error) {
+	if priv == nil || len(priv.Bytes()) != curve().PointSize() {
+		return nil, jcrypto.ErrBadKeySize
+	}
+	kek, err := vko(curve(), priv.Bytes(), peerPub, []byte{1, 0, 0, 0, 0, 0, 0, 0})
+	if err != nil {
+		return nil, err
+	}
+	defer secmem.Zero(kek[:cap(kek)])
+	out, err := p.noiseBuffer(keySize)
+	if err != nil {
+		return nil, err
+	}
+	copy(out.Bytes(), kek)
+	return out, nil
+}
+
+func (p *Provider) NoiseKDF2(ck, input *secmem.Buffer) (*secmem.Buffer, *secmem.Buffer, error) {
+	return noisekdf.Pair(gost34112012256.New, ck, input, p.noiseBuffer)
+}
 
 func (p *Provider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	return generate(curve())

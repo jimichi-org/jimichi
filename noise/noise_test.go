@@ -16,11 +16,11 @@ func TestKKRoundTrip(t *testing.T) {
 		ini, resp := kkPair(t, p, prologue)
 		first := mustWrite(t, ini, []byte("one"))
 		if got := mustRead(t, resp, first); string(got) != "one" {
-			t.Fatalf("first payload %q", got)
+			t.Fatal("first payload mismatch")
 		}
 		second := mustWrite(t, resp, []byte("two"))
 		if got := mustRead(t, ini, second); string(got) != "two" {
-			t.Fatalf("second payload %q", got)
+			t.Fatal("second payload mismatch")
 		}
 		if !ini.Done() || !resp.Done() {
 			t.Fatal("handshake not done after two messages")
@@ -63,32 +63,28 @@ func TestEveryFlippedBitIsRefused(t *testing.T) {
 			for bit := 0; bit < 8*len(msg); bit++ {
 				bad := bytes.Clone(msg)
 				bad[bit/8] ^= 1 << (bit % 8)
-				if err := reader.MixHash([]byte{kind}); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := reader.ReadMessage(bad); err == nil {
+				if _, err := reader.ReadMessageBound([]byte{kind}, bad); err == nil {
 					t.Fatalf("message %d with bit %d flipped was read", kind, bit)
 				}
 			}
-			if err := reader.MixHash([]byte{kind}); err != nil {
+			if _, err := reader.ReadMessageBound([]byte{kind}, msg); err != nil {
 				t.Fatal(err)
 			}
-			mustRead(t, reader, msg)
 		}
 
-		if err := ini.MixHash([]byte{1}); err != nil {
+		first, err := ini.WriteMessageBound([]byte{1}, []byte("payload"))
+		if err != nil {
 			t.Fatal(err)
 		}
-		first := mustWrite(t, ini, []byte("payload"))
 		flip(t, resp, 1, first)
 		if _, err := resp.ReadMessage(first[:len(first)-1]); !errors.Is(err, noise.ErrState) {
 			t.Fatalf("a message read twice: %v", err)
 		}
 
-		if err := resp.MixHash([]byte{2}); err != nil {
+		second, err := resp.WriteMessageBound([]byte{2}, []byte("payload"))
+		if err != nil {
 			t.Fatal(err)
 		}
-		second := mustWrite(t, resp, []byte("payload"))
 		flip(t, ini, 2, second)
 		a, b := mustSplit(t, ini), mustSplit(t, resp)
 		if !bytes.Equal(a.sid, b.sid) || !bytes.Equal(a.i2r, b.i2r) {
@@ -169,7 +165,7 @@ func TestAcceptPayloadLeavesTheStateOnRefusal(t *testing.T) {
 		}
 		take = true
 		if got := mustRead(t, resp, msg); string(got) != "payload" {
-			t.Fatalf("payload %q", got)
+			t.Fatal("payload mismatch")
 		}
 		mustRead(t, ini, mustWrite(t, resp, nil))
 		if a, b := mustSplit(t, ini), mustSplit(t, resp); !bytes.Equal(a.sid, b.sid) {
@@ -178,22 +174,11 @@ func TestAcceptPayloadLeavesTheStateOnRefusal(t *testing.T) {
 	})
 }
 
-func TestPayloadNeedsAnAgreementFirst(t *testing.T) {
+func TestNoncanonicalPatternsAreRefused(t *testing.T) {
 	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
-		si, sr := staticKey(t, p), staticKey(t, p)
-		pt := noise.Pattern{
-			PreInitiator: []noise.Token{noise.TokenS},
-			PreResponder: []noise.Token{noise.TokenS},
-			Messages:     [][]noise.Token{{noise.TokenE}, {noise.TokenE, noise.TokenEE}},
-		}
-		hs, err := noise.New(noise.Config{Provider: p, Pattern: pt, Name: "test", Initiator: true,
-			Prologue: prologue, Local: si, RemoteStatic: sr.Public()})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer hs.Close()
-		if _, err := hs.WriteMessage(nil); !errors.Is(err, noise.ErrNoKey) {
-			t.Fatalf("WriteMessage before any DH: %v, want ErrNoKey", err)
+		pt := noise.Pattern{PreInitiator: []noise.Token{noise.TokenS}, PreResponder: []noise.Token{noise.TokenS}, Messages: [][]noise.Token{{noise.TokenE}, {noise.TokenE, noise.TokenEE}}}
+		if hs, err := noise.New(noise.Config{Provider: p, Pattern: pt}); hs != nil || !errors.Is(err, noise.ErrPattern) {
+			t.Fatalf("noncanonical pattern: %v", err)
 		}
 	})
 }

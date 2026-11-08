@@ -8,6 +8,8 @@
 set -euo pipefail
 
 . "$(dirname "$0")/lib.sh"
+. "$(dirname "$0")/deploy.sh"
+require_suite
 
 RESTART="${RESTART:-yes}"
 # client-a takes the local port base + 1, client-b base + 2
@@ -26,10 +28,6 @@ fi
 
 logs=$(mktemp -d)
 forwards=()
-stop_forwards() {
-  for pid in "${forwards[@]}"; do kill "$pid" 2>/dev/null || true; done
-  forwards=()
-}
 cleanup() {
   local status=$?
   stop_forwards
@@ -115,7 +113,7 @@ attempt() {
     log="$logs/${CLIENTS[$i]}.log"
     # the admin port listens on loopback inside the pod, so only a
     # port-forward through the kube API reaches it
-    kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod" "$port:$ADMIN_PORT" >"$log" 2>&1 &
+    kubectl_exec -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod" "$port:$ADMIN_PORT" >"$log" 2>&1 &
     forwards+=("$!")
     wait_forward "$!" "$log" "$port" || return 1
   done
@@ -128,6 +126,10 @@ attempt() {
     done
     if [ -z "$card" ]; then
       echo "${CLIENTS[$i]}: no card from its admin port" >&2
+      return 1
+    fi
+    if [[ "$card" != "$SUITE:"* ]]; then
+      echo "${CLIENTS[$i]}: card does not identify suite=$SUITE" >&2
       return 1
     fi
     got=$("$jimichi" card-hash "$card") || return 1

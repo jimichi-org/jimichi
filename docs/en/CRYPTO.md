@@ -27,8 +27,18 @@ Different nonce sizes and overheads are visible through the interface: wire hard
 ```go
 type Suite uint8
 
+type HandshakeInfo struct {
+	DHName, CipherName, HashName string
+	PublicKeySize, DHSize int
+	HashSize, KeySize int
+	NonceSize, TagSize int
+}
+
 type CryptoProvider interface {
 	Suite() Suite
+	HandshakeInfo() HandshakeInfo
+	NoiseDH(priv *secmem.Buffer, peerPub []byte) (*secmem.Buffer, error)
+	NoiseKDF2(ck, input *secmem.Buffer) (first, second *secmem.Buffer, err error)
 
 	GenerateEphemeral() (priv *secmem.Buffer, pub []byte, err error)
 	Agree(priv *secmem.Buffer, peerPub []byte, ctx Context) (*secmem.Buffer, error)
@@ -88,7 +98,8 @@ Decisions taken:
 - Agree, MixKey and DeriveKey take a Context: the hash of the exchange transcript, 32 bytes. It
   binds every secret and every key to the public keys of both sides, the parameters of the
   exchange, the suite and the scheme version. The provider refuses the zero Context and a context
-  of another suite, so no key can be derived without a transcript. The layout and the formulas
+  of another suite. These contextual operations require a transcript; NoiseDH and NoiseKDF2
+  implement the separate production profile below. The layout and the formulas
   are under "Key derivation".
 - The provider builds the KDF label from the scheme version, the suite and the purpose. A caller
   passes the purpose only and cannot supply a label string of its own.
@@ -186,7 +197,6 @@ A label holds no 0x00 byte and is at most 50 bytes long.
 | `cell` | 22 / 20 | wire, the hop key | 32 |
 | `setup/replay` | 30 / 28 | wire, the control cell replay tag | 16 |
 | `counter/fwd`, `counter/bwd` | 29 / 27 | wire, the counter offsets | 8 |
-| `link/i2r`, `link/r2i` | 26 / 24 | link, the frame keys | 32 |
 | `noise/key` | 27 / 25 | noise, the key of a handshake message | 32 |
 | `noise/split/i2r`, `noise/split/r2i` | 33 / 31 | noise, the direction keys after the handshake | 32 |
 | `e2e/step/key` | 30 / 28 | e2e, the record key | 32 |
@@ -241,38 +251,22 @@ Circuit setup, exchange `setup`, one context per hop:
 
 T is 120 bytes long on c25519 and 182 on GOST; with part 6, 154 and 248.
 
-Link, exchange `link`:
+The link uses the production constructor `noise.NewNoise`. Its single prologue is:
 
-| No. | Part | Bytes |
-|---|---|---|
-| 1 | version | 1 |
-| 2 | mode | 1: 0x00 anonymous, 0x01 authenticated |
-| 3 | initiator ephemeral key | as in the hello after the mode byte |
-| 4 | responder ephemeral key | as sent |
-| 5 | responder link key, in mode 0x01 only | the initiator takes it from the descriptor, the responder uses its published one |
-| 6 | responder identity key, in mode 0x01 only and when nodes are authenticated | the initiator takes it from the verified certificate, the responder uses its own |
+```text
+ASCII("jimichi/link/v1/<suite>/<nn|nk|kk>") || 00 || wire.Version:u8
+|| headerLength:u16be || header
+|| 01 || identityILength:u16be || identityI
+|| 02 || identityRLength:u16be || identityR
+```
 
-T in modes 0x00 and 0x01: 109 and 143 bytes on c25519, 171 and 237 on GOST; with part 6, 177
-and 303.
-
-Node identity:
-- The identity key is the public signing key of the node that its certificate certifies
-  (Verified.Identity). It is made at node start and lives as long as the process, so it stays the
-  same when the node is enrolled again, unlike the bytes of the certificate.
-- A node with -auth binds its identity key from the start: to every setup it opens and to every
-  authenticated link it accepts. Before its certificate it serves no descriptor and extends no
-  circuit, so nobody knows the keys to reach it by. The client takes the identity key of every
-  node of the chain from its verified certificate, a node takes the identity key of the next node
-  from that peer's descriptor in its cache.
-- Without node authentication (-auth=false) both sides bind the empty identity: part 6 is left
-  out and the transcript has one part fewer. The layout admits no empty part, and the number of
-  parts tells the two forms apart. A node with -auth and a client or neighbouring node without it
-  agree on no key: this is a configuration mismatch, and a setup or link handshake between them
-  fails.
-- A setup layer and an authenticated link open only at the node that holds the private half of
-  the key and binds the same identity.
-
-The exchanges of the end-to-end layer are listed under "End-to-end layer".
+The header starts with version 04. NN has no identities; NK has no initiator identity.
+Both endpoints must agree on each identity's presence and bytes. Key-only NK requires an empty
+responder identity on both sides; key-only KK requires both identities empty. No negotiation,
+omission or anonymous retry occurs. Protected command paths supply verified descriptor identities.
+Static keys enter as premessages, initiator first. The roster selector is transcript-bound but
+is not itself authentication. A first KK flight is replayable and forgeable after responder-static
+compromise; it is not fresh-initiator proof. `DHStatic` borrows the static owner until completion.
 
 ### Formulas
 
@@ -332,15 +326,19 @@ Setup: the client and the node build the same `ctx = NewContext(p, "setup", ...)
 A node holding two onion keys builds a context for each of them: a
 layer built for the key of one epoch does not open under the key of another.
 
-Link, both agreements under one context:
+The link delegates every agreement, hash operation and Split to the shared noise machine:
 
-| Mode | Agreements | The key the frame keys are derived from |
+| Pattern | First message | Second message |
 |---|---|---|
-| 0x00 | ephemeral with ephemeral (ee) | `ee` |
-| 0x01 | the initiator's ephemeral key with the responder's link key (es), then ee | `MixKey(chain = es, secret = ee, ctx)` |
+| NK | e, es | e, ee |
+| KK | e, es, ss | e, ee, se |
+| NN | e, no agreement and no payload encryption | e, ee |
 
-The frame keys: DeriveKey with `link/i2r` and `link/r2i`. The responder's first frame confirms
-the whole transcript: if a single byte of it differs between the sides, the frame does not open.
+Each production DH token calls `NoiseDH`, then `NoiseKDF2(ck, dh)`. `SplitTransport`
+uses `NoiseKDF2(ck, nil)` and creates both direction AEADs transactionally. Transport starts at
+nonce 0 with zero prefix and LE64 counter. The responder cannot send before authenticating the
+initiator's first transport frame, including padding. Its early write returns `ErrUnconfirmed`.
+The second handshake flight confirms the responder to the initiator. No extra flight is added.
 
 The key pair check, exchange `relay/keycheck`: the node generates a one-time pair and, under a
 context made of the public key being checked and the one-time public key, agrees a secret from
@@ -366,22 +364,19 @@ or PasswordKey, and the source checks of noise, e2e and conversation hold this.
 
 - The scheme version (now `v2`) changes with any change to the transcript layout, to the
   formulas, or to the name or size of an existing purpose. Versions are not compatible with each
-  other, and there is no version negotiation: nodes and clients are updated together. The version
-  is not visible on the wire, and the cell version byte (wire.Version) does not change with the
-  key scheme.
+  other, and there is no version negotiation: nodes and clients are updated together. KDF
+  version v2 is separate from link handshake version 0x04; the cell version byte (wire.Version)
+  does not change with the handshake.
 - A new purpose does not change the version: it adds a row to the label table and a golden
   vector in crypto/providertest.
-- The golden vectors pin the composition: the hashes of five transcripts (the setup and both
-  link modes without an identity, the setup and the authenticated link with an identity key),
-  every derived key, MixKey and Agree on fixed keys, for both suites. The comment next to them
-  says how to recompute the values without this code. Both VKO examples of RFC 7836 (appendix B,
-  examples 7 and 8) are on the 512-bit paramSetA, so the GOST primitives are checked against the
-  examples of the standards in the tests of crypto/gost (VKO_GOSTR3410_2012_256 against example
-  7, KDF_GOSTR3411_2012_256 against example 9), and the composition on the 256-bit paramSetA is
-  pinned by the vectors of the scheme with the intermediate values (the transcript hash, the UKM,
-  the KEK) written down in crypto/providertest. They were computed by an independent
-  implementation that is not part of the repository; everything but the KEK is a hash or an HMAC
-  and can be recomputed with any Streebog implementation.
+- Golden vectors in crypto/providertest pin Agree, MixKey, DeriveKey and transcripts on fixed
+  keys for both suites. Wire tests also check the setup context; link and noise tests check the
+  current link handshake. Vector comments describe recomputation without production code. Both
+  VKO examples of RFC 7836 (appendix B, examples 7 and 8) use the 512-bit paramSetA; crypto/gost
+  checks GOST primitives against standard examples, while the composition on the 256-bit
+  paramSetA has its own vectors and intermediate values in crypto/providertest. Everything
+  except the KEK can be recomputed with any Streebog implementation.
+
 - The end-to-end layer is pinned by vectors of the whole KK handshake and the first records on
   both suites (e2e/vectors_test.go, noise/vector_test.go), with the intermediate values and the
   way to recompute them in the comment. The c25519 values come from a separate Python
@@ -457,10 +452,10 @@ and has no primitives of its own.
 | Key | What it does | Lives |
 |---|---|---|
 | Node signing key | signs the certificate request and the descriptors; its public half (the identity key) goes into the setup and link transcripts of the node when nodes are authenticated (section "Transcript") | until the process ends |
-| Link key | mixed into the handshake by whoever opens a link to the node, which authenticates the node on that link | until the process ends |
+| Link key | static noise key: NK authenticates the responder, KK the selected statics with transport confirmation; accessed through borrowed DHStatic | until the process ends |
 | Onion key | the client agrees the layer secret of a circuit setup with it | with -onion-rotate one period as the published key and the grace period after it; without rotation the link key serves in this role until the process ends |
 | Hop keys of a circuit | open and seal the cells of one circuit at one node | until the circuit is torn down |
-| Frame keys of a link | seal the frames of one link; derived from the agreement of the two ephemeral keys and, in the authenticated mode, also from the agreement with the responder's link key (section "Key derivation") | until the link closes |
+| Frame keys of a link | Split of the noise machine gives one key per direction from every agreement of the chosen pattern (section "Key derivation") | until the link closes |
 
 - The signing, link and onion keys are generated through the CryptoProvider straight into secmem
   buffers. An onion key is released, its buffer zeroed, at the end of its grace period
@@ -525,7 +520,7 @@ u8 version = 1 | u8 suite (1 GOST, 2 c25519) | u8 address length | mailbox addre
 - `card_hash` is the hash of the `e2e/card` transcript of the card, 32 bytes. There is no short
   fingerprint.
 
-### The noise machine
+### Legacy E2E symmetric profile
 
 State: h (32 bytes, public), ck (secmem, empty until the first agreement), the own static key
 (only through the Static interface: the public key and Agree), the peer's static key, the own
@@ -534,17 +529,17 @@ ephemeral key (secmem), the peer's ephemeral key, the message number.
 | Operation | Definition |
 |---|---|
 | start | `h = Hash(T("noise/"+name, prologue...))`; then MixHash of the pre-message keys, the initiator's first |
-| MixHash(d) | `h = Hash(T(noise/hash, h, d))`, d not empty |
+| MixHash(d) | `h = Hash(T(noise/hash, h, d))`; an empty d omits the last part |
 | token e, writing | `(e, E) = GenerateEphemeral()`; E into the message; MixHash(E) |
 | token e, reading | the next P bytes as the peer's ephemeral key RE; MixHash(RE) |
 | DH token t | `ctx = NewContext(noise/dh, h, [t])`; `sec = Agree(own, theirs, ctx)`; the first: `ck = sec`, then `ck = MixKey(ck, sec, ctx)`, the old ck and sec released |
-| EncryptAndHash(pt) | `k = DeriveKey(ck, noise/key, NewContext(noise/key, h), 32)`; `c = AEAD(k).Seal(nonce 0, pt, ad = h)`; k released; MixHash(c). Without ck an error |
-| DecryptAndHash(c) | the same k, Open, MixHash(c) |
+| EncryptAndHash(pt) | `k = DeriveKey(ck, noise/key, NewContext(noise/key, h), 32)`; `c = AEAD(k).Seal(nonce 0, pt, ad = h)`; k released; MixHash(c). Only for the first NN message without ck: c = pt, MixHash(c) |
+| DecryptAndHash(c) | the same k, Open, MixHash(c); the first NN message without ck copies and mixes the clear payload |
 | Split | `ctx = NewContext(noise/split, h)`; `i2r`, `r2i` = DeriveKey(ck, noise/split/i2r and noise/split/r2i, ctx, 32); SID = h; ck and e released |
 
-The order within one message: MixHash of the record kind (done by e2e), token e, the DH tokens in
-the order of the pattern (h does not change between them, the token byte in the context tells
-them apart), then EncryptAndHash of the payload.
+`noise.New` retains these contextual formulas for E2E. The token interpreter and message
+transactions are shared with production links. E2E binds its record-kind prefix inside atomic
+`ReadMessageBound` and `WriteMessageBound` operations, preserving existing serialized vectors.
 
 Tokens: e = 1, s = 2, ee = 3, es = 4, se = 5, ss = 6. The first letter of a DH token names the
 initiator's key, the second the responder's:
@@ -558,19 +553,68 @@ initiator's key, the second the responder's:
 
 - The zero nonce is safe: every key from EncryptAndHash serves one Seal, h changes after every
   ciphertext, and the ephemeral key is fresh. The top bit of the zero nonce is 0, as MGM needs.
-- Reading a message changes nothing on an error: the values are computed in temporary buffers and
-  applied only after a successful Open and the payload check, otherwise released, and h goes back
-  to the end of the previous message, the MixHash of the kind included. A forged message does not
-  break a handshake that waits for the real one.
+- Failed message operations preserve exact entry state, including hash, keys, nonce and index.
+  Bound operations include their prefix in that transaction. Explicit legacy MixHash commits
+  immediately; a later ordinary read failure does not undo it. Rejected plaintext is zeroed.
 - Token s inside a message (sending a static key) is not supported yet.
 - Only the provider gives an ephemeral key; the API cannot set one. Only the vectors and the
   deniability check need a given ephemeral key, and a wrapper around the CryptoProvider is
   enough for them.
 
-This is Noise-shaped, not an instance of the Noise Protocol Framework: Agree returns a KDF output,
-not a raw DH result; h and ck go through the provider's Context; no initial ck comes from the
-protocol name. Noise vectors (cacophony) do not apply, and the GOST variant is non-standard. The
-properties of the KK pattern are claimed by analogy; there is no formal model.
+### Production Noise profile
+
+`HandshakeInfo` is a pure, allocation-free metadata query. Names contain ASCII letters and digits.
+The engine validates names and sizes before allocating secrets:
+
+| Field | c25519 | GOST |
+|---|---|---|
+| DHName | 25519 | JimichiVKO1 |
+| CipherName | JimichiXChaChaPoly | JimichiKuznyechikMGM |
+| HashName | SHA256 | Streebog256 |
+| PublicKeySize | 32 | 64 |
+| DHSize, HashSize, KeySize | 32 | 32 |
+| NonceSize, TagSize | 24, 16 | 16, 16 |
+
+`NoiseDH` borrows live inputs and returns a fresh 32-byte secmem buffer. c25519 returns raw
+X25519, rejecting all-zero output. GOST returns validated VKO-2012-256 with fixed UKM=1,
+encoded `01 00 00 00 00 00 00 00`, without contextual UKM or an outer labeled KDF.
+[RFC 7836, section 4.3.1](https://www.rfc-editor.org/rfc/rfc7836.html#section-4.3.1)
+
+`NoiseKDF2(ck, input)` takes a live 32-byte ck and nil or a live 32-byte input. Released,
+non-nil empty and incorrectly sized inputs fail. Inputs are unchanged; outputs are distinct
+32-byte secmem buffers. Every failure releases partial outputs and returns two nil buffers.
+Using the existing HKDF library, `PRK=HMAC-H(ck,input)`, `T1=HMAC-H(PRK,01)`,
+`T2=HMAC-H(PRK,T1||02)`, with empty info. H is SHA-256 or Streebog-256.
+Accessible raw DH results, VKO full-capacity output and HKDF PRK are wiped on every path,
+including allocation failures. Library-internal copies remain outside this guarantee.
+
+| Transition | Production definition |
+|---|---|
+| Initialize | protocol name padded to 32 bytes, or H(name); h and independent secmem ck; MixHash(prologue), then premessages |
+| MixHash(d) | h = H(h || d) |
+| DH | d = NoiseDH; ck, k = NoiseKDF2(ck, d); n = 0; release d |
+| Encrypt/Decrypt | CipherState with AD=h; MixHash(ciphertext) |
+| Split | i2r, r2i = NoiseKDF2(ck, nil); SID=h |
+
+Names are `Noise_<NN|NK|KK>_25519_JimichiXChaChaPoly_SHA256` and
+`Noise_<NN|NK|KK>_JimichiVKO1_JimichiKuznyechikMGM_Streebog256`. Both are custom combinations.
+GOST's hashed VKO, distinct public/result sizes, hash, cipher and HKDF-HMAC-Streebog depart
+from standard Noise algorithms. Neither profile claims standard wire interoperability or an
+independent proof of this exact composition. Legacy E2E formulas above remain unchanged.
+
+Production handshake messages and transport ciphertexts are at most 65535 bytes. A 16-byte tag
+allows 65519 plaintext transport bytes. Oversize input fails before processing or nonce advance.
+`CipherState` uses zero prefix and LE64(n), rejects MaxUint64 and advances only on success.
+It is shared by actual links, handshake cipher operations and tagged standard-vector transport.
+Both split methods commit only after complete success and release handshake secrets. Statics
+remain borrowed. Patterns and persistent public state are copied; only canonical NN/NK/KK are
+accepted. Production rejects external MixHash and Bound calls.
+
+The `noisevectors` adapter changes only fixed ephemeral inputs, AEAD to standard ChaChaPoly,
+and cipher metadata. Public `NewNoise` and `SplitTransport` run the same production transitions
+for Cacophony NN/NK/KK ciphertexts, final hash and transport vectors. Independent fixtures use
+both production providers directly. These composition checks do not independently prove the
+primitives, and standard vectors do not validate GOST.
 
 ### KK handshake
 
@@ -582,7 +626,7 @@ properties of the KK pattern are claimed by analogy; there is no formal model.
   means the card is refused.
 - Name `e2e/kk` (exchange `noise/e2e/kk`), prologue `[0x01, the initiator's card, the responder's
   card]`, pre-messages: the initiator's key S_I, then the responder's key S_R.
-- Before every handshake message MixHash([record kind]): the kind enters h, the ad and every key
+- Bound operations atomically MixHash([record kind]) with each handshake message: the kind enters h, the ad and every key
   after it.
 - kk1: `01 | E_I | c1`, kk2: `02 | E_R | c2`; c is EncryptAndHash of L zero bytes. On reading the
   payload must be all zeroes.
@@ -980,12 +1024,12 @@ the copies live long:
 
 | Where | What | How long |
 |---|---|---|
-| x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct; in the end-to-end layer the key of a handshake message and the key mk_n of every record | for a circuit or link its whole life, never wiped; in the end-to-end layer the struct serves one Seal or Open, and the copy stays until the heap memory is reused; building the AEAD state per call from the secmem key is planned ([#39](https://github.com/jimichi-org/jimichi/issues/39)) |
-| crypto/ecdh | the X25519 scalar, the node's link and onion keys, the client identity key and the DerivePair private key while its public key is computed included, and the shared secret, the static-static one (ss) included, which is the same for every session of a pair of clients before the KDF | until the freed heap memory is reused, which can be after the key itself was released |
-| x/crypto hkdf, crypto/hmac | the HMAC pads (key XOR a constant) holding the PRK, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys; the SHA-256 state holding the X25519 shared secret and the second secret of MixKey; the last derived block, mk_n included, and in DerivePair the unclamped private key, equivalent to it | until the heap memory is reused; the provider zeroes its own copy of the PRK unless zeroing is off (-keymem none or a list without zero) |
+| x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct; in noise the handshake message key, in the end-to-end layer the key mk_n of every record | for a circuit or link its whole life, never wiped; in noise and for an end-to-end record the struct serves one Seal or Open, and the copy stays until the heap memory is reused; building the AEAD state per call from the secmem key is planned ([#39](https://github.com/jimichi-org/jimichi/issues/39)) |
+| crypto/ecdh | the X25519 scalar, the node's link and onion keys, the client identity key and the DerivePair private key while its public key is computed included, and the shared secret, the static-static one (ss) included, which is the same for every handshake of a pair of static keys before the KDF | until the freed heap memory is reused, which can be after the key itself was released |
+| x/crypto hkdf, crypto/hmac | the HMAC pads (key XOR a constant) holding the PRK, the circuit secret, the link handshake ck and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys; the SHA-256 state holding the X25519 shared secret and the second secret of MixKey; the last derived block, mk_n included, and in DerivePair the unclamped private key, equivalent to it | until the heap memory is reused; the provider zeroes its own copy of the PRK unless zeroing is off (-keymem none or a list without zero) |
 | Ed25519 generation and signing | the SHA-512 state with the seed or the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; generation and signing always wipe their own scalars and digests, -keymem none included |
 | gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link; Destroy wipes them unless zeroing is off (-keymem none or a list without zero) |
-| gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys, and the DerivePair secret, one state per call; the Streebog message buffer holding the second secret of MixKey; the last block Streebog computed, kept in the working buffer of the hash and in a temporary block after Sum, half of which is the output: a copy of the KEK, of every Agree, MixKey and DeriveKey output and of every DerivePair candidate, the last of which is the private key taken | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer and, unless zeroing is off (-keymem none or a list without zero), zeroes the slices the library returns, not the buffers inside it |
+| gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret, the link handshake ck and the MixKey chain key, in the end-to-end layer the handshake ck and the ratchet chain keys, and the DerivePair secret, one state per call; the Streebog message buffer holding the second secret of MixKey; the last block Streebog computed, kept in the working buffer of the hash and in a temporary block after Sum, half of which is the output: a copy of the KEK, of every Agree, MixKey and DeriveKey output and of every DerivePair candidate, the last of which is the private key taken | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer and, unless zeroing is off (-keymem none or a list without zero), zeroes the slices the library returns, not the buffers inside it |
 | gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys, the client identity key and the DerivePair private key while its public key is computed included | until the heap memory is reused, which can be after the key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
 | x/crypto argon2 (PasswordKey c25519) | the BLAKE2b state with the password and the 64 MiB matrix, derived from the password, never wiped; a block of the matrix checks a password guess for less than the full cost | until the heap memory is reused; with zeroing on, PasswordKey calls debug.FreeOSMemory after the stretch, and the collector returns the freed pages to the kernel, so a process dump no longer holds them. It is a heuristic, not a wipe: physical memory and swap the pages may have reached before are not cleared this way. Locking all memory ([#36](https://github.com/jimichi-org/jimichi/issues/36)) and runtime/secret ([#37](https://github.com/jimichi-org/jimichi/issues/37)) are planned |
 | crypto/pbkdf2 (PasswordKey GOST) | a copy of the password made for the HMAC key, the HMAC-Streebog-512 states with the password XOR ipad and opad, the last block U, equivalent to the output | until the heap memory is reused; the provider passes the password as a view of the secmem bytes and clears the whole block T_1 it gets back; FreeOSMemory as in c25519 |

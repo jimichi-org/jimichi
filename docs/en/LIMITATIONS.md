@@ -12,12 +12,12 @@ English | [Русский](../ru/LIMITATIONS.md)
   commercial data, not to state information systems or significant critical infrastructure. The
   algorithms are the same and conformance is checked against the test vectors from the standards,
   but no protection class is claimed.
-- The two suites do not mix. A node runs one suite, and a client refuses an anchor or a
-  descriptor of the other one, so GOST users and c25519 users form two separate networks and two
-  separate anonymity sets. The suite is not hidden from an observer: the link handshake opens
-  with 33 bytes from the initiator on c25519 and 65 on GOST, and descriptors travel over plain
-  HTTP with the suite named in them. Frames after the handshake are 528 bytes on both. Hiding the
-  suite and the role in the first flight of the handshake is planned
+- The two suites do not mix. A node runs one suite, and a client refuses an anchor or descriptor
+  of the other one, so GOST and c25519 users form separate networks and anonymity sets. The
+  first link messages and transport frames are 528 bytes on both suites, but the suite is not
+  cryptographically hidden: public-key encoding depends on it, and descriptors travel over plain
+  HTTP with its name. The NN/NK/KK mode and KK initiator address are clear in the header. Hiding
+  the suite and role in the first message is planned
   ([#57](https://github.com/jimichi-org/jimichi/issues/57)).
 - A key from a password is cheaper to guess offline in the GOST suite than in c25519. The GOST
   suite stretches a password with PBKDF2 and HMAC-Streebog-512, which needs no memory, since the
@@ -37,14 +37,16 @@ English | [Русский](../ru/LIMITATIONS.md)
   ([#36](https://github.com/jimichi-org/jimichi/issues/36)). mlock does not stop reading by a
   process with sufficient privileges either. Against root on the machine hosting a node,
   process-level measures do not work; that is the expected result.
-- Message plaintext is not wiped anywhere. The client wipes neither its messages (the copy waiting
+- Application message plaintext is not systematically wiped. The client wipes neither its
+  messages (the copy waiting
   in the constant-rate queue, the buffer a message is framed in before sealing) nor its replies:
   wire.Circuit.OpenExit strips the layers into fresh buffers on the Go heap, an accepted reply goes
   to the application, a refused one is dropped. The exit node does not wipe the plaintext it opens
   either. All of it stays in the process memory until the memory is reused. This is not key
   material, and the secmem measures do not cover it. Wiping would have to be done in wire.Circuit
   and in the client and the node together, on the path of every cell that the latency
-  measurements include, so it is not done.
+  measurements include, so it is not done. Wiping refused handshake payloads and discarded link
+  plaintext does not remove this application-layer limitation.
 - Sending on a node's own clock requires the node's period to be shorter than the client's, with a
   margin of a few percent. The node does not know how fast a client sends: if the client sends more
   often, the node's queue fills up and the circuit closes, since the node cannot lose a cell of a
@@ -67,38 +69,90 @@ English | [Русский](../ru/LIMITATIONS.md)
   chain can cause it: the client tolerates no such reply and keeps no count across restarts. A
   party on the wire cannot put a frame of its own on an authenticated link, but a frame it
   damages or a connection it breaks closes the circuit all the same. This is a denial of service.
-- A link is authenticated in one direction, to the node it leads to. The responder does not
-  authenticate the initiator: a node cannot tell a roster node from a client or from anyone else
-  who connects to its cell port. Authenticating the initiator on links between nodes is planned
-  ([#56](https://github.com/jimichi-org/jimichi/issues/56)); a client stays unauthenticated to
-  its entry.
-- The identity of a node (the key its certificate certifies) is part of the setup and link
-  transcripts only when nodes are authenticated; with -auth=false only keys are bound. The
-  address of the node and the hash of its certificate are not part of them: the certificate
-  certifies the address, and the bytes of the certificate change when the node is enrolled
-  again. The client does not compare the bundles of different nodes with each other; enroll
-  compares the addresses, signing keys and onion keys of the roster nodes, but not their link
-  keys.
-- The link handshake has no explicit confirmation from the initiator: the responder learns that
-  the initiator derived the same keys only when the first frame from it opens. The mode byte
-  crosses the wire in the clear ([#57](https://github.com/jimichi-org/jimichi/issues/57)).
-- The tests of wire and link are what keeps the content of the transcript right. The interface
-  guarantees only that no key can be derived without a transcript, not that the transcript holds
-  everything it should. There is no formal model of the setup or of the link handshake;
-  a model of the setup is planned ([#61](https://github.com/jimichi-org/jimichi/issues/61)).
-- The key schedule is not Noise. The setup and the link follow the shape of the N, NN and NK
-  exchanges and bind the transcript to every key, but an agreement returns the output of a KDF
-  rather than the raw Diffie-Hellman result, so the published Noise test vectors do not apply.
-  The scheme has vectors of its own (CRYPTO, section "Key derivation").
-- There is no negotiation of the key scheme version: sides on different versions are not
-  compatible, and a link handshake between them ends at the confirmation frame with no cause
-  named. Nodes and clients are updated together. The same holds for a node with -auth and a side
-  with -auth=false: one binds the identity of the node and the other does not, and neither a
-  setup nor a link between them succeeds.
-- Frame keys of a link and hop keys do not change while the link and the circuit live. Cells
-  under a hop key are bounded only by the counter limit (2^60 per direction); frames under a
-  frame key are bounded by nothing but the 64-bit frame number. Rotation inside links and
-  circuits is planned ([#58](https://github.com/jimichi-org/jimichi/issues/58)).
+- NK from a client to its entry authenticates the pinned responder to the initiator; the entry
+  does not authenticate the client. It neither authorises the client nor proves roster membership.
+  KK uses static keys from verified roster entries but does not prove honest node behaviour.
+  NN needs explicit AllowAnonymous, through -auth=false in commands, and does not protect against
+  a substituted neighbour. Defaults are c25519 and -auth=true; an NK/KK failure or missing
+  protected-client key never retries through NN.
+- Node identities enter the link prologue with separate role tags and u16be lengths, including
+  empty fields. Both endpoints must match the bytes and presence of each identity. Key-only NK
+  requires an empty responder identity at both endpoints; key-only KK requires both empty.
+  They are always empty in NN, and the NK initiator is empty too. Each KK identity may be present
+  independently if both endpoints have matching configuration. There is no negotiation: a
+  key-only link does not interoperate with a peer binding identities. Empty fields establish no
+  certificate-identity claim. Protected commands supply verified descriptor identities.
+- The prologue binds the domain with suite and mode, the cell version, the length and exact
+  version 4 header bytes, then length-prefixed, role-tagged identities. The KK initiator address
+  enters the header; the responder address and certificate hash are not mixed separately: the
+  certificate certifies the address, and its bytes change on renewal. The setup transcript binds
+  an identity only with -auth. The client does not compare bundles of different nodes; enroll
+  compares addresses, signing keys and onion keys, but not link keys.
+- The first KK message is replayable, and responder static-key compromise permits forging it
+  as a selected initiator (KCI). Acceptance proves no initiator freshness. Handshake payloads
+  contain only zeroes, no setup or application data. A responder starts unconfirmed: WriteCell
+  before the first authenticated initiator frame returns nonfatal ErrUnconfirmed without I/O or
+  a nonce change. Padding also confirms the key and is then discarded. A first message alone
+  creates no circuit or setup effect.
+- The answer confirms the responder to the initiator; only the first authenticated initiator
+  frame confirms transport keys to the responder. A fresh responder ephemeral prevents old
+  transport from opening. Under the Noise payload-property model, responder outbound transport
+  has weak forward secrecy before confirmation and a stronger boundary afterward, assuming the
+  required secrets remain safe and ephemerals are handled correctly. Applying those properties
+  to both custom primitive combinations is a composition assumption, without an independent
+  proof. The responder sends no transport before confirmation. The first NN message carries
+  clear unauthenticated padding; the mode and KK selector are visible
+  ([#57](https://github.com/jimichi-org/jimichi/issues/57)).
+- A peer entry is checked once at admission under the existing time policy: roster membership, certificate and descriptor
+  lifetime, and current inconsistency refusal. The handshake receives an independent snapshot
+  of public fields. Later cache replacement, expiry or refusal does not change that snapshot
+  or revoke live links. Existing deadlines and lifetimes bound continued use; trust is not
+  continuously revalidated.
+- The production link profile runs Noise transitions through provider HandshakeInfo, NoiseDH
+  and NoiseKDF2 and a shared CipherState. These are distinct from legacy contextual Agree,
+  MixKey and DeriveKey, retained in the separate compatible end-to-end KK profile with exact
+  previous bytes. c25519 uses the custom JimichiXChaChaPoly name; GOST combines JimichiVKO1,
+  JimichiKuznyechikMGM and Streebog256, VKO with UKM=1 and separate public-key and agreement-output
+  sizes. Both combinations are custom; stock Noise interoperability is not claimed (CRYPTO).
+- A noisevectors build runs Cacophony through public NewNoise and SplitTransport and production
+  initialisation, hashing, KDF, CipherState and Split. The adapter changes only deterministic
+  ephemeral generation, standard ChaChaPoly and cipher metadata. This checks the real transitions,
+  unlike replacing the symmetric backend separately. Frozen fixtures check the custom
+  combinations separately. This is no independent composition proof; neither setup nor link
+  handshake has a formal model, and a setup model is planned
+  ([#61](https://github.com/jimichi-org/jimichi/issues/61)).
+- The generic production noise API accepts a complete handshake message or transport ciphertext
+  of at most 65535 bytes; a 16-byte tag permits at most 65519 transport plaintext bytes. The bound
+  includes keys and tags, not associated data; oversize input changes no state or nonce. link
+  still accepts only 528 bytes: a 512-byte cell and tag, or one handshake message. A nonce is a
+  zero prefix followed by LE64(n); MaxUint64 is not used. Success advances the counter;
+  authentication failure does not.
+- A failed noise message or Split preserves prior state and ownership; Close and Destroy are
+  idempotent. Static keys are borrowed and their owner must keep them live until the handshake
+  ends. HandshakeState does not support concurrent operations. secmem does not erase inaccessible
+  copies inside AEAD, HMAC, HKDF or big-integer libraries; complete heap erasure is not claimed.
+- Dial, DialPeer, Accept and AcceptWithConfig take socket ownership at entry: any configuration,
+  handshake or transport-construction error closes it; success transfers it to Conn. Fragmented
+  reads are valid; a partial write is not resumed. Truncation, write or authentication failure,
+  required I/O deadline failure and nonce exhaustion close the entire link and both ciphers.
+  Later calls return the first terminal error without I/O. ErrUnconfirmed is a nonfatal
+  exception. These failures give no availability against a neighbour that breaks the connection.
+- There is no version negotiation or automatic fallback. Link version 4 rejects former first
+  bytes 0 and 1 and draft version 3. Nodes, clients, helpers and observers update together;
+  the cell version, cards and end-to-end records do not change. A full rollout, suite switch
+  or rollback needs a complete verified-cohort stop barrier: clients, then relays, every old
+  pod gone before new startup, and fresh enrollment. Unexpected workloads or unhealthy nodes
+  abort the procedure; unrelated workloads are never deleted automatically. A rolling restart
+  does not replace the barrier (ARCHITECTURE, "Deployment").
+- All five relays and both clients select their suite with explicit arguments from ConfigMap
+  jimichi-config. Separate delivery evidence checks c25519, GOST and c25519 restoration through
+  the complete barrier; restoration is attempted even after GOST failure without masking that
+  failure. This proves deployment and conversation for the named suite, not an experiment or
+  every attack. Historical numbers apply only to their stated original revisions.
+- Frame keys and hop keys do not change while the link and circuit live. Hop-key cells are
+  bounded by counter (2^60 per direction); frames are bounded by the 64-bit nonce excluding
+  MaxUint64. Rotation within links and circuits is planned
+  ([#58](https://github.com/jimichi-org/jimichi/issues/58)).
 - The baseline without node authentication (-auth=false) extends a circuit to any address named
   in the setup cell, and its links between nodes are anonymous: they hide headers from a passive
   observer only. Its client takes the unverified keys of every hop from the entry alone, and a
@@ -473,8 +527,8 @@ English | [Русский](../ru/LIMITATIONS.md)
   shares of links and 8 of handshakes; once a shared cap is used up the node refuses new
   connections. This is a denial of service; each slot is held at most until its deadline (2 s
   for a handshake), the idle timeout or the circuit lifetime runs out.
-- A node cannot tell a relay from a client, since the responder of a link does not authenticate
-  the initiator, and any node can be an entry, so every node keeps the per-address limits. At a
+- KK authenticates a roster relay and NK leaves the client unauthenticated. Any node can be an
+  entry, so every node keeps the per-address limits for both link types. At a
   middle or exit node every circuit that came through one relay arrives from that relay's one
   address, and those circuits share one address's allowance: 32 links and 0.2 setups per second
   with bursts of 10. One client can use it up for every other client whose chain crosses the

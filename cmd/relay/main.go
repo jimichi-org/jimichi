@@ -312,13 +312,15 @@ func untilStopped(stop <-chan os.Signal, served <-chan error, logger *log.Logger
 
 func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []byte, cfg config, n *node, deliver relay.Deliver) relay.Config {
 	rc := relay.Config{
-		Provider:   provider,
-		StaticPriv: staticPriv,
-		StaticPub:  staticPub,
-		Deliver:    deliver,
-		Period:     cfg.period,
-		QueueCells: cfg.queue,
-		SetupCache: cfg.setupCache,
+		AllowAnonymous: !cfg.auth,
+		Provider:       provider,
+		Addr:           cfg.advertise,
+		StaticPriv:     staticPriv,
+		StaticPub:      staticPub,
+		Deliver:        deliver,
+		Period:         cfg.period,
+		QueueCells:     cfg.queue,
+		SetupCache:     cfg.setupCache,
 
 		HandshakeTimeout:       cfg.limits.HandshakeTimeout,
 		SetupTimeout:           cfg.limits.SetupTimeout,

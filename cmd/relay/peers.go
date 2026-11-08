@@ -617,10 +617,11 @@ func (c *peerCache) peer(addr string) (relay.Peer, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e := c.entries[addr]
-	if e == nil || c.now().Unix() >= e.expires {
+	_, refused := c.refused[addr]
+	if !c.listed[addr] || refused || e == nil || c.now().Unix() >= e.expires {
 		return relay.Peer{}, false
 	}
-	return e.peer, true
+	return relay.Peer{LinkPub: bytes.Clone(e.peer.LinkPub), Identity: bytes.Clone(e.peer.Identity)}, true
 }
 
 func (c *peerCache) held() int {

@@ -10,6 +10,7 @@ set -euo pipefail
 
 . "$(dirname "$0")/lib.sh"
 . "$(dirname "$0")/checks.sh"
+. "$(dirname "$0")/deploy.sh"
 
 SUITE="${SUITE:-c25519}"
 CLUSTER="${CLUSTER:-jimichi}"
@@ -19,29 +20,26 @@ PROBE_IMAGE="busybox:1.37.0"
 # an index whose other platforms were never pulled
 PROBE_DIGEST="sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4"
 
+deployment_barrier
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+docker image inspect --format '{{.RepoTags}} {{.Id}}' jimichi/relay:dev jimichi/client:dev
+kind load docker-image jimichi/relay:dev jimichi/client:dev --name "$CLUSTER" >/dev/null
+kubectl -n "$NAMESPACE" create configmap jimichi-config --from-literal=suite="$SUITE" \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -f deploy/base/relay.yaml -f deploy/base/network.yaml
 relay_list=$(relays)
 relay_count=$(printf '%s\n' "$relay_list" | awk 'END { print NR }')
 for relay in $relay_list; do
   kubectl -n "$NAMESPACE" rollout status "deployment/$relay" --timeout=180s
 done
-# a client left from an earlier run would ask a relay while the counts below
-# are taken, so it goes now and comes back once they are; every client pod
-# counted below then started after the relays it reaches and the anchor that
-# certifies them. Deleting both also removes a client-a whose selector
-# predates client-b, which an apply could not change
-kubectl -n "$NAMESPACE" delete deployment client-a client-b --ignore-not-found --wait=true >/dev/null
-kubectl -n "$NAMESPACE" delete pod badca --ignore-not-found --wait=true >/dev/null
-for _ in $(seq 1 60); do
-  [ -z "$(kubectl -n "$NAMESPACE" get pods -l app=client -o name 2>/dev/null)" ] && break
-  sleep 2
-done
+assert_suite_pods relay 5
 if ! bash scripts/enroll.sh; then
   echo "enrollment failed" >&2
   kubectl -n "$NAMESPACE" get pods -o wide >&2 || true
   kubectl -n "$NAMESPACE" logs -l app=relay --prefix --tail=20 >&2 || true
   exit 1
 fi
+assert_suite_anchor
 
 # the conversation of client-a since the start of its container: a round trip
 # through the mailbox within two minutes
@@ -105,6 +103,7 @@ kubectl apply -f deploy/base/client.yaml
 for client in client-a client-b; do
   kubectl -n "$NAMESPACE" rollout status "deployment/$client" --timeout=180s
 done
+assert_suite_pods client 2
 if ! JIMICHI="$jimichi" RESTART=no bash scripts/introduce.sh; then
   echo "the clients were not introduced" >&2
   for client in client-a client-b; do
@@ -252,7 +251,7 @@ EOF
     [ -n "$code" ] && break
     sleep 2
   done
-  kubectl -n "$NAMESPACE" delete pod isolation-probe --ignore-not-found --wait=false >/dev/null
+  kubectl -n "$NAMESPACE" delete pod isolation-probe --ignore-not-found --wait=true --timeout=180s >/dev/null
   case "$code" in
     0) echo "isolation: the cell ports of $relay_count relays closed to other pods, info ports open"; return 0 ;;
     1) echo "isolation: NOT ENFORCED, a pod that is neither a client nor a relay reached a cell port; the network plugin of this cluster ignores the policy (kindnet needs nftables queue support in the kernel, which WSL2 lacks)" >&2 ;;

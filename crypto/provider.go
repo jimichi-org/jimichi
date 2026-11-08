@@ -39,6 +39,9 @@ var (
 // caller cannot leave key material on the Go heap by accident
 type CryptoProvider interface {
 	Suite() Suite
+	HandshakeInfo() HandshakeInfo
+	NoiseDH(priv *secmem.Buffer, peerPub []byte) (*secmem.Buffer, error)
+	NoiseKDF2(ck, input *secmem.Buffer) (first, second *secmem.Buffer, err error)
 
 	GenerateEphemeral() (priv *secmem.Buffer, pub []byte, err error)
 
@@ -74,6 +77,29 @@ type CryptoProvider interface {
 	Verify(pub, msg, sig []byte) bool
 
 	Hash(data ...[]byte) []byte
+}
+
+type HandshakeInfo struct {
+	DHName, CipherName, HashName string
+	PublicKeySize, DHSize        int
+	HashSize, KeySize            int
+	NonceSize, TagSize           int
+}
+
+func (h HandshakeInfo) Valid() bool {
+	for _, name := range []string{h.DHName, h.CipherName, h.HashName} {
+		if len(name) == 0 || len(name) > 64 {
+			return false
+		}
+		for i := range name {
+			c := name[i]
+			if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
+				return false
+			}
+		}
+	}
+	return (h.PublicKeySize == 32 || h.PublicKeySize == 64) && h.DHSize == 32 && h.HashSize == 32 && h.KeySize == 32 &&
+		(h.NonceSize == 12 || h.NonceSize == 16 || h.NonceSize == 24) && h.TagSize == 16
 }
 
 // nonce management belongs to the caller: wire assigns one per cell and never

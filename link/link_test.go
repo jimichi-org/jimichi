@@ -16,6 +16,7 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/link"
+	"github.com/jimichi-org/jimichi/noise"
 	"github.com/jimichi-org/jimichi/wire"
 )
 
@@ -89,7 +90,7 @@ func pairOn(t *testing.T, p jcrypto.CryptoProvider, authenticate bool) (*link.Co
 	}
 	done := make(chan res, 1)
 	go func() {
-		c, err := link.Accept(b, p, priv, pub, nil)
+		c, err := link.AcceptWithConfig(b, p, link.AcceptConfig{Local: link.Local{StaticPriv: priv, StaticPub: pub, Identity: nil}, AllowAnonymous: true})
 		done <- res{c, err}
 	}()
 
@@ -294,7 +295,7 @@ func TestNothingIsReadAfterAReadCutShort(t *testing.T) {
 	m := &meter{Conn: a}
 	accepted := make(chan *link.Conn, 1)
 	go func() {
-		srv, err := link.Accept(b, p, priv, pub, nil)
+		srv, err := link.AcceptWithConfig(b, p, link.AcceptConfig{Local: link.Local{StaticPriv: priv, StaticPub: pub, Identity: nil}, AllowAnonymous: true})
 		if err != nil {
 			t.Errorf("Accept: %v", err)
 		}
@@ -403,23 +404,21 @@ func (m *meter) totals() (read, written int) {
 	return m.read, m.written
 }
 
-// the handshake is the hello one way and the public key with one confirming
-// frame the other way, in both modes; cells then flow both ways and none of
-// them is the confirmation
+// each direction carries one authenticated handshake flight before frame 0
 func TestResponderConfirmsTheKeys(t *testing.T) {
 	eachMode(t, func(t *testing.T, p jcrypto.CryptoProvider, auth bool) {
 		hello, _ := link.InitiatorHandshakeSize(p)
 		answer, _ := link.ResponderHandshakeSize(p)
 		frame, _ := link.FrameSize(p)
-		if answer != hello-1+frame {
-			t.Fatalf("responder handshake of %d bytes, want the key and one frame, %d", answer, hello-1+frame)
+		if hello != 528 || answer != 528 || frame != 528 {
+			t.Fatalf("handshake/frame sizes = %d/%d/%d, want 528 each", hello, answer, frame)
 		}
 		priv, pub := keyPair(t, p)
 		a, b := net.Pipe()
 		m := &meter{Conn: a}
 		accepted := make(chan *link.Conn, 1)
 		go func() {
-			srv, err := link.Accept(b, p, priv, pub, nil)
+			srv, err := link.AcceptWithConfig(b, p, link.AcceptConfig{Local: link.Local{StaticPriv: priv, StaticPub: pub, Identity: nil}, AllowAnonymous: true})
 			if err != nil {
 				t.Errorf("Accept: %v", err)
 			}
@@ -441,6 +440,14 @@ func TestResponderConfirmsTheKeys(t *testing.T) {
 			t.Fatalf("the initiator read %d and wrote %d bytes in the handshake, want %d and %d", read, written, answer, hello)
 		}
 
+		if err := server.WriteCell(sample(0)); !errors.Is(err, link.ErrUnconfirmed) {
+			t.Fatalf("pending write: %v", err)
+		}
+		go func() { _ = client.WriteCell(sample(0)) }()
+		var confirm wire.Cell
+		if err := server.ReadCell(&confirm); err != nil {
+			t.Fatal(err)
+		}
 		go func() {
 			_ = server.WriteCell(sample(41))
 			_ = server.WriteCell(sample(42))
@@ -477,7 +484,8 @@ func refusedAs(t *testing.T, p jcrypto.CryptoProvider, m *meter, b net.Conn, dia
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if srv, err := link.Accept(b, p, acceptPriv, acceptPub, acceptIdentity); err == nil {
+		defer b.Close()
+		if srv, err := link.AcceptWithConfig(b, p, link.AcceptConfig{Local: link.Local{StaticPriv: acceptPriv, StaticPub: acceptPub, Identity: acceptIdentity}, AllowAnonymous: true}); err == nil {
 			defer srv.Close()
 			var c wire.Cell
 			_ = srv.ReadCell(&c)
@@ -561,7 +569,7 @@ func TestHandshakeIsBoundToTheIdentity(t *testing.T) {
 		a, b := net.Pipe()
 		accepted := make(chan *link.Conn, 1)
 		go func() {
-			srv, err := link.Accept(b, p, priv, pub, idA)
+			srv, err := link.AcceptWithConfig(b, p, link.AcceptConfig{Local: link.Local{StaticPriv: priv, StaticPub: pub, Identity: idA}, AllowAnonymous: true})
 			if err != nil {
 				t.Errorf("Accept: %v", err)
 			}
@@ -599,10 +607,7 @@ func TestDialRefusesAnIdentityWithoutALinkKey(t *testing.T) {
 	}
 }
 
-// a hello moved to the other mode on the way is answered under keys the
-// initiator does not derive: the two sides then differ in the number of
-// agreements as well as in the transcript. That the mode byte itself is a part
-// of the transcript is held by the one written out in handResponder
+// a changed mode also changes the transcript and the pattern
 func TestFlippedModeByteFailsTheHandshake(t *testing.T) {
 	eachMode(t, func(t *testing.T, p jcrypto.CryptoProvider, auth bool) {
 		priv, pub := keyPair(t, p)
@@ -611,7 +616,7 @@ func TestFlippedModeByteFailsTheHandshake(t *testing.T) {
 			static = pub
 		}
 		a, b := net.Pipe()
-		refused(t, p, &meter{Conn: a, flipWritten: map[int]byte{0: 0x01}}, b, static, priv, pub)
+		refused(t, p, &meter{Conn: a, flipWritten: map[int]byte{1: 0x01}}, b, static, priv, pub)
 	})
 }
 
@@ -619,14 +624,14 @@ func TestFlippedModeByteFailsTheHandshake(t *testing.T) {
 // gives both sides the same raw agreement; the transcripts differ
 func TestReencodedEphemeralKeyFailsTheHandshake(t *testing.T) {
 	p := c25519.New()
-	hello, _ := link.InitiatorHandshakeSize(p)
+	_, pub := keyPair(t, p)
 	for _, auth := range []bool{false, true} {
 		for _, tc := range []struct {
 			name          string
 			written, read map[int]byte
 		}{
-			{"the initiator's key", map[int]byte{hello - 1: 0x80}, nil},
-			{"the responder's key", nil, map[int]byte{hello - 2: 0x80}},
+			{"the initiator's key", map[int]byte{3 + len(pub) - 1: 0x80}, nil},
+			{"the responder's key", nil, map[int]byte{len(pub) - 1: 0x80}},
 		} {
 			t.Run(modeName(auth)+"/"+tc.name, func(t *testing.T) {
 				priv, pub := keyPair(t, p)
@@ -659,9 +664,9 @@ func TestAuthenticatedHelloNeedsALinkKey(t *testing.T) {
 		} {
 			a, b := net.Pipe()
 			m := &meter{Conn: b}
-			go func() { _, _ = a.Write(append([]byte{1}, pub...)) }()
+			go func() { _, _ = a.Write(append([]byte{4, 1, 0}, make([]byte, 525)...)) }()
 			_ = b.SetDeadline(time.Now().Add(2 * time.Second))
-			conn, err := link.Accept(m, p, tc.priv, tc.pub, nil)
+			conn, err := link.AcceptWithConfig(m, p, link.AcceptConfig{Local: link.Local{StaticPriv: tc.priv, StaticPub: tc.pub, Identity: nil}, AllowAnonymous: true})
 			if !errors.Is(err, link.ErrHandshake) || conn != nil {
 				t.Fatalf("%s: Accept = %v, want %v", tc.name, err, link.ErrHandshake)
 			}
@@ -680,15 +685,15 @@ func TestHelloOfAnUnknownModeIsRefused(t *testing.T) {
 	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
 		priv, pub := keyPair(t, p)
 		_, eph := keyPair(t, p)
-		for _, mode := range []byte{0x02, 0x80, 0xff} {
+		for _, mode := range []byte{0x03, 0x80, 0xff} {
 			a, b := net.Pipe()
 			m := &meter{Conn: b}
 			go func() {
-				_, _ = a.Write(append([]byte{mode}, eph...))
+				_, _ = a.Write(append([]byte{4, mode, 0}, eph...))
 				_, _ = io.Copy(io.Discard, a)
 			}()
 			_ = b.SetDeadline(time.Now().Add(2 * time.Second))
-			conn, err := link.Accept(m, p, priv, pub, nil)
+			conn, err := link.AcceptWithConfig(m, p, link.AcceptConfig{Local: link.Local{StaticPriv: priv, StaticPub: pub, Identity: nil}, AllowAnonymous: true})
 			if !errors.Is(err, link.ErrHandshake) || conn != nil {
 				t.Fatalf("mode %#02x: Accept = %v, want %v", mode, err, link.ErrHandshake)
 			}
@@ -730,123 +735,126 @@ const (
 	keyedByEphemeralOnly
 )
 
-// the keys of a responder made by hand: it reads the hello, picks its ephemeral
-// key and derives both frame keys under the purposes written out here.
-// The transcript is assembled byte by byte, a second record of the layout
-// next to the one in link:
-//
-//	"jimichi/v2/<suite>/transcript/link" || 00 || u8(parts)
-//	  || 0001 version || 0001 mode || u16be(len) initiator key
-//	  || u16be(len) responder key [ || u16be(len) responder link key, mode 01 ]
-//	  [ || u16be(len) responder identity key, mode 01 of an authenticated node ]
-//
-// send seals what the responder writes ("link/r2i"), recv opens what the
-// initiator writes ("link/i2r")
-func handResponder(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPriv *secmem.Buffer, staticPub, identity []byte, how keying) (pub []byte, send, recv jcrypto.AEAD, ok bool) {
+type testStatic struct {
+	p    jcrypto.CryptoProvider
+	priv *secmem.Buffer
+	pub  []byte
+}
+
+func (k testStatic) Public() []byte { return bytes.Clone(k.pub) }
+
+func (k testStatic) NoiseDH(remote []byte) (*secmem.Buffer, error) {
+	return k.p.NoiseDH(k.priv, remote)
+}
+
+func (k testStatic) Agree(remote []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	return k.p.Agree(k.priv, remote, ctx)
+}
+
+type keyingProvider struct {
+	jcrypto.CryptoProvider
+	how   keying
+	calls int
+}
+
+func (p *keyingProvider) NoiseKDF2(chain, secret *secmem.Buffer) (*secmem.Buffer, *secmem.Buffer, error) {
+	p.calls++
+	if p.calls > 1 && secret != nil {
+		if p.how == keyedByStaticOnly {
+			return p.CryptoProvider.NoiseKDF2(chain, nil)
+		}
+		if p.how == keyedByEphemeralOnly {
+			zero, err := secmem.New(32)
+			if err != nil {
+				return nil, nil, err
+			}
+			defer zero.Release()
+			return p.CryptoProvider.NoiseKDF2(zero, secret)
+		}
+	}
+	return p.CryptoProvider.NoiseKDF2(chain, secret)
+}
+
+// the literal prologue fixes the wrapper's domain, header and identity order;
+// independent production vectors in noise pin its cryptographic operations
+func handResponder(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPriv *secmem.Buffer, staticPub, identity []byte, how keying, prefix []byte) (answer []byte, send, recv jcrypto.AEAD, ok bool) {
 	t.Helper()
-	n, _ := link.InitiatorHandshakeSize(p)
-	hello := make([]byte, n)
-	if _, err := io.ReadFull(conn, hello); err != nil {
+	flight := make([]byte, 528)
+	if _, err := io.ReadFull(conn, flight); err != nil {
 		t.Errorf("hello: %v", err)
 		return
 	}
-	mode, peerEph := hello[0], hello[1:]
-	priv, pub, err := p.GenerateEphemeral()
-	if err != nil {
-		t.Error(err)
+	mode := flight[1]
+	if flight[0] != 4 || flight[2] != 0 || mode > 1 {
+		t.Error("unexpected handshake header")
 		return
 	}
-	defer priv.Release()
-
-	keys := [][]byte{peerEph, pub}
+	profile := &keyingProvider{CryptoProvider: p, how: how}
+	pattern, name := noise.NN, "nn"
+	var local noise.DHStatic
 	if mode == 1 {
-		keys = append(keys, staticPub)
-		if identity != nil {
-			keys = append(keys, identity)
-		}
+		pattern, name = noise.NK, "nk"
+		local = testStatic{profile, staticPriv, staticPub}
+	} else {
+		identity = nil
 	}
-	transcript := []byte("jimichi/v2/" + p.Suite().String() + "/transcript/link")
-	transcript = append(transcript, 0x00, byte(2+len(keys)))
-	transcript = append(transcript, 0x00, 0x01, wire.Version)
-	transcript = append(transcript, 0x00, 0x01, mode)
-	for _, k := range keys {
-		transcript = append(transcript, byte(len(k)>>8), byte(len(k)))
-		transcript = append(transcript, k...)
-	}
-	parts := append([][]byte{{wire.Version}, {mode}}, keys...)
-	if same, err := jcrypto.TranscriptBytes(p.Suite(), "link", parts...); err != nil || !bytes.Equal(same, transcript) {
-		t.Errorf("the transcript written out by hand is not what crypto builds: %v\n%x\n%x", err, transcript, same)
-		return
-	}
-	ctx, err := jcrypto.NewContext(p, "link", parts...)
+	prologue := append([]byte("jimichi/link/v1/"+p.Suite().String()+"/"+name), 0, wire.Version, 0, 3, 4, mode, 0, 1, 0, 0, 2)
+	prologue = binary.BigEndian.AppendUint16(prologue, uint16(len(identity)))
+	prologue = append(prologue, identity...)
+	hs, err := noise.NewNoise(noise.NoiseConfig{Provider: profile, Pattern: pattern, Prologue: prologue, Local: local})
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	if !bytes.Equal(ctx.Sum(), p.Hash(transcript)) {
-		t.Error("the context is not the hash of the transcript")
+	defer hs.Close()
+	if _, err := hs.ReadMessage(flight[3:]); err != nil {
+		t.Error(err)
 		return
 	}
-
-	ee, err := p.Agree(priv, peerEph, ctx)
+	payload := make([]byte, 528-len(staticPub)-16)
+	copy(payload, prefix)
+	answer, err = hs.WriteMessage(payload)
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	defer ee.Release()
-	secret := ee
-	if mode == 1 {
-		es, err := p.Agree(staticPriv, peerEph, ctx)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer es.Release()
-		switch how {
-		case keyedInFull:
-			if secret, err = p.MixKey(es, ee, ctx); err != nil {
-				t.Error(err)
-				return
-			}
-			defer secret.Release()
-		case keyedByStaticOnly:
-			secret = es
-		}
+	i2r, r2i, _, err := hs.Split()
+	if err != nil {
+		t.Error(err)
+		return
 	}
-	var aeads [2]jcrypto.AEAD
-	for i, purpose := range []string{"link/r2i", "link/i2r"} {
-		key, err := p.DeriveKey(secret, purpose, ctx, p.KeySize())
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		aeads[i], err = p.NewAEAD(key)
-		key.Release()
-		if err != nil {
-			t.Error(err)
-			return
-		}
+	defer i2r.Release()
+	defer r2i.Release()
+	send, err = p.NewAEAD(r2i)
+	if err != nil {
+		t.Error(err)
+		return
 	}
-	return pub, aeads[0], aeads[1], true
+	recv, err = p.NewAEAD(i2r)
+	if err != nil {
+		send.Destroy()
+		t.Error(err)
+		return
+	}
+	return answer, send, recv, true
 }
 
-// what a responder writes: its public key and frame 0 carrying the given cell
 func answerWith(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPriv *secmem.Buffer, staticPub []byte, how keying, first *wire.Cell) {
 	t.Helper()
-	pub, send, recv, ok := handResponder(t, p, conn, staticPriv, staticPub, nil, how)
+	var prefix []byte
+	if !first.IsPadding() {
+		prefix = []byte{1}
+	}
+	answer, send, recv, ok := handResponder(t, p, conn, staticPriv, staticPub, nil, how, prefix)
 	if !ok {
 		return
 	}
 	defer send.Destroy()
 	defer recv.Destroy()
-	frame := send.Seal(nil, make([]byte, send.NonceSize()), first[:], nil)
-	_, _ = conn.Write(append(pub, frame...))
+	_, _ = conn.Write(answer)
 }
 
-// each direction has its own key: what the initiator writes opens under the
-// key derived by hand for "link/i2r" and not under the one for "link/r2i", so
-// the two streams never meet under one key with the same frame numbers. The
-// authenticated mode runs once more with a responder that binds an identity
+// the first frame opens only under the opposite Split key, in sequence zero
 func TestDirectionsHaveSeparateKeys(t *testing.T) {
 	eachMode(t, func(t *testing.T, p jcrypto.CryptoProvider, auth bool) {
 		directionsHaveSeparateKeys(t, p, auth, nil)
@@ -872,15 +880,14 @@ func directionsHaveSeparateKeys(t *testing.T, p jcrypto.CryptoProvider, auth boo
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		eph, send, recv, ok := handResponder(t, p, b, priv, pub, identity, keyedInFull)
+		eph, send, recv, ok := handResponder(t, p, b, priv, pub, identity, keyedInFull, nil)
 		if !ok {
 			return
 		}
 		defer send.Destroy()
 		defer recv.Destroy()
 		zero := make([]byte, send.NonceSize())
-		confirm := send.Seal(nil, zero, wire.NewPadding()[:], nil)
-		if _, err := b.Write(append(eph, confirm...)); err != nil {
+		if _, err := b.Write(eph); err != nil {
 			t.Errorf("answer: %v", err)
 			return
 		}
@@ -894,7 +901,7 @@ func directionsHaveSeparateKeys(t *testing.T, p jcrypto.CryptoProvider, auth boo
 		}
 		plain, err := recv.Open(nil, zero, frame, nil)
 		if err != nil {
-			t.Errorf("the initiator's frame under the key derived for link/i2r: %v", err)
+			t.Errorf("the initiator's frame under the i2r Split key: %v", err)
 			return
 		}
 		if !bytes.Equal(plain, sample(7)[:]) {
@@ -943,11 +950,11 @@ func TestHandshakeNeedsTheConfirmation(t *testing.T) {
 			timeout bool
 		}
 		cases := []respond{
-			{"a padding cell under the right keys", answer(keyedInFull, wire.NewPadding()), true, false},
-			{"a data cell under the right keys", answer(keyedInFull, sample(0)), false, false},
+			{"a zero payload under the right keys", answer(keyedInFull, wire.NewPadding()), true, false},
+			{"a nonzero payload under the right keys", answer(keyedInFull, sample(0)), false, false},
 			{"a frame of noise", func(conn net.Conn) {
 				_, _ = io.ReadFull(conn, make([]byte, hello))
-				_, _ = conn.Write(append(bytes.Clone(eph), bytes.Repeat([]byte{0xA5}, frame)...))
+				_, _ = conn.Write(append(bytes.Clone(eph), bytes.Repeat([]byte{0xA5}, frame-len(eph))...))
 			}, false, false},
 			{"the key and then silence", func(conn net.Conn) {
 				_, _ = io.ReadFull(conn, make([]byte, hello))
