@@ -47,6 +47,15 @@ func (p *trackingProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	return p.keep(priv), pub, err
 }
 
+func (p *trackingProvider) NoiseDH(priv *secmem.Buffer, pub []byte) (*secmem.Buffer, error) {
+	b, err := p.CryptoProvider.NoiseDH(priv, pub)
+	return p.keep(b), err
+}
+func (p *trackingProvider) NoiseKDF2(ck, input *secmem.Buffer) (*secmem.Buffer, *secmem.Buffer, error) {
+	a, b, err := p.CryptoProvider.NoiseKDF2(ck, input)
+	return p.keep(a), p.keep(b), err
+}
+
 func (p *trackingProvider) Agree(priv *secmem.Buffer, pub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	b, err := p.CryptoProvider.Agree(priv, pub, ctx)
 	return p.keep(b), err

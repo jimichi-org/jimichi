@@ -1,0 +1,22 @@
+[
+  {
+    "Suite": "c25519",
+    "First": "82eeab96b4b61a537894a76c654be364373af29ac86bc390415d9a31e150a9e8",
+    "Second": "4ecd6655d1fe85375419aa4444b14203fe7e9490b8a20ba826bc971958ded69a",
+    "EmptyFirst": "fc5eccc8a17f5575645b191c4123bcec6defa32c721a6c5009f4c251bc39c309",
+    "EmptySecond": "46685175eb3b43cc7858098eaed45a5c9b6c967cca8c26dbf23f98bbeab77538",
+    "Private": "",
+    "Public": "",
+    "DH": ""
+  },
+  {
+    "Suite": "gost",
+    "First": "a1fcb237c0df8cc624d08035912accc217fbcd3ba91cbbf1b8dc030570c2444b",
+    "Second": "a7ff3a2f35672d397bd09e86222120349b04ff97ff274fb836b76b7dba7fca33",
+    "EmptyFirst": "026ec2a7159a2d6c6309bf330d40f854d186f6ca7e5ee06d6fbf7603706d3328",
+    "EmptySecond": "6a18de0eb9abbccd8b1cab97a2e3e1a3e1efb8b04c97cfc416d55f48af12026f",
+    "Private": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "Public": "b6749ce1d202dd4550a1ad7a8797e16e47cfdb0a0b446465e447f56abb4dae1b43cad001b96e51d4f10df16549327c9eea30e0a74adf0ce5a01c5934ec52edc6",
+    "DH": "3256afc81d87f1650e3e80d29d14b7c3de81c489ed44dfd379e5ccd168139a2c"
+  }
+]

@@ -29,11 +29,16 @@ spec:
           imagePullPolicy: IfNotPresent
           # the anchor is public; the CA key itself never enters the cluster
           env:
+            - name: JIMICHI_SUITE
+              valueFrom:
+                configMapKeyRef: {name: jimichi-config, key: suite}
             - name: JIMICHI_CA
               valueFrom:
                 configMapKeyRef: {name: jimichi-ca, key: anchor}
           # the admin port 127.0.0.1:9201 is reached only through a port-forward
           args:
+            - "-suite"
+            - "$(JIMICHI_SUITE)"
             - "-ca"
             - "$(JIMICHI_CA)"
             - "-nodes"
@@ -86,10 +91,15 @@ spec:
           image: jimichi/client:dev
           imagePullPolicy: IfNotPresent
           env:
+            - name: JIMICHI_SUITE
+              valueFrom:
+                configMapKeyRef: {name: jimichi-config, key: suite}
             - name: JIMICHI_CA
               valueFrom:
                 configMapKeyRef: {name: jimichi-ca, key: anchor}
           args:
+            - "-suite"
+            - "$(JIMICHI_SUITE)"
             - "-ca"
             - "$(JIMICHI_CA)"
             - "-nodes"

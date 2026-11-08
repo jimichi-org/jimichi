@@ -16,6 +16,7 @@ import (
 
 func Run(t *testing.T, newProvider func() jcrypto.CryptoProvider) {
 	t.Helper()
+	t.Run("NoisePrimitives", func(t *testing.T) { testNoisePrimitives(t, newProvider()) })
 
 	t.Run("AgreeMatches", func(t *testing.T) { testAgreeMatches(t, newProvider()) })
 	t.Run("AgreeContextSeparates", func(t *testing.T) { testAgreeContext(t, newProvider()) })

@@ -26,7 +26,7 @@ func pacedPipe(t *testing.T, period time.Duration, size int) (*pacer, net.Conn, 
 	a, b := net.Pipe()
 	accepted := make(chan error, 1)
 	go func() {
-		_, err := link.Accept(b, p, priv, pub, nil)
+		_, err := link.AcceptWithConfig(b, p, link.AcceptConfig{Local: link.Local{StaticPriv: priv, StaticPub: pub, Identity: nil}, AllowAnonymous: true})
 		accepted <- err
 	}()
 	out, err := link.Dial(a, p, nil, nil)

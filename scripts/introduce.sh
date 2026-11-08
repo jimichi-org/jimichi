@@ -8,6 +8,8 @@
 set -euo pipefail
 
 . "$(dirname "$0")/lib.sh"
+. "$(dirname "$0")/deploy.sh"
+require_suite
 
 RESTART="${RESTART:-yes}"
 # client-a takes the local port base + 1, client-b base + 2
@@ -128,6 +130,10 @@ attempt() {
     done
     if [ -z "$card" ]; then
       echo "${CLIENTS[$i]}: no card from its admin port" >&2
+      return 1
+    fi
+    if [[ "$card" != "$SUITE:"* ]]; then
+      echo "${CLIENTS[$i]}: card does not identify suite=$SUITE" >&2
       return 1
     fi
     got=$("$jimichi" card-hash "$card") || return 1

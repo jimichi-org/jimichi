@@ -1,12 +1,10 @@
-// Package noise runs Noise-shaped handshakes over a CryptoProvider. It is not
-// a Noise instance: Agree returns a KDF output rather than a raw DH value, the
-// hash and the chaining key go through transcript contexts, and no chaining key
-// comes from the protocol name.
+// Package noise shares transactional NN, NK and KK token processing between link and E2E profiles.
 package noise
 
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"sync"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
@@ -29,10 +27,55 @@ type Pattern struct {
 	Messages                   [][]Token
 }
 
-var KK = Pattern{
+var canonicalNN = Pattern{
+	Messages: [][]Token{{TokenE}, {TokenE, TokenEE}},
+}
+
+var canonicalNK = Pattern{
+	PreResponder: []Token{TokenS},
+	Messages:     [][]Token{{TokenE, TokenES}, {TokenE, TokenEE}},
+}
+
+var canonicalKK = Pattern{
 	PreInitiator: []Token{TokenS},
 	PreResponder: []Token{TokenS},
 	Messages:     [][]Token{{TokenE, TokenES, TokenSS}, {TokenE, TokenEE, TokenSE}},
+}
+
+var NN = clonePattern(canonicalNN)
+var NK = clonePattern(canonicalNK)
+var KK = clonePattern(canonicalKK)
+
+func clonePattern(p Pattern) Pattern {
+	out := Pattern{PreInitiator: append([]Token(nil), p.PreInitiator...), PreResponder: append([]Token(nil), p.PreResponder...)}
+	for _, m := range p.Messages {
+		out.Messages = append(out.Messages, append([]Token(nil), m...))
+	}
+	return out
+}
+
+func samePattern(a, b Pattern) bool {
+	if !slices.Equal(a.PreInitiator, b.PreInitiator) || !slices.Equal(a.PreResponder, b.PreResponder) || len(a.Messages) != len(b.Messages) {
+		return false
+	}
+	for i := range a.Messages {
+		if !slices.Equal(a.Messages[i], b.Messages[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalPattern(p Pattern) (Pattern, string, error) {
+	for _, c := range []struct {
+		p    Pattern
+		name string
+	}{{canonicalNN, "NN"}, {canonicalNK, "NK"}, {canonicalKK, "KK"}} {
+		if samePattern(p, c.p) {
+			return clonePattern(c.p), c.name, nil
+		}
+	}
+	return Pattern{}, "", ErrPattern
 }
 
 const (
@@ -47,16 +90,22 @@ const (
 )
 
 var (
-	ErrPattern = errors.New("noise: unsupported pattern or token")
-	ErrConfig  = errors.New("noise: incomplete configuration")
-	ErrState   = errors.New("noise: message out of turn or handshake over")
-	ErrNoKey   = errors.New("noise: payload before any agreement")
-	ErrMessage = errors.New("noise: message does not open")
-	ErrClosed  = errors.New("noise: key released")
+	ErrPattern         = errors.New("noise: unsupported pattern or token")
+	ErrConfig          = errors.New("noise: incomplete configuration")
+	ErrState           = errors.New("noise: message out of turn or handshake over")
+	ErrNoKey           = errors.New("noise: payload before any agreement")
+	ErrMessage         = errors.New("noise: message does not open")
+	ErrClosed          = errors.New("noise: key released")
+	ErrMessageTooLarge = errors.New("noise: message exceeds 65535 bytes")
 )
 
 // the local static key; the handshake reaches it only through Agree, so a key
 // held elsewhere, or a simulated one, can stand in for it
+type DHStatic interface {
+	Public() []byte
+	NoiseDH(remote []byte) (*secmem.Buffer, error)
+}
+
 type Static interface {
 	Public() []byte
 	Agree(remote []byte, ctx jcrypto.Context) (*secmem.Buffer, error)
@@ -86,6 +135,15 @@ func (k *KeyPair) Agree(remote []byte, ctx jcrypto.Context) (*secmem.Buffer, err
 	return k.p.Agree(k.priv, remote, ctx)
 }
 
+func (k *KeyPair) NoiseDH(remote []byte) (*secmem.Buffer, error) {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	if k.priv == nil {
+		return nil, ErrClosed
+	}
+	return k.p.NoiseDH(k.priv, remote)
+}
+
 func (k *KeyPair) Close() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -109,6 +167,66 @@ type Config struct {
 	AcceptPayload func(payload []byte) bool
 }
 
+type NoiseConfig struct {
+	Provider      jcrypto.CryptoProvider
+	Pattern       Pattern
+	Initiator     bool
+	Prologue      []byte
+	Local         DHStatic
+	RemoteStatic  []byte
+	AcceptPayload func([]byte) bool
+}
+
+type staticSnapshot struct {
+	Static
+	raw DHStatic
+	pub []byte
+}
+
+func (s staticSnapshot) Public() []byte { return bytes.Clone(s.pub) }
+func (s staticSnapshot) NoiseDH(remote []byte) (*secmem.Buffer, error) {
+	if s.raw == nil {
+		return nil, ErrConfig
+	}
+	return s.raw.NoiseDH(remote)
+}
+
+func NewNoise(cfg NoiseConfig) (*HandshakeState, error) {
+	return newNoise(cfg, secmem.New)
+}
+
+func newNoise(cfg NoiseConfig, allocate func(int) (*secmem.Buffer, error)) (*HandshakeState, error) {
+	if cfg.Provider == nil {
+		return nil, ErrConfig
+	}
+	info := cfg.Provider.HandshakeInfo()
+	if !info.Valid() || info.KeySize != cfg.Provider.KeySize() {
+		return nil, ErrConfig
+	}
+	pattern, name, err := canonicalPattern(cfg.Pattern)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.RemoteStatic) != 0 && len(cfg.RemoteStatic) != info.PublicKeySize {
+		return nil, ErrConfig
+	}
+	var local Static
+	if cfg.Local != nil {
+		pub := cfg.Local.Public()
+		if len(pub) != info.PublicKeySize {
+			return nil, ErrConfig
+		}
+		local = staticSnapshot{raw: cfg.Local, pub: bytes.Clone(pub)}
+	}
+	if name == "KK" && (local == nil || len(cfg.RemoteStatic) == 0) || name == "NK" && (cfg.Initiator && len(cfg.RemoteStatic) == 0 || !cfg.Initiator && local == nil) {
+		return nil, ErrConfig
+	}
+	return newHandshake(Config{Provider: cfg.Provider, Pattern: pattern,
+		Name:      "Noise_" + name + "_" + info.DHName + "_" + info.CipherName + "_" + info.HashName,
+		Initiator: cfg.Initiator, Prologue: [][]byte{bytes.Clone(cfg.Prologue)}, Local: local,
+		RemoteStatic: bytes.Clone(cfg.RemoteStatic), AcceptPayload: cfg.AcceptPayload}, noiseBackend{allocate: allocate, info: info}, info.PublicKeySize)
+}
+
 type HandshakeState struct {
 	p         jcrypto.CryptoProvider
 	pattern   Pattern
@@ -118,37 +236,45 @@ type HandshakeState struct {
 	rs        []byte
 	pubSize   int
 
-	h []byte
-	// h at the end of the last message: a failed message rolls back to it,
-	// with the MixHash calls made for that message
-	mark []byte
-	ck   *secmem.Buffer
-	e    *secmem.Buffer
-	re   []byte
-	msg  int
+	symmetricState
+	backend    symmetricBackend
+	production bool
+	info       jcrypto.HandshakeInfo
+	e          *secmem.Buffer
+	re         []byte
+	msg        int
 
 	split  bool
 	closed bool
 }
 
 func New(cfg Config) (*HandshakeState, error) {
+	return newHandshake(cfg, legacyBackend{}, 0)
+}
+
+func newHandshake(cfg Config, backend symmetricBackend, size int) (*HandshakeState, error) {
 	p := cfg.Provider
 	if p == nil {
 		return nil, ErrConfig
 	}
-	if err := checkPattern(cfg.Pattern); err != nil {
+	pattern, _, err := canonicalPattern(cfg.Pattern)
+	if err != nil {
 		return nil, err
 	}
-	hs := &HandshakeState{
-		p:         p,
-		pattern:   cfg.Pattern,
-		initiator: cfg.Initiator,
-		accept:    cfg.AcceptPayload,
-		local:     cfg.Local,
-		rs:        bytes.Clone(cfg.RemoteStatic),
+	cfg.Pattern = pattern
+	if cfg.Local != nil {
+		raw, _ := cfg.Local.(DHStatic)
+		cfg.Local = staticSnapshot{Static: cfg.Local, raw: raw, pub: bytes.Clone(cfg.Local.Public())}
 	}
-	// the provider has no size query: the static keys give the size of the
-	// ephemeral ones, so every pattern here holds at least one
+	hs := &HandshakeState{
+		p: p, backend: backend, pattern: cfg.Pattern,
+		initiator: cfg.Initiator, accept: cfg.AcceptPayload,
+		local: cfg.Local, rs: bytes.Clone(cfg.RemoteStatic),
+	}
+	if b, ok := backend.(noiseBackend); ok {
+		hs.production = true
+		hs.info = b.info
+	}
 	switch {
 	case cfg.Local != nil:
 		hs.pubSize = len(cfg.Local.Public())
@@ -157,6 +283,16 @@ func New(cfg Config) (*HandshakeState, error) {
 		}
 	case len(hs.rs) != 0:
 		hs.pubSize = len(hs.rs)
+	case isNN(cfg.Pattern):
+		hs.pubSize = size
+		if hs.pubSize == 0 {
+			priv, pub, err := p.GenerateEphemeral()
+			if err != nil {
+				return nil, err
+			}
+			priv.Release()
+			hs.pubSize = len(pub)
+		}
 	default:
 		return nil, ErrConfig
 	}
@@ -164,11 +300,16 @@ func New(cfg Config) (*HandshakeState, error) {
 		return nil, ErrConfig
 	}
 
-	ctx, err := jcrypto.NewContext(p, "noise/"+cfg.Name, cfg.Prologue...)
+	hs.symmetricState, err = backend.initialize(cfg)
 	if err != nil {
 		return nil, err
 	}
-	hs.h = ctx.Sum()
+	ok := false
+	defer func() {
+		if !ok {
+			hs.release()
+		}
+	}()
 	for _, pre := range []struct {
 		tokens    []Token
 		initiator bool
@@ -184,49 +325,26 @@ func New(cfg Config) (*HandshakeState, error) {
 			if len(key) == 0 {
 				return nil, ErrConfig
 			}
-			if hs.h, err = mixHash(p, hs.h, key); err != nil {
+			if hs.h, err = backend.mixHash(p, hs.h, key); err != nil {
 				return nil, err
 			}
 		}
 	}
-	hs.mark = bytes.Clone(hs.h)
+	ok = true
 	return hs, nil
 }
 
-// pre-messages carry static keys only; a static key sent inside a message is
-// not supported yet
-func checkPattern(pt Pattern) error {
-	if len(pt.Messages) == 0 {
-		return ErrPattern
-	}
-	for _, pre := range [][]Token{pt.PreInitiator, pt.PreResponder} {
-		if len(pre) > 1 || (len(pre) == 1 && pre[0] != TokenS) {
-			return ErrPattern
-		}
-	}
-	for _, m := range pt.Messages {
-		for _, t := range m {
-			if t != TokenE && (t < TokenEE || t > TokenSS) {
-				return ErrPattern
-			}
-		}
-	}
-	return nil
-}
-
-func mixHash(p jcrypto.CryptoProvider, h, d []byte) ([]byte, error) {
-	ctx, err := jcrypto.NewContext(p, exchangeHash, h, d)
-	if err != nil {
-		return nil, err
-	}
-	return ctx.Sum(), nil
+func isNN(pt Pattern) bool {
+	return len(pt.PreInitiator) == 0 && len(pt.PreResponder) == 0 &&
+		len(pt.Messages) == 2 && len(pt.Messages[0]) == 1 && pt.Messages[0][0] == TokenE &&
+		len(pt.Messages[1]) == 2 && pt.Messages[1][0] == TokenE && pt.Messages[1][1] == TokenEE
 }
 
 func (hs *HandshakeState) MixHash(d []byte) error {
-	if hs.closed || hs.split {
+	if hs.closed || hs.split || hs.production {
 		return ErrState
 	}
-	h, err := mixHash(hs.p, hs.h, d)
+	h, err := hs.backend.mixHash(hs.p, hs.h, d)
 	if err != nil {
 		return err
 	}
@@ -237,14 +355,45 @@ func (hs *HandshakeState) MixHash(d []byte) error {
 func (hs *HandshakeState) Done() bool { return hs.msg == len(hs.pattern.Messages) }
 
 func (hs *HandshakeState) myTurn() bool {
-	return !hs.closed && !hs.Done() && (hs.msg%2 == 0) == hs.initiator
+	return !hs.closed && !hs.split && !hs.Done() && (hs.msg%2 == 0) == hs.initiator
 }
 
 func (hs *HandshakeState) WriteMessage(payload []byte) ([]byte, error) {
-	if !hs.myTurn() {
+	return hs.writeMessage(nil, payload, false)
+}
+func (hs *HandshakeState) WriteMessageBound(prefix, payload []byte) ([]byte, error) {
+	return hs.writeMessage(prefix, payload, true)
+}
+func (hs *HandshakeState) writeMessage(prefix, payload []byte, bound bool) ([]byte, error) {
+	if !hs.myTurn() || bound && hs.production {
 		return nil, ErrState
 	}
+	if hs.production {
+		overhead := 0
+		keyed := hs.key != nil
+		for _, t := range hs.pattern.Messages[hs.msg] {
+			if t == TokenE {
+				overhead += hs.pubSize
+			} else {
+				keyed = true
+			}
+		}
+		if keyed {
+			overhead += hs.info.TagSize
+		}
+		if len(payload) > 65535-overhead {
+			return nil, ErrMessageTooLarge
+		}
+	}
 	st := hs.begin()
+	if bound {
+		h, err := hs.backend.mixHash(hs.p, st.h, prefix)
+		if err != nil {
+			hs.abort(st)
+			return nil, err
+		}
+		st.h = h
+	}
 	out, err := hs.write(st, payload)
 	if err != nil {
 		hs.abort(st)
@@ -265,9 +414,15 @@ func (hs *HandshakeState) write(st *step, payload []byte) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
+			if priv == nil || len(priv.Bytes()) != 32 || len(pub) != hs.pubSize {
+				if priv != nil {
+					priv.Release()
+				}
+				return nil, ErrConfig
+			}
 			st.e = priv
 			out = append(out, pub...)
-			if st.h, err = mixHash(hs.p, st.h, pub); err != nil {
+			if st.h, err = hs.backend.mixHash(hs.p, st.h, pub); err != nil {
 				return nil, err
 			}
 			continue
@@ -286,10 +441,27 @@ func (hs *HandshakeState) write(st *step, payload []byte) ([]byte, error) {
 // nothing changes until the message opened and its payload was accepted, so
 // a forged message cannot break a handshake that waits for the real one
 func (hs *HandshakeState) ReadMessage(msg []byte) ([]byte, error) {
-	if hs.closed || hs.Done() || (hs.msg%2 == 0) == hs.initiator {
+	return hs.readMessage(nil, msg, false)
+}
+func (hs *HandshakeState) ReadMessageBound(prefix, msg []byte) ([]byte, error) {
+	return hs.readMessage(prefix, msg, true)
+}
+func (hs *HandshakeState) readMessage(prefix, msg []byte, bound bool) ([]byte, error) {
+	if hs.closed || hs.split || hs.Done() || (hs.msg%2 == 0) == hs.initiator || bound && hs.production {
 		return nil, ErrState
 	}
+	if hs.production && len(msg) > 65535 {
+		return nil, ErrMessageTooLarge
+	}
 	st := hs.begin()
+	if bound {
+		h, err := hs.backend.mixHash(hs.p, st.h, prefix)
+		if err != nil {
+			hs.abort(st)
+			return nil, err
+		}
+		st.h = h
+	}
 	pt, err := hs.read(st, msg)
 	if err != nil {
 		hs.abort(st)
@@ -309,7 +481,7 @@ func (hs *HandshakeState) read(st *step, msg []byte) ([]byte, error) {
 			st.re = bytes.Clone(rest[:hs.pubSize])
 			rest = rest[hs.pubSize:]
 			var err error
-			if st.h, err = mixHash(hs.p, st.h, st.re); err != nil {
+			if st.h, err = hs.backend.mixHash(hs.p, st.h, st.re); err != nil {
 				return nil, err
 			}
 			continue
@@ -326,6 +498,7 @@ func (hs *HandshakeState) read(st *step, msg []byte) ([]byte, error) {
 		return nil, err
 	}
 	if hs.accept != nil && !hs.accept(pt) {
+		secmem.Zero(pt)
 		return nil, ErrMessage
 	}
 	return pt, nil
@@ -340,22 +513,38 @@ func (hs *HandshakeState) Split() (i2r, r2i *secmem.Buffer, sid []byte, err erro
 	if hs.ck == nil {
 		return nil, nil, nil, ErrNoKey
 	}
-	ctx, err := jcrypto.NewContext(hs.p, exchangeSplit, hs.h)
+	i2r, r2i, err = hs.backend.split(hs.p, hs.symmetricState)
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	i2r, err = hs.p.DeriveKey(hs.ck, purposeI2R, ctx, hs.p.KeySize())
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	r2i, err = hs.p.DeriveKey(hs.ck, purposeR2I, ctx, hs.p.KeySize())
-	if err != nil {
-		i2r.Release()
 		return nil, nil, nil, err
 	}
 	hs.release()
 	hs.split = true
 	return i2r, r2i, bytes.Clone(hs.h), nil
+}
+
+func (hs *HandshakeState) SplitTransport() (i2r, r2i *CipherState, sid []byte, err error) {
+	if !hs.production || hs.closed || hs.split || !hs.Done() {
+		return nil, nil, nil, ErrState
+	}
+	first, second, err := hs.backend.split(hs.p, hs.symmetricState)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer first.Release()
+	defer second.Release()
+	i2r, err = newCipherState(hs.p, first, 0, hs.info)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	r2i, err = newCipherState(hs.p, second, 0, hs.info)
+	if err != nil {
+		i2r.Destroy()
+		return nil, nil, nil, err
+	}
+	sid = bytes.Clone(hs.h)
+	hs.release()
+	hs.split = true
+	return i2r, r2i, sid, nil
 }
 
 func (hs *HandshakeState) Close() {
@@ -364,6 +553,10 @@ func (hs *HandshakeState) Close() {
 }
 
 func (hs *HandshakeState) release() {
+	if hs.key != nil {
+		hs.key.Release()
+		hs.key = nil
+	}
 	if hs.ck != nil {
 		hs.ck.Release()
 		hs.ck = nil
@@ -376,29 +569,39 @@ func (hs *HandshakeState) release() {
 
 // the values one message changes, held apart until it succeeds
 type step struct {
-	hs    *HandshakeState
-	h     []byte
-	ck    *secmem.Buffer
-	ownCK bool
-	e     *secmem.Buffer
-	re    []byte
+	hs *HandshakeState
+	symmetricState
+	ownCK      bool
+	ownKey     bool
+	keyChanged bool
+	e          *secmem.Buffer
+	re         []byte
 }
 
 func (hs *HandshakeState) begin() *step {
-	return &step{hs: hs, h: hs.h, ck: hs.ck}
+	return &step{hs: hs, symmetricState: hs.symmetricState}
 }
 
 func (hs *HandshakeState) abort(st *step) {
+	if st.ownKey {
+		st.key.Release()
+	}
 	if st.ownCK {
 		st.ck.Release()
 	}
 	if st.e != nil {
 		st.e.Release()
 	}
-	hs.h = bytes.Clone(hs.mark)
 }
 
 func (hs *HandshakeState) commit(st *step) {
+	if st.keyChanged {
+		if hs.key != nil {
+			hs.key.Release()
+		}
+		hs.key = st.key
+	}
+	hs.nonce = st.nonce
 	if st.ownCK {
 		if hs.ck != nil {
 			hs.ck.Release()
@@ -412,7 +615,6 @@ func (hs *HandshakeState) commit(st *step) {
 		hs.re = st.re
 	}
 	hs.h = st.h
-	hs.mark = bytes.Clone(st.h)
 	hs.msg++
 	if hs.Done() && hs.e != nil {
 		hs.e.Release()
@@ -420,31 +622,37 @@ func (hs *HandshakeState) commit(st *step) {
 	}
 }
 
-// every DH token of a message sees the same h; the token byte in the context
-// tells them apart
+// legacy contexts distinguish DH tokens without changing the transcript hash
 func (st *step) dh(t Token) error {
 	p := st.hs.p
-	ctx, err := jcrypto.NewContext(p, exchangeDH, st.h, []byte{byte(t)})
-	if err != nil {
-		return err
+	var ctx jcrypto.Context
+	var err error
+	if !st.hs.production {
+		ctx, err = jcrypto.NewContext(p, exchangeDH, st.h, []byte{byte(t)})
+		if err != nil {
+			return err
+		}
 	}
 	sec, err := st.agree(t, ctx)
 	if err != nil {
 		return err
 	}
-	if st.ck == nil {
-		st.ck, st.ownCK = sec, true
-		return nil
+	next, key, err := st.hs.backend.mixKey(p, st.ck, sec, ctx)
+	if next != sec {
+		sec.Release()
 	}
-	next, err := p.MixKey(st.ck, sec, ctx)
-	sec.Release()
 	if err != nil {
 		return err
 	}
 	if st.ownCK {
 		st.ck.Release()
 	}
+	if st.ownKey {
+		st.key.Release()
+	}
 	st.ck, st.ownCK = next, true
+	st.key, st.ownKey, st.keyChanged = key, key != nil, true
+	st.nonce = 0
 	return nil
 }
 
@@ -482,6 +690,13 @@ func (st *step) agree(t Token, ctx jcrypto.Context) (*secmem.Buffer, error) {
 		if st.hs.local == nil {
 			return nil, ErrPattern
 		}
+		if st.hs.production {
+			raw, ok := st.hs.local.(DHStatic)
+			if !ok {
+				return nil, ErrConfig
+			}
+			return raw.NoiseDH(remote)
+		}
 		return st.hs.local.Agree(remote, ctx)
 	}
 	e := st.e
@@ -491,52 +706,52 @@ func (st *step) agree(t Token, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	if e == nil {
 		return nil, ErrPattern
 	}
+	if st.hs.production {
+		return st.hs.p.NoiseDH(e, remote)
+	}
 	return st.hs.p.Agree(e, remote, ctx)
 }
 
-// one key per message and h as the associated data, so the zero nonce never
-// repeats under a key
-func (st *step) aead() (jcrypto.AEAD, error) {
-	if st.ck == nil {
-		return nil, ErrNoKey
-	}
-	p := st.hs.p
-	ctx, err := jcrypto.NewContext(p, exchangeKey, st.h)
-	if err != nil {
-		return nil, err
-	}
-	k, err := p.DeriveKey(st.ck, purposeKey, ctx, p.KeySize())
-	if err != nil {
-		return nil, err
-	}
-	defer k.Release()
-	return p.NewAEAD(k)
+func (st *step) plaintext() bool {
+	return st.hs.msg == 0 && isNN(st.hs.pattern)
 }
 
 func (st *step) encrypt(pt []byte) ([]byte, error) {
-	a, err := st.aead()
-	if err != nil {
-		return nil, err
+	var c []byte
+	var err error
+	if !st.hs.backend.keyed(st.symmetricState) {
+		if !st.plaintext() {
+			return nil, ErrNoKey
+		}
+		c = bytes.Clone(pt)
+	} else {
+		c, st.nonce, err = st.hs.backend.encrypt(st.hs.p, st.symmetricState, pt)
+		if err != nil {
+			return nil, err
+		}
 	}
-	c := a.Seal(nil, make([]byte, a.NonceSize()), pt, st.h)
-	a.Destroy()
-	if st.h, err = mixHash(st.hs.p, st.h, c); err != nil {
+	if st.h, err = st.hs.backend.mixHash(st.hs.p, st.h, c); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
 
 func (st *step) decrypt(c []byte) ([]byte, error) {
-	a, err := st.aead()
-	if err != nil {
-		return nil, err
+	var pt []byte
+	var err error
+	if !st.hs.backend.keyed(st.symmetricState) {
+		if !st.plaintext() {
+			return nil, ErrNoKey
+		}
+		pt = bytes.Clone(c)
+	} else {
+		pt, st.nonce, err = st.hs.backend.decrypt(st.hs.p, st.symmetricState, c)
+		if err != nil {
+			return nil, err
+		}
 	}
-	pt, err := a.Open(nil, make([]byte, a.NonceSize()), c, st.h)
-	a.Destroy()
-	if err != nil {
-		return nil, ErrMessage
-	}
-	if st.h, err = mixHash(st.hs.p, st.h, c); err != nil {
+	if st.h, err = st.hs.backend.mixHash(st.hs.p, st.h, c); err != nil {
+		secmem.Zero(pt)
 		return nil, err
 	}
 	return pt, nil

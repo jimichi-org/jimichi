@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,28 @@ func peersOf(nodes ...*node) func(string) (relay.Peer, bool) {
 		peer, ok := peers[addr]
 		return peer, ok
 	}
+}
+
+type peerBook struct {
+	mu    sync.RWMutex
+	nodes []*node
+}
+
+func (b *peerBook) add(nodes ...*node) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.nodes = append(b.nodes, nodes...)
+}
+
+func (b *peerBook) peer(addr string) (relay.Peer, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, n := range b.nodes {
+		if n.addr == addr {
+			return relay.Peer{LinkPub: n.pub, Identity: n.identity}, true
+		}
+	}
+	return relay.Peer{}, false
 }
 
 func countDials(n *atomic.Int32) func(context.Context, string, string) (net.Conn, error) {
@@ -175,15 +198,16 @@ func TestChainBindsTheIdentityOfEveryNode(t *testing.T) {
 				t.Fatal(err)
 			}
 			delivered := make(chan []byte, 4)
+			exitPeers, middlePeers := &peerBook{}, &peerBook{}
 			exit := startRelay(t, p, relay.Config{
 				Identity: signingKey(t, p),
 				Deliver: func(_ uint64, payload []byte) []byte {
 					delivered <- append([]byte(nil), payload...)
 					return nil
 				},
-				Peers: peersOf(),
+				Peers: exitPeers.peer,
 			})
-			a := startRelay(t, p, relay.Config{Identity: signingKey(t, p), Peers: peersOf(exit)})
+			a := startRelay(t, p, relay.Config{Identity: signingKey(t, p), Peers: middlePeers.peer})
 			const cAddr = "relay-c.test:9000"
 			c := &node{addr: cAddr, pub: a.pub, identity: signingKey(t, p)}
 			toA := func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -208,6 +232,8 @@ func TestChainBindsTheIdentityOfEveryNode(t *testing.T) {
 				Dial: toA,
 			})
 
+			exitPeers.add(a)
+			middlePeers.add(exit, entry, sound)
 			cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, a, exit)})
 			if err != nil {
 				t.Fatalf("Dial through a: %v", err)
@@ -277,12 +303,24 @@ func TestChainWithPeersDeliversOnEverySuite(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			exitPeers, middlePeers := &peerBook{}, &peerBook{}
+			var peerFlights atomic.Int32
+			observe := func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				c, err := d.DialContext(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+				return &modeRecorder{Conn: c, t: t, want: 2, seen: &peerFlights}, nil
+			}
 			exit := startRelay(t, p, relay.Config{
 				Deliver: func(_ uint64, payload []byte) []byte { return append([]byte("echo:"), payload...) },
-				Peers:   peersOf(),
+				Peers:   exitPeers.peer,
 			})
-			middle := startRelay(t, p, relay.Config{Peers: peersOf(exit)})
-			entry := startRelay(t, p, relay.Config{Peers: peersOf(middle)})
+			middle := startRelay(t, p, relay.Config{Peers: middlePeers.peer, Dial: observe})
+			entry := startRelay(t, p, relay.Config{Peers: peersOf(middle), Dial: observe})
+			exitPeers.add(middle)
+			middlePeers.add(entry, exit)
 
 			cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit)})
 			if err != nil {
@@ -300,6 +338,9 @@ func TestChainWithPeersDeliversOnEverySuite(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("no reply came back")
 			}
+			if peerFlights.Load() != 2 {
+				t.Fatalf("%d KK flights, want two relay links", peerFlights.Load())
+			}
 			for i, n := range []*node{entry, middle, exit} {
 				if got := n.r.Stats().Snapshot(); got.RefusedExtend != 0 || got.FailedExtend != 0 {
 					t.Fatalf("hop %d refused %d extends and failed %d", i, got.RefusedExtend, got.FailedExtend)
@@ -307,4 +348,23 @@ func TestChainWithPeersDeliversOnEverySuite(t *testing.T) {
 			}
 		})
 	}
+}
+
+type modeRecorder struct {
+	net.Conn
+	t     *testing.T
+	want  byte
+	seen  *atomic.Int32
+	first bool
+}
+
+func (m *modeRecorder) Write(b []byte) (int, error) {
+	if !m.first {
+		m.first = true
+		if len(b) != 528 || b[0] != 4 || b[1] != m.want {
+			m.t.Errorf("first flight has %d bytes and mode %x, want 528 and mode %d", len(b), b[:min(3, len(b))], m.want)
+		}
+		m.seen.Add(1)
+	}
+	return m.Conn.Write(b)
 }

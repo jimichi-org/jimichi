@@ -43,9 +43,9 @@ func TestExitTracesMatchTheirFlow(t *testing.T) {
 
 // one flow, sent at once and without cover: n messages are n cells out and,
 // echoed by the exit, n cells back. Forwards each tap counts n+1 frames after
-// the initiator's hello, the setup and the n cells. Backwards it counts n: the
-// responder of a link first sends its key and one frame that confirms the
-// handshake, and a tap that took that frame for traffic would count n+1
+// initiator's handshake, the setup and the n cells. Backwards it counts n:
+// the responder's fixed-size handshake is skipped too, since counting it as
+// traffic would add a frame that carried no cell
 func TestTapsCountTheCellsOfAFlowWithoutTheHandshake(t *testing.T) {
 	run, err := Execute(Config{Flows: 1, Duration: 300 * time.Millisecond, SendEvery: 20 * time.Millisecond, Seed: 11})
 	if err != nil {

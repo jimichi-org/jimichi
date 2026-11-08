@@ -166,7 +166,12 @@ func Dial(cfg Config) (*Client, error) {
 		return nil, err
 	}
 	// a silent entry would otherwise hold Dial, and the circuit keys, for good
-	_ = raw.SetDeadline(time.Now().Add(orDefault(cfg.HandshakeTimeout, DefaultHandshakeTimeout)))
+	if err := raw.SetDeadline(time.Now().Add(orDefault(cfg.HandshakeTimeout, DefaultHandshakeTimeout))); err != nil {
+		circuit.Close()
+		release()
+		_ = raw.Close()
+		return nil, err
+	}
 	conn, err := link.Dial(raw, cfg.Provider, cfg.Chain[0].linkKey(), cfg.Chain[0].Identity)
 	if err != nil {
 		circuit.Close()
@@ -180,7 +185,12 @@ func Dial(cfg Config) (*Client, error) {
 		_ = conn.Close()
 		return nil, err
 	}
-	_ = raw.SetDeadline(time.Time{})
+	if err := raw.SetDeadline(time.Time{}); err != nil {
+		circuit.Close()
+		release()
+		_ = conn.Close()
+		return nil, err
+	}
 
 	c := &Client{
 		cfg:     cfg,
@@ -425,6 +435,14 @@ func (c *Client) send(cover bool, payload []byte) error {
 
 // called with mu held
 func (c *Client) usable() error {
+	if !c.closed && c.conn != nil {
+		if err := c.conn.Err(); err != nil {
+			c.ended = true
+			if errors.Is(err, link.ErrFrame) {
+				c.refused = ErrReplyFrame
+			}
+		}
+	}
 	switch {
 	case c.closed:
 		return errors.New("client: closed")

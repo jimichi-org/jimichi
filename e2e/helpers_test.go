@@ -415,7 +415,7 @@ func wantRefusedAsIs(t testing.TB, what string, s *Session, rec []byte, want err
 	_, err := s.Receive(rec)
 	wantErr(t, what, err, want)
 	if after := s.view(); !viewsEqual(after, before) {
-		t.Fatalf("%s changed the session:\n before %+v\n after  %+v", what, before, after)
+		t.Fatalf("%s changed session state", what)
 	}
 	switch want {
 	case ErrBad:

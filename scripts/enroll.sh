@@ -5,6 +5,7 @@
 set -euo pipefail
 
 . "$(dirname "$0")/lib.sh"
+. "$(dirname "$0")/deploy.sh"
 
 SUITE="${SUITE:-c25519}"
 CERT_TTL="${CERT_TTL:-72h}"
@@ -53,6 +54,8 @@ identity_of() {
 
 relay_list=$(relays)
 ports_fit "$relay_list"
+require_suite
+assert_suite_pods relay 5
 
 # the roster is every relay of the namespace, each under the name of its
 # deployment and the address of its service
@@ -86,11 +89,11 @@ esac
 # a relay takes one certificate per process, so after a failure every relay
 # that holds one, from this run or an earlier one, must restart first
 if ! anchor=$("$jimichi" enroll "${args[@]}"); then
-  echo "enrollment failed; a relay that has taken a certificate takes a new one only after a restart:" >&2
-  echo "  kubectl -n $NAMESPACE rollout restart deployment -l app=relay" >&2
-  echo "then run scripts/enroll.sh again" >&2
+  echo "enrollment failed; stop the complete stand before issuing a new CA:" >&2
+  echo "  SUITE=$SUITE CLUSTER=$CLUSTER NAMESPACE=$NAMESPACE bash scripts/e2e.sh" >&2
   exit 1
 fi
+[[ "$anchor" = "$SUITE:"* ]] || { echo "enrollment returned an anchor for another suite" >&2; exit 1; }
 kubectl -n "$NAMESPACE" create configmap jimichi-ca --from-literal=anchor="$anchor" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 echo "anchor $anchor"
