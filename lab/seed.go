@@ -10,6 +10,11 @@ const (
 	StreamTraining
 	StreamShift
 	StreamPermute
+	StreamMarkWorkload
+	StreamMarkCode
+	StreamMarkTarget
+	StreamMarkPermutation
+	StreamMarkOrder
 )
 
 // Derive mixes the parts into the seed with splitmix64, so neighbouring seeds,

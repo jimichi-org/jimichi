@@ -27,9 +27,9 @@ configuration, the seeds, the code revision and the host load before and after t
 ## Adversary models
 
 The codes are used in every results table. Measured so far: A1 with the count correlation attack
-(block 1) and the choice of chains for A4 (block 3). The experiments for A3, A5 and A6 are planned,
-see the status of each block; for A2 the cell distinguisher is in place (block 7) and its series is
-planned.
+(block 1) and the choice of chains for A4 (block 3). The A3 timing-mark experiment is implemented
+(block 2), without a published full series here. A5 and A6 experiments remain planned; for A2 the
+cell distinguisher is implemented (block 7) and its series remains planned.
 
 | Code | Adversary | What it sees and can do |
 |---|---|---|
@@ -169,21 +169,113 @@ multiplier against attack AUC; confidence intervals across runs are planned with
 
 ### Block 2. Active adversary A3, timing watermark
 
-Status: planned, not implemented ([#116](https://github.com/jimichi-org/jimichi/issues/116)). The
-lab has no active adversary and no watermark detector, and batching at nodes, which this block
-will test, is planned as well ([#82](https://github.com/jimichi-org/jimichi/issues/82)). Of the
-table below only the flow_closed and flow_closed_after fields of the report rows exist; the lab
-has no series over the ratio of periods.
+Status: implemented in `cmd/lab -set mark`. This is a separate local loopback echo experiment
+with six real clients and three real relays. Batching remains a separate planned feature
+([#82](https://github.com/jimichi-org/jimichi/issues/82)); this experiment preserves production
+encryption, queues, padding and timeout policy.
 
-The adversary will delay cells at the entry following a pattern and look for that pattern at the
-exit. This is stronger than passive correlation and will test whether batching helps.
+The synchronous lab wrapper delays encrypted frames of one selected client-entry connection,
+after encryption and before the entry completed-frame tap. It bypasses handshake bytes and
+never changes, deletes, duplicates or reorders accepted bytes. A frame starting in a gated slot
+waits until that slot ends; an already partial frame is not gated again. Backpressure changes
+the sender's realized schedule, including missed ticker ticks. The detector observes completed
+forward frames on the link into relay 3, including link padding, rather than application delivery.
 
-| Measured | Metric |
+| Parameter | Preset |
 |---|---|
-| Watermark detectability | AUC of the watermark detector at the exit |
-| Resistance threshold | batching parameters at which the watermark stops being detected |
-| Price of resistance | added delivery latency that buys it |
-| Circuit survival | share of circuits still open at the end of a run and time to the first closed circuit, against the ratio of the node period to the client's, from the flow_closed and flow_closed_after fields of the report rows; one lost or reordered cell closes a circuit |
+| Code | uniformly randomized balanced twelve symbols, six +1 and six -1; one repetition |
+| Slot h; symbol | 200 ms; four slots |
+| +1 / -1 gate | slot 0 / slot 2; remaining slots add no intentional wait |
+| Epoch / mark end | Origin + 2 s / Origin + 11.6 s |
+| Lag grid / final searched interval end | 0, 25, ..., 600 ms / Origin + 12.0 s |
+| Probe / cutoff | Origin + 12.2 s, 200 ms after the final interval / Origin + 16 s |
+| Relay periods; ratios to 50 ms | off, 25, 47.5, 50, 52.5, 75 ms; off, 0.5, 0.95, 1, 1.05, 1.5 |
+| Immediate client | exponential workload with mean gap 200 ms plus additive cover every 66,666,667 ns; client period null |
+| ConstantRate client | period 50 ms, no additive cover |
+| Workload / suite / repeats | 128-byte payload; c25519 primary, GOST supported; forty repeat blocks |
+
+Each block executes all 24 combinations of two client modes, six relay periods and active/sham
+arms in randomized order, using fresh keys and resources. Corresponding conditions share the
+workload draws, code and target. Independent seed domains supply workload/phases, code, target,
+candidate permutation and condition order. Equal workload seeds do not reproduce encryption,
+relay phases or operating-system scheduling. Both modes offer approximately twenty frames/s;
+this matches nominal means, not realized schedules or source distributions. Sham uses the same
+framing wrapper without consulting code symbols. Five contemporaneous candidates remain ungated.
+
+All six original circuits must establish their observed last links and setup frames. Joined reply
+collectors require a reserved preflight echo from each within a five-second deadline; blocked
+preflight sends are interrupted by closing owned connections. Origin follows all readiness
+observations. Setup failures remain attempts. The sixteen-second horizon continues after every
+circuit closes. Each reserved probe is invoked independently of a potentially blocked ordinary
+Send. Cutoff precedes administrative close and worker joining; later echoes and administrative
+closures are excluded. There is no reconnect. Queue overload and closure are availability outcomes.
+
+For candidate j, symbol k and lag l, count A in `[epoch+4kh+l, epoch+(4k+1)h+l)` and B in
+`[epoch+(4k+2)h+l, epoch+(4k+3)h+l)`. Let d=(B-A)/(A+B), or zero when both bins are empty.
+The score is `Round(1e9 * sum(code[k]*d[k])/12)`, divided by 1e9 for presentation. Maximize
+over all candidate/lag pairs. Enumerate all 924 balanced codes, repeating the complete search;
+the inclusive upper-tail count divided by 924 is p. Declare only when p<=0.05, the maximum is
+positive and one candidate uniquely attains it. Candidate ties abstain as ambiguous; lag ties
+display the smallest lag. Empty pairs remain in the denominator and supply no positive evidence.
+The detector receives only permuted last-link timestamps, code, clock bounds and search parameters.
+Truth, closure states, intervention counters and entry traces do not enter detection.
+
+Under the global no-mark null, random code assignment must be independent of the observed trace.
+The exhaustive test is conservative for that null, with minimum p=1/924. It does not bound wrong
+attribution in a marked execution: shared-host effects may affect decoys, and closure itself may
+contribute timing evidence. No fitted threshold or frame/bin shuffle is used. A hand-computed
+test has target d equal to the code, score 1, five zero-score decoys, one extreme code of 924,
+p=1/924 and AUC 1. This is a fixture, not a measured live result.
+
+| Reported quantity | Denominator and interpretation |
+|---|---|
+| Correct, wrong, ambiguous, none | correct per executed planned attempt and per established scorable attempt; failures retained separately |
+| Sham declarations | any declaration per scorable sham attempt |
+| Realization | completed delayed frames per symbol, waits started/aborted, planned and elapsed gate wait; none, partial or complete |
+| Open survival | no client-observed closure before cutoff; established attempts with known state, plus coverage and bounds for unknown states |
+| Responsive survival | open at cutoff and reserved probe echoed before cutoff; nil Send return alone is insufficient |
+| Joint identification/survival | correct declaration with open or responsive survival per executed planned attempt |
+| All-circuit survival | fraction open in each execution; six circuits are not six independent repeat blocks |
+| AUC | target versus five decoy maximum-over-lag scores within each established scorable active run; closed and empty candidates retained |
+| Delivery latency | invocation-to-matched-echo p50/p95/p99, conditional on echoes before cutoff; sample and unanswered counts |
+| Delivery and cost | ordinary calls started, nil/error returns, pending calls, echoes, nil returns without echoes and client drops; preflight/probe separate |
+| Frame multiplier | entry/last-link forward/backward completed frames in [Origin, cutoff), divided by successful Send returns before cutoff; zero denominator null |
+
+A nil Send return does not prove queue admission. Counter snapshots carry their actual post-join
+times. Active-minus-sham latency differences retain only pairs with defined values and report
+coverage. Wilson 95% intervals use one binary target observation per configuration per repeat
+block. AUC is a distribution of run-level values, never pooled candidates or a substitute for
+the declaration rule. Missing instrumentation is unscorable or unknown; valid silence is data.
+Delivery, latency and frame accounting are independent of detector eligibility. Available values
+survive incomplete captures and detector rejection, with partial status and observed-flow/trace
+coverage. Missing counts are null; an observed zero remains zero. Per-attempt host load is saved
+before and after execution, including failures, with available/unavailable status and null when
+unavailable. Load is contextual evidence for shared-host interference, not an exclusion threshold.
+
+The sole inferential endpoint is demonstrated correct declaration with responsive survival per
+executed planned attempt. Compare each positive relay period against zero within each client
+mode using matched repeat blocks and Wilcoxon. Holm uses the fixed family of ten comparisons;
+degenerate p=1, unavailable positions occupy 1 during adjustment and return null afterward.
+Incomplete or reduced-repeat series are descriptive. Cross-client and active/sham cost differences
+are descriptive. Nonsignificance establishes neither equivalence nor a resistance threshold.
+
+```sh
+go run ./cmd/lab -set mark -repeats 40 -suite c25519 -seed 1 -rev <verified-commit> -out artifacts
+go run ./cmd/lab -set mark -mark-replay artifacts/mark-v1-<run>/observations.jsonl
+```
+
+The separate `mark-v1` directory contains a manifest with matrix/revision/environment/seeds/order,
+an incremental attempt ledger, truth-free detector observations, separate truth/evaluation JSONL
+and a summary with counts, denominators, coverage and comparisons. Observation-only replay
+recomputes exactly the scores, p and decision. Times are integer nanoseconds on the common run
+trace clock; missing values are null with status. No keys, payloads, addresses or circuit identifiers
+are saved. Normalized error classes replace raw errors. Failed, closed, unscorable and zero-effect
+attempts remain in the artifacts; fatal output/environment/cleanup failures leave an incomplete
+manifest. The preset has 960 runs and 4 h 16 min of capture, plus setup, cleanup and analysis.
+
+Limits: one process on loopback, application frame-completion timestamps, known epoch/common
+clock, six candidates, one mark scale and a bounded lag search. The experiment does not establish
+resistance to arbitrary active attacks. Forty repeats give limited precision for rare declarations.
 
 ### Block 3. Node compromise, adversary A4
 
@@ -840,15 +932,18 @@ Rules:
   are clean; the number of dropped pairs is reported alongside, since a pair stays only when both
   levels survived. A pair shares random numbers, not time: the levels of a set run one after
   another, and a pair does not cancel drift in host load. Two quantities of one run are compared as
-  pairs in the same way: two attacks on the same links, a watermark and the null level of the
-  detector. Runs with different -seed values are independent and are compared by Mann-Whitney's
-  test.
+  pairs in the same way, for example two attacks on the same links. Runs with different -seed
+  values are independent and are compared by Mann-Whitney's test. Block 2 instead retains failed
+  and closed attempts in its binary endpoint, pairs conditions by repeat block and calibrates its
+  within-run detector by exhaustive code randomization, as specified in that block.
 - A p-value is reported only together with the effect size, and a significant but negligible
   difference is called negligible.
 - A Holm family holds only comparisons where rejecting the null hypothesis is the result. A
   comparison whose outcome is exact by construction (for Mann-Whitney the same value in every run
   of both groups, for Wilcoxon equal values in every pair; the procedure marks it as degenerate)
   and an undefined comparison (an empty group) are not tested and do not enter the family.
+  Block 2 is the explicit exception: its fixed ten-position family retains degenerate p=1 and
+  unavailable positions as 1 during adjustment, restoring unavailable outputs to null.
 - Agreement with a model and equality with guessing are not inferred from a non-significant p: with
   few runs a non-significant p shows nothing, and Holm's correction would only make such a claim
   easier. A proportion inside +-2 SE of the model is the same non-rejection, so the deviation in SE
@@ -896,7 +991,7 @@ Rules:
 | Block | Unit of observation | What is compared | Procedure | Why |
 |---|---|---|---|---|
 | 1, full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run | attack AUC at each level of a factor against the baseline configuration of the same set | Wilcoxon by repeat number with the rank-biserial correlation, Holm over the levels of one factor; between sets with different seeds Mann-Whitney with Cliff's delta | repeat r of every level of a set is derived from one seed, so these are pairs |
-| 2 ([#116](https://github.com/jimichi-org/jimichi/issues/116)) | clean run | watermark detector AUC against its null level in the same run; configurations of the block against each other | against the null level Wilcoxon; configurations by the pairing rule above; Holm over the configurations; resistance threshold by equivalence | the null level is the same detector on unmarked flows of the same run |
+| 2 | repeat block, all executed attempts retained | correct declaration with responsive survival per executed planned attempt; each positive relay period against zero within each client mode | matched Wilcoxon, fixed ten-comparison Holm family; degenerate p=1, unavailable null; only complete forty-block series inferential | exhaustive balanced-code global no-mark test within each run; contemporaneous decoys and separate sham arm; no resistance-threshold or equivalence claim |
 | 3 ([#117](https://github.com/jimichi-org/jimichi/issues/117)) | established echo chain and -peer client process (its first chain) for shares and the mean R; clean run for AUC, the request feature and the mean R with circuits set up at once | shares of chains and the mean share of the route recovered against the model; residual linking AUC from the vantage point of the rogue nodes against the A1 AUC on the same runs; scenarios of the block against each other | shares: Wilson interval, mean R: normal interval; agreement by equivalence with a margin set before the series at level 1 - 0.05/m, for the mean R only where linking is exact by construction; deviation in SE of the model as a consistency check; AUC: Wilcoxon for a claimed difference, "not lower" only as non-inferiority by an interval of the paired differences with a margin set before the series; Holm over non-degenerate comparisons | the model proportion is known exactly, so the question is agreement, not rejection; both attacks watch the same links of one run |
 | 7, series planned ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run of the series | AUC of the cell distinguisher on the run (unfolded), D and TV against the null level of the same run; the immediate mode with cover traffic against the constant rate by the per-run AUC and by the excess D - D_0 and TV - TV_0 over the null level, not by D and TV themselves: they depend on the group sizes, and the share of payload cells agrees between runs and modes only on average | a difference: D and TV against the null level by Wilcoxon over runs, the modes by the pairing rule above, Holm over the non-degenerate comparisons; equality with guessing: equivalence in which the lower bound of the s-quantile and the upper bound of the (1 - s)-quantile of the per-run AUC at level 1 - 0.05/m lie in the corridor [0.45, 0.55], at the constant-rate level only; the per-run AUCs of the series are independent since the direction comes from training runs outside it; s and the number of runs are set before the series from the pilot, m by the claim plan of the block | indistinguishability is claimed by equivalence of the AUC, not by a non-significant p, and bounds the share of runs that separate, not only the centre; D and TV serve only claims of a difference |
 

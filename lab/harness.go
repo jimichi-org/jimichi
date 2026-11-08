@@ -35,6 +35,7 @@ type Config struct {
 	// wraps each client's provider in the labelling oracle and fills
 	// Run.Labels; relays always get the bare provider
 	LabelCells bool
+	Mark       *MarkConfig
 }
 
 func (c Config) withDefaults() Config {
@@ -74,6 +75,7 @@ type Run struct {
 	Dropped   uint64
 	// cells the relays themselves dropped, from their aggregated counters
 	RelayDropped uint64
+	RelayPadding uint64
 	// circuits the relays closed, for any cause in relay.Counters.Broken; such a
 	// flow stops before the run ends
 	RelayBroken uint64
@@ -101,6 +103,7 @@ type Run struct {
 	// with Config.LabelCells, per flow; read after Execute returns, when every
 	// client is closed and no cell can follow
 	Labels []*Labels
+	Mark   *MarkResult
 }
 
 type node struct {
@@ -109,11 +112,15 @@ type node struct {
 	relay *relay.Relay
 	ln    net.Listener
 	priv  *secmem.Buffer
+	done  chan struct{}
 }
 
 // Execute runs one configuration end to end and returns what the adversary saw
 func Execute(cfg Config) (*Run, error) {
 	cfg = cfg.withDefaults()
+	if cfg.Mark != nil {
+		return executeMarked(cfg, defaultMarkPlan())
+	}
 	provider, err := suite.New(cfg.Suite)
 	if err != nil {
 		return nil, err
@@ -163,6 +170,13 @@ func Execute(cfg Config) (*Run, error) {
 	}
 
 	nodes := make([]*node, cfg.Hops)
+	defer func() {
+		for _, n := range nodes {
+			if n != nil {
+				stopNode(n)
+			}
+		}
+	}()
 	for i := cfg.Hops - 1; i >= 0; i-- {
 		observed := i == cfg.Hops-2
 		n, err := startNode(provider, cfg.RelayPeriod, observed, lastHopDial)
@@ -171,13 +185,6 @@ func Execute(cfg Config) (*Run, error) {
 		}
 		nodes[i] = n
 	}
-	defer func() {
-		for _, n := range nodes {
-			n.relay.Close()
-			_ = n.ln.Close()
-			n.priv.Release()
-		}
-	}()
 
 	chain := make([]client.Node, cfg.Hops)
 	for i, n := range nodes {
@@ -315,6 +322,7 @@ func Execute(cfg Config) (*Run, error) {
 
 func (r *Run) addRelay(c relay.Counters) {
 	r.RelayDropped += c.Dropped
+	r.RelayPadding += c.Padding
 	r.RelayBroken += c.Broken
 	r.RelayTimedOut += c.TimedOut
 	r.RelayExpired += c.Expired
@@ -515,9 +523,13 @@ func startNode(provider jcrypto.CryptoProvider, period time.Duration, observed b
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		r.Close()
 		priv.Release()
 		return nil, err
 	}
-	go func() { _ = r.Serve(ln) }()
-	return &node{addr: ln.Addr().String(), pub: pub, relay: r, ln: ln, priv: priv}, nil
+	done := make(chan struct{})
+	go func() { defer close(done); _ = r.Serve(ln) }()
+	return &node{addr: ln.Addr().String(), pub: pub, relay: r, ln: ln, priv: priv, done: done}, nil
 }
+
+func stopNode(n *node) { n.relay.Close(); _ = n.ln.Close(); <-n.done; n.priv.Release() }

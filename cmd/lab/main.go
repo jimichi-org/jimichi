@@ -167,7 +167,8 @@ func command(args []string, stdout, stderr io.Writer) int {
 	binList := fs.String("bins", "100ms", "comma-separated observation windows, each scored on the same runs")
 	repeats := fs.Int("repeats", 1, "runs per configuration")
 	out := fs.String("out", "artifacts", "directory for the json report")
-	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic, cover: payload against cover cells at the entry, immediate with cover against constant rate")
+	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, mark: active timing marks with sham controls and survival, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic, cover: payload against cover cells at the entry, immediate with cover against constant rate")
+	markReplay := fs.String("mark-replay", "", "mark set: replay a mark-v1 observation JSONL without truth")
 	rev := fs.String("rev", "unknown", "code revision recorded in every row")
 	seed := fs.Int64("seed", 1, "base seed; every repeat derives its own from it")
 	suiteName := fs.String("suite", "c25519", "primitive suite for every node and client: gost or c25519")
@@ -185,6 +186,15 @@ func command(args []string, stdout, stderr io.Writer) int {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+		return 2
+	}
+	if *set == "mark" {
+		explicit := make(map[string]bool)
+		fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+		return markCommand(markFlags{flows: *flows, hops: *hops, duration: *duration, send: *send, repeats: *repeats, seed: *seed, suite: *suiteName, revision: *rev, out: *out, replay: *markReplay, explicit: explicit}, stdout, stderr)
+	}
+	if *markReplay != "" {
+		fmt.Fprintln(stderr, "-mark-replay requires -set mark")
 		return 2
 	}
 
