@@ -341,10 +341,7 @@ func (s *Session) startHandshake() error {
 }
 
 func (s *Session) writeHandshake(hs *noise.HandshakeState, kind byte) ([]byte, error) {
-	if err := hs.MixHash([]byte{kind}); err != nil {
-		return nil, err
-	}
-	msg, err := hs.WriteMessage(make([]byte, s.handshakePayload()))
+	msg, err := hs.WriteMessageBound([]byte{kind}, make([]byte, s.handshakePayload()))
 	if err != nil {
 		return nil, err
 	}
@@ -601,10 +598,7 @@ func (s *Session) receiveKK1(rec []byte) (Event, error) {
 		return Event{}, err
 	}
 	defer hs.Close()
-	if err := hs.MixHash([]byte{kindKK1}); err != nil {
-		return Event{}, err
-	}
-	if _, err := hs.ReadMessage(rec[1:]); err != nil {
+	if _, err := hs.ReadMessageBound([]byte{kindKK1}, rec[1:]); err != nil {
 		return Event{}, notOpened(err)
 	}
 	s.seen.add(tag)
@@ -637,10 +631,7 @@ func (s *Session) receiveKK2(rec []byte) (Event, error) {
 	if s.hs == nil {
 		return Event{}, ErrBad
 	}
-	if err := s.hs.MixHash([]byte{kindKK2}); err != nil {
-		return Event{}, err
-	}
-	if _, err := s.hs.ReadMessage(rec[1:]); err != nil {
+	if _, err := s.hs.ReadMessageBound([]byte{kindKK2}, rec[1:]); err != nil {
 		return Event{}, notOpened(err)
 	}
 	i2r, r2i, sid, err := s.hs.Split()

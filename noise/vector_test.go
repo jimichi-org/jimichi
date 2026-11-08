@@ -156,7 +156,7 @@ func TestKKVectors(t *testing.T) {
 					{"r2i", hex.EncodeToString(s.r2i), v.r2i},
 				} {
 					if c.got != c.want {
-						t.Fatalf("%s: %s = %s, want %s", name, c.what, c.got, c.want)
+						t.Fatalf("%s: %s mismatch", name, c.what)
 					}
 				}
 			}

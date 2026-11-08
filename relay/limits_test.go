@@ -34,7 +34,10 @@ func serveOn(t *testing.T, p jcrypto.CryptoProvider, cfg Config, ln net.Listener
 		t.Fatal(err)
 	}
 	t.Cleanup(priv.Release)
-	cfg.Provider, cfg.StaticPriv, cfg.StaticPub = p, priv, pub
+	cfg.Provider, cfg.StaticPriv, cfg.StaticPub, cfg.Addr = p, priv, pub, ln.Addr().String()
+	if cfg.Peers == nil {
+		cfg.AllowAnonymous = true
+	}
 	r, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -66,6 +69,11 @@ type countingProvider struct {
 func (c *countingProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	c.keyPairs.Add(1)
 	return c.CryptoProvider.GenerateEphemeral()
+}
+
+func (c *countingProvider) NoiseDH(priv *secmem.Buffer, pub []byte) (*secmem.Buffer, error) {
+	c.agreements.Add(1)
+	return c.CryptoProvider.NoiseDH(priv, pub)
 }
 
 func (c *countingProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
@@ -330,7 +338,7 @@ func startStalledHop(t *testing.T) *stalledHop {
 		if tcp, ok := raw.(*net.TCPConn); ok {
 			_ = tcp.SetReadBuffer(1)
 		}
-		lc, err := link.Accept(raw, p, priv, pub, nil)
+		lc, err := link.AcceptWithConfig(raw, p, link.AcceptConfig{Local: link.Local{StaticPriv: priv, StaticPub: pub, Identity: nil}, AllowAnonymous: true})
 		if err != nil {
 			return
 		}

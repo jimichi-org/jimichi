@@ -5,6 +5,7 @@
 set -euo pipefail
 
 . "$(dirname "$0")/lib.sh"
+. "$(dirname "$0")/deploy.sh"
 
 SUITE="${SUITE:-c25519}"
 CERT_TTL="${CERT_TTL:-72h}"
@@ -21,7 +22,7 @@ logs=$(mktemp -d)
 forwards=()
 cleanup() {
   local status=$?
-  for pid in "${forwards[@]}"; do kill "$pid" 2>/dev/null || true; done
+  stop_forwards
   if [ "$status" -ne 0 ]; then
     for f in "$logs"/*.log; do
       [ -e "$f" ] && { echo "--- $(basename "$f" .log) port-forward" >&2; cat "$f" >&2; }
@@ -53,6 +54,8 @@ identity_of() {
 
 relay_list=$(relays)
 ports_fit "$relay_list"
+require_suite
+assert_suite_pods relay 5
 
 # the roster is every relay of the namespace, each under the name of its
 # deployment and the address of its service
@@ -68,7 +71,7 @@ for relay in $relay_list; do
   log="$logs/$relay.log"
   # the admin port listens on loopback inside the pod, so only a port-forward
   # through the kube API reaches it
-  kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod" "$admin:9101" "$info:9100" >"$log" 2>&1 &
+  kubectl_exec -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod" "$admin:9101" "$info:9100" >"$log" 2>&1 &
   forwards+=("$!")
   wait_forward "$!" "$log" "$admin" "$info"
   args+=(-node "$relay=$(relay_addr "$relay"),admin=127.0.0.1:$admin,info=127.0.0.1:$info,identity=$identity")
@@ -86,11 +89,11 @@ esac
 # a relay takes one certificate per process, so after a failure every relay
 # that holds one, from this run or an earlier one, must restart first
 if ! anchor=$("$jimichi" enroll "${args[@]}"); then
-  echo "enrollment failed; a relay that has taken a certificate takes a new one only after a restart:" >&2
-  echo "  kubectl -n $NAMESPACE rollout restart deployment -l app=relay" >&2
-  echo "then run scripts/enroll.sh again" >&2
+  echo "enrollment failed; stop the complete stand before issuing a new CA:" >&2
+  echo "  SUITE=$SUITE CLUSTER=$CLUSTER NAMESPACE=$NAMESPACE bash scripts/e2e.sh" >&2
   exit 1
 fi
+[[ "$anchor" = "$SUITE:"* ]] || { echo "enrollment returned an anchor for another suite" >&2; exit 1; }
 kubectl -n "$NAMESPACE" create configmap jimichi-ca --from-literal=anchor="$anchor" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 echo "anchor $anchor"
@@ -100,8 +103,7 @@ echo "anchor $anchor"
 clients=$(kubectl -n "$NAMESPACE" get deployment -l app=client -o name)
 if [ -n "$clients" ]; then
   # the forwards to the relays go first: the introduction forwards the clients
-  for pid in "${forwards[@]}"; do kill "$pid" 2>/dev/null || true; done
-  forwards=()
+  stop_forwards
   kubectl -n "$NAMESPACE" rollout restart deployment -l app=client >/dev/null
   for deploy in $clients; do
     kubectl -n "$NAMESPACE" rollout status "$deploy" --timeout=180s >/dev/null

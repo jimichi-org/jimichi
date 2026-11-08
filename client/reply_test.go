@@ -298,7 +298,7 @@ func acceptScripted(ln net.Listener, p jcrypto.CryptoProvider, privs []*secmem.B
 	if err != nil {
 		return nil, err
 	}
-	conn, err := link.Accept(raw, p, privs[0], pubs[0], nil)
+	conn, err := link.AcceptWithConfig(raw, p, link.AcceptConfig{Local: link.Local{StaticPriv: privs[0], StaticPub: pubs[0], Identity: nil}, AllowAnonymous: true})
 	if err != nil {
 		_ = raw.Close()
 		return nil, err
@@ -635,7 +635,8 @@ func (w *closeWatch) Close() error {
 	w.once.Do(func() {
 		if cl := w.client.Load(); cl != nil {
 			cl.mu.Lock()
-			w.atClose <- atClose{refused: cl.refused, send: cl.usable()}
+			send := cl.usable()
+			w.atClose <- atClose{refused: cl.refused, send: send}
 			cl.mu.Unlock()
 		}
 	})

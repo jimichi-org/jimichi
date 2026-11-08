@@ -40,6 +40,8 @@ jobs:
       # actually run, so the race detector and the real secmem path go together
       - name: unit and integration tests
         run: go test -race -count=1 ./...
+      - name: standard handshake vectors
+        run: go test -race -count=1 -tags noisevectors ./noise ./crypto/noisevector
       # the threat model cites these as the check of key memory: the log must show
       # both as passed, and a rename that leaves the pattern matching nothing fails
       - name: key memory flags
@@ -82,8 +84,6 @@ jobs:
         with:
           cluster_name: jimichi
           config: deploy/kind/ci.yaml
-      - name: load images
-        run: kind load docker-image jimichi/relay:dev jimichi/client:dev --name jimichi
       # enroll.sh builds cmd/jimichi on the runner, where the CA lives for the run
       - name: deploy, enroll and wait for a round trip
         env:

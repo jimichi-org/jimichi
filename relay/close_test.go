@@ -45,7 +45,7 @@ func linkPair(t *testing.T, p jcrypto.CryptoProvider) (dialled, accepted *link.C
 	a, b := net.Pipe()
 	done := make(chan *link.Conn, 1)
 	go func() {
-		c, err := link.Accept(b, p, nil, nil, nil)
+		c, err := link.AcceptWithConfig(b, p, link.AcceptConfig{Local: link.Local{StaticPriv: nil, StaticPub: nil, Identity: nil}, AllowAnonymous: true})
 		if err != nil {
 			done <- nil
 			return
@@ -63,7 +63,25 @@ func linkPair(t *testing.T, p jcrypto.CryptoProvider) (dialled, accepted *link.C
 		_ = dialled.Close()
 		_ = accepted.Close()
 	})
+	confirmLink(t, dialled, accepted)
 	return dialled, accepted
+}
+
+func confirmLink(t *testing.T, initiator, responder *link.Conn) {
+	t.Helper()
+	cell, err := wire.NewCell(wire.Header{Kind: wire.KindData}, make([]byte, wire.BodySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- initiator.WriteCell(cell) }()
+	var got wire.Cell
+	if err := responder.ReadCell(&got); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 }
 
 // a reply too long for a cell goes back as cover under its own number and is
@@ -168,7 +186,7 @@ func tcpLinkPair(t *testing.T, p jcrypto.CryptoProvider) (dialled, accepted *lin
 			done <- nil
 			return
 		}
-		c, err := link.Accept(raw, p, nil, nil, nil)
+		c, err := link.AcceptWithConfig(raw, p, link.AcceptConfig{Local: link.Local{StaticPriv: nil, StaticPub: nil, Identity: nil}, AllowAnonymous: true})
 		if err != nil {
 			_ = raw.Close()
 			done <- nil
@@ -191,6 +209,7 @@ func tcpLinkPair(t *testing.T, p jcrypto.CryptoProvider) (dialled, accepted *lin
 		_ = dialled.Close()
 		_ = accepted.Close()
 	})
+	confirmLink(t, dialled, accepted)
 	return dialled, accepted
 }
 

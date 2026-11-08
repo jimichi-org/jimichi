@@ -16,6 +16,7 @@ import (
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/link"
+	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/wire"
 )
 
@@ -25,6 +26,7 @@ type Deliver func(circuit uint64, payload []byte) []byte
 
 type Config struct {
 	Provider   jcrypto.CryptoProvider
+	Addr       string
 	StaticPriv *secmem.Buffer
 	// the public half as the node publishes it: an initiator that authenticates
 	// the link, and a client when Onion is nil, bind their keys to these bytes
@@ -76,16 +78,11 @@ type Config struct {
 	// the nodes this one extends to and the keys each must prove; nil extends
 	// to any address over an anonymous link, which is the baseline without node
 	// authentication
-	Peers func(addr string) (Peer, bool)
+	Peers          func(addr string) (Peer, bool)
+	AllowAnonymous bool
 }
 
-// a node to extend to, as its verified descriptor names it
-type Peer struct {
-	LinkPub []byte
-	// the key its certificate certifies; the link binds it, so only the node
-	// that holds the link key and binds this identity confirms the link
-	Identity []byte
-}
+type Peer = link.Peer
 
 type Relay struct {
 	cfg   Config
@@ -209,6 +206,9 @@ func New(cfg Config) (*Relay, error) {
 	}
 	if len(cfg.StaticPub) != pubSize {
 		return nil, fmt.Errorf("%w: %d bytes, want %d", ErrStaticPubSize, len(cfg.StaticPub), pubSize)
+	}
+	if cfg.Peers != nil && !pki.ValidAddr(cfg.Addr) {
+		return nil, errors.New("relay: authenticated links need the local roster address")
 	}
 	cfg.StaticPub = bytes.Clone(cfg.StaticPub)
 	cfg.Identity = bytes.Clone(cfg.Identity)
@@ -379,16 +379,26 @@ func (r *Relay) handle(conn net.Conn, src netip.Addr) {
 	// an honest initiator sends its hello at once, so a short deadline costs it
 	// nothing and frees the slot of a silent one early
 	if r.lim.handshake > 0 {
-		_ = conn.SetDeadline(time.Now().Add(r.lim.handshake))
+		if err := conn.SetDeadline(time.Now().Add(r.lim.handshake)); err != nil {
+			r.handshakeDone(src)
+			r.stats.timeout(err)
+			return
+		}
 	}
-	lc, err := link.Accept(conn, r.cfg.Provider, r.cfg.StaticPriv, r.cfg.StaticPub, r.cfg.Identity)
+	lc, err := link.AcceptWithConfig(conn, r.cfg.Provider, link.AcceptConfig{
+		Local: link.Local{StaticPriv: r.cfg.StaticPriv, StaticPub: r.cfg.StaticPub, Identity: r.cfg.Identity, Addr: r.cfg.Addr},
+		Peers: r.cfg.Peers, AllowAnonymous: r.cfg.AllowAnonymous,
+	})
 	r.handshakeDone(src)
 	if err != nil {
 		r.stats.timeout(err)
 		return
 	}
 	lc.SetWriteTimeout(r.lim.write)
-	_ = conn.SetDeadline(time.Time{})
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		_ = lc.Close()
+		return
+	}
 	// a link is worth its socket only once it carries a circuit
 	awaiting := r.lim.setup > 0
 	if awaiting {
@@ -701,6 +711,10 @@ func (r *Relay) setupFailed(from *link.Conn, err error) error {
 }
 
 func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
+	if r.cfg.Peers == nil && !r.cfg.AllowAnonymous {
+		r.stats.add(&r.stats.RefusedExtend)
+		return errNotPeer
+	}
 	var peer Peer
 	if r.cfg.Peers != nil {
 		known, ok := r.cfg.Peers(layer.NextAddr)
@@ -727,12 +741,20 @@ func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
 		return err
 	}
 
-	_ = raw.SetDeadline(time.Now().Add(r.onward))
-	// with the next node's link key and identity the frame keys depend on both,
-	// and the handshake ends only once that node has shown it derived them, so
-	// the setup goes to no other; without a key the link is anonymous and hides
-	// headers from a passive observer only
-	conn, err := link.Dial(raw, r.cfg.Provider, peer.LinkPub, peer.Identity)
+	if err := raw.SetDeadline(time.Now().Add(r.onward)); err != nil {
+		_ = raw.Close()
+		return fail(err)
+	}
+	// KK binds both roster identities and static keys before the setup leaves;
+	// the explicit baseline has no peer roster and uses NN
+	var conn *link.Conn
+	if r.cfg.Peers != nil {
+		conn, err = link.DialPeer(raw, r.cfg.Provider, link.Local{
+			StaticPriv: r.cfg.StaticPriv, StaticPub: r.cfg.StaticPub, Identity: r.cfg.Identity, Addr: r.cfg.Addr,
+		}, peer)
+	} else {
+		conn, err = link.Dial(raw, r.cfg.Provider, nil, nil)
+	}
 	if err != nil {
 		if errors.Is(err, link.ErrHandshake) {
 			r.stats.add(&r.stats.FailedExtend)
@@ -749,7 +771,10 @@ func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
 		_ = conn.Close()
 		return fail(err)
 	}
-	_ = raw.SetDeadline(time.Time{})
+	if err := raw.SetDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return fail(err)
+	}
 
 	c.next = conn
 	c.nextRaw = raw
