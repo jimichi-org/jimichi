@@ -123,7 +123,7 @@ func newPeerBed(t *testing.T, s jcrypto.Suite) *peerBed {
 			t.Fatal(err)
 		}
 		t.Cleanup(priv.Release)
-		r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub, Deliver: deliver})
+		r, err := relay.New(relay.Config{AllowAnonymous: true, Provider: p, StaticPriv: priv, StaticPub: pub, Deliver: deliver})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -702,7 +702,7 @@ func refusingEntry(t *testing.T, p jcrypto.CryptoProvider) (addrs []string, info
 	circuits = new(atomic.Int32)
 	serve := func(raw net.Conn) {
 		defer raw.Close()
-		conn, err := link.Accept(raw, p, linkPriv, linkPub, nil)
+		conn, err := link.AcceptWithConfig(raw, p, link.AcceptConfig{Local: link.Local{StaticPriv: linkPriv, StaticPub: linkPub, Identity: nil}, AllowAnonymous: true})
 		if err != nil {
 			return
 		}

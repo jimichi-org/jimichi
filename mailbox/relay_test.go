@@ -19,7 +19,7 @@ func startNode(t *testing.T, p jcrypto.CryptoProvider, deliver relay.Deliver) cl
 		t.Fatal(err)
 	}
 	t.Cleanup(priv.Release)
-	r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub, Deliver: deliver})
+	r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub, Deliver: deliver, AllowAnonymous: true})
 	if err != nil {
 		t.Fatal(err)
 	}

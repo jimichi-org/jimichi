@@ -257,7 +257,7 @@ func seqBytes(first byte, n int) []byte {
 func checkHex(t *testing.T, what string, got []byte, want string) {
 	t.Helper()
 	if h := hex.EncodeToString(got); h != want {
-		t.Fatalf("%s = %s, want %s", what, h, want)
+		t.Fatalf("%s mismatch", what)
 	}
 }
 
@@ -323,7 +323,7 @@ func TestVectors(t *testing.T) {
 					{"ck2", v.ck2}, {"k2", v.k2}, {"i2r", v.i2r}, {"r2i", v.r2i},
 				} {
 					if !side.vs.tp.keys[k.want] {
-						t.Fatalf("%s: %s %s never derived", side.name, k.name, k.want)
+						t.Fatalf("%s: %s never derived", side.name, k.name)
 					}
 				}
 				for _, u := range v.ukm {
@@ -340,7 +340,7 @@ func TestVectors(t *testing.T) {
 			data := mustSeal(t, ini.s, "hello")
 			checkHex(t, "Hash(data i2r n=0)", p.Hash(data), v.dataI)
 			if ev := mustReceive(t, resp.s, data, EventMessage); string(ev.Body) != "hello" {
-				t.Fatalf("body %q", ev.Body)
+				t.Fatal("message body mismatch")
 			}
 			reply := mustSeal(t, resp.s, "hello")
 			checkHex(t, "Hash(data r2i n=0)", p.Hash(reply), v.dataR)
@@ -353,7 +353,7 @@ func TestVectors(t *testing.T) {
 				{"mk_0 r2i", v.mk0R, resp.tp}, {"mk_0 r2i", v.mk0R, ini.tp},
 			} {
 				if !k.tp.keys[k.want] {
-					t.Fatalf("%s %s never derived", k.name, k.want)
+					t.Fatalf("%s never derived", k.name)
 				}
 			}
 
@@ -367,7 +367,7 @@ func TestVectors(t *testing.T) {
 			for i, want := range v.mkI {
 				for _, side := range []vectorSide{ini, resp} {
 					if !side.tp.keys[want] {
-						t.Fatalf("mk_%d i2r %s never derived", i+1, want)
+						t.Fatalf("mk_%d i2r never derived", i+1)
 					}
 				}
 			}

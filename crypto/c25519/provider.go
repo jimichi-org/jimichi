@@ -14,6 +14,7 @@ import (
 	"golang.org/x/crypto/hkdf"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/internal/noisekdf"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
@@ -23,13 +24,51 @@ const (
 	keySize  = chacha20poly1305.KeySize
 )
 
-type Provider struct{}
+type Provider struct {
+	noiseAlloc func(int) (*secmem.Buffer, error)
+}
 
 func New() *Provider { return &Provider{} }
 
 func (p *Provider) Suite() jcrypto.Suite { return jcrypto.SuiteC25519 }
 
 func (p *Provider) KeySize() int { return keySize }
+
+func (p *Provider) HandshakeInfo() jcrypto.HandshakeInfo {
+	return jcrypto.HandshakeInfo{DHName: "25519", CipherName: "JimichiXChaChaPoly", HashName: "SHA256",
+		PublicKeySize: pubSize, DHSize: 32, HashSize: 32, KeySize: keySize, NonceSize: 24, TagSize: 16}
+}
+
+func (p *Provider) noiseBuffer(size int) (*secmem.Buffer, error) {
+	if p.noiseAlloc != nil {
+		return p.noiseAlloc(size)
+	}
+	return secmem.New(size)
+}
+
+func (p *Provider) NoiseDH(priv *secmem.Buffer, peerPub []byte) (*secmem.Buffer, error) {
+	if priv == nil || len(priv.Bytes()) != privSize {
+		return nil, jcrypto.ErrBadKeySize
+	}
+	if len(peerPub) != pubSize {
+		return nil, jcrypto.ErrBadPublicKey
+	}
+	shared, err := curve25519.X25519(priv.Bytes(), peerPub)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", jcrypto.ErrBadPublicKey, err)
+	}
+	defer secmem.Zero(shared)
+	out, err := p.noiseBuffer(keySize)
+	if err != nil {
+		return nil, err
+	}
+	copy(out.Bytes(), shared)
+	return out, nil
+}
+
+func (p *Provider) NoiseKDF2(ck, input *secmem.Buffer) (*secmem.Buffer, *secmem.Buffer, error) {
+	return noisekdf.Pair(sha256.New, ck, input, p.noiseBuffer)
+}
 
 func (p *Provider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	priv, err := secmem.New(privSize)

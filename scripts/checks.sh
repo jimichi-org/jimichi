@@ -189,10 +189,6 @@ put_share() {
 }
 
 forwards=()
-stop_forwards() {
-  for pid in "${forwards[@]}"; do kill "$pid" 2>/dev/null || true; done
-  forwards=()
-}
 
 # the card goes to curl on standard input, not on its command line
 put_card() {
@@ -212,10 +208,10 @@ refuse_other_cards() {
   port_a=$((CHECK_PORT_BASE + 1))
   port_b=$((CHECK_PORT_BASE + 2))
   log=$(mktemp)
-  kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod_a" "$port_a:9201" >"$log" 2>&1 &
+  kubectl_exec -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod_a" "$port_a:9201" >"$log" 2>&1 &
   forwards+=("$!")
   wait_forward "$!" "$log" "$port_a" || return 1
-  kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod_b" "$port_b:9201" >"$log.b" 2>&1 &
+  kubectl_exec -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod_b" "$port_b:9201" >"$log.b" 2>&1 &
   forwards+=("$!")
   wait_forward "$!" "$log.b" "$port_b" || return 1
   rm -f "$log" "$log.b"

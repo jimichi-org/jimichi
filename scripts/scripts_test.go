@@ -51,6 +51,12 @@ func bash(t *testing.T) string {
 		if err != nil || !strings.HasPrefix(string(kernel), "MINGW") && !strings.HasPrefix(string(kernel), "MSYS") {
 			t.Skip("the bash found is not Git Bash")
 		}
+		// the bin launcher prepends bundled curl and ps ahead of test stand-ins
+		resolved, err := exec.Command(path, "-c", `cygpath -w "$(command -v bash)"`).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		path = strings.TrimSpace(string(resolved))
 	}
 	return path
 }

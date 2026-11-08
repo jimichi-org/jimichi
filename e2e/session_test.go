@@ -152,10 +152,7 @@ func TestHandshakePayloadMustBeZero(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer forged.Close()
-		if err := forged.MixHash([]byte{kindKK1}); err != nil {
-			t.Fatal(err)
-		}
-		msg, err := forged.WriteMessage(payload)
+		msg, err := forged.WriteMessageBound([]byte{kindKK1}, payload)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -169,16 +166,10 @@ func TestHandshakePayloadMustBeZero(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer reader.Close()
-		if err := reader.MixHash([]byte{kindKK1}); err != nil {
+		if _, err := reader.ReadMessageBound([]byte{kindKK1}, kk1[1:]); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := reader.ReadMessage(kk1[1:]); err != nil {
-			t.Fatal(err)
-		}
-		if err := reader.MixHash([]byte{kindKK2}); err != nil {
-			t.Fatal(err)
-		}
-		bad, err := reader.WriteMessage(payload)
+		bad, err := reader.WriteMessageBound([]byte{kindKK2}, payload)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -42,14 +42,18 @@ func startRelay(t *testing.T, p jcrypto.CryptoProvider, cfg relay.Config) *node 
 	}
 	t.Cleanup(priv.Release)
 
-	cfg.Provider, cfg.StaticPriv, cfg.StaticPub = p, priv, pub
-	r, err := relay.New(cfg)
-	if err != nil {
-		t.Fatalf("relay.New: %v", err)
-	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
+	}
+	cfg.Provider, cfg.StaticPriv, cfg.StaticPub, cfg.Addr = p, priv, pub, ln.Addr().String()
+	if cfg.Peers == nil {
+		cfg.AllowAnonymous = true
+	}
+	r, err := relay.New(cfg)
+	if err != nil {
+		_ = ln.Close()
+		t.Fatalf("relay.New: %v", err)
 	}
 	go func() { _ = r.Serve(ln) }()
 	t.Cleanup(func() {
@@ -1325,7 +1329,7 @@ func (lt *linkTap) dial(ctx context.Context, network, addr string) (net.Conn, er
 }
 
 func (lt *linkTap) run(far, up net.Conn) {
-	in, err := link.Accept(far, lt.p, nil, nil, nil)
+	in, err := link.AcceptWithConfig(far, lt.p, link.AcceptConfig{Local: link.Local{StaticPriv: nil, StaticPub: nil, Identity: nil}, AllowAnonymous: true})
 	if err != nil {
 		_ = far.Close()
 		_ = up.Close()
@@ -1734,7 +1738,7 @@ func startScriptedExit(t *testing.T, p jcrypto.CryptoProvider) *scriptedExit {
 		if err != nil {
 			return
 		}
-		conn, err := link.Accept(raw, p, nil, nil, nil)
+		conn, err := link.AcceptWithConfig(raw, p, link.AcceptConfig{Local: link.Local{StaticPriv: nil, StaticPub: nil, Identity: nil}, AllowAnonymous: true})
 		if err != nil {
 			_ = raw.Close()
 			return

@@ -141,6 +141,7 @@ func (st *trustStand) serve(t *testing.T, configs []relay.Config, listeners []ne
 	t.Helper()
 	for i, tr := range st.relays {
 		cfg := configs[i]
+		cfg.Addr = tr.addr
 		cfg.Peers = func(addr string) (relay.Peer, bool) {
 			peer, ok := tr.peers[addr]
 			return peer, ok

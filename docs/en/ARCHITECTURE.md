@@ -208,56 +208,126 @@ Every cell is 512 bytes, payload and cover cells alike.
 
 ## Link encryption
 
-A cell never crosses a link in the clear: it travels inside an encrypted frame. Without this layer
-the cell header is visible on the wire: an observer on a link would see the kind, the circuit
-identifier and the counter of every cell.
+A cell crosses a link inside an encrypted frame. An observer cannot see its kind, circuit
+identifier or counter. The noise package uses one token interpreter and transaction processor
+with two explicitly selected profiles: NewNoise for links and the legacy New for end-to-end KK.
+The link profile runs Noise transitions: initialise h and ck from the protocol name, MixHash
+with H(h || d), MixKey with NoiseDH and NoiseKDF2, EncryptAndHash, and Split with NoiseKDF2(ck, nil).
 
-- Handshake: the initiator sends a mode byte and an ephemeral public key. The responder answers
-  with its own ephemeral public key and one frame: a link padding cell sealed as frame 0 of its
-  direction. The secret of the two ephemeral keys gives the link forward secrecy.
-- That frame confirms the keys before any cell is sent. The initiator finishes the handshake only
-  once the frame has opened under the keys it derived and holds a padding cell, within the
-  deadline of whoever dials. Otherwise the handshake fails, and the initiator has sent nothing but
-  its hello. The responder sends the frame in both modes, and the frames of its direction go on
-  from number 1. The responder's part of the handshake is its key and that one frame: 32 + 528
-  bytes on c25519, 64 + 528 on GOST.
-- The frame keys are bound to the transcript of the handshake: the format version, the mode
-  byte, the ephemeral keys of both sides as they crossed the wire and, in the authenticated mode,
-  the responder's link key and, when nodes are authenticated, the responder's identity key that
-  its certificate certifies. The hash of the transcript goes into every agreement and into the
-  derivation of every key (CRYPTO, section "Key derivation"). A byte of the hello or of the
-  answer changed on the way is either refused outright (an unknown mode, a key the agreement
-  does not accept) or gives the two sides different keys, so the confirmation frame does not
-  open; in every case the handshake fails.
-- In the authenticated mode the initiator makes a second agreement, of its ephemeral key with
-  the responder's link key taken from a verified descriptor: the client does it for the entry
-  node, a node for the next node of the circuit. The two secrets are chained (MixKey), and the
-  frame keys depend on both. Every link of a circuit is therefore authenticated to the node it
-  leads to: only the holder of that link key that binds the same identity derives the frame keys,
-  so a responder without them cannot produce the confirmation and is sent no cell. The responder
-  puts its published link key and its identity key into the transcript, and a hello in the
-  authenticated mode to a responder without a link key is refused before any agreement. The
-  responder does not authenticate the initiator.
-- A node extends a circuit only to a node of its roster whose verified descriptor it holds
-  (section "Node authentication"). A setup that names any other address is refused without a
-  connection and counted (refused_extend). A next node that does not finish the handshake is
-  sent no setup cell, and the failure is counted (failed_extend). In both cases the setup cell
-  is counted with the dropped ones, like that of any setup that fails.
-- Without node authentication (-auth=false) a node holds no verified link keys: it extends to
-  any address, and its link to the next node is anonymous. An anonymous link hides headers from
-  a passive observer only. This is the configuration without the measure: the lab harness runs its
-  nodes this way, and no experiment block compares it with the authenticated one.
-- Two keys are derived from the secret, one per direction. The nonce is the frame number in that
-  direction.
-- The binding takes no byte on the wire: the hello, the answer and the frame carry no field for
-  it.
-- A frame is the 512-byte cell plus a 16-byte tag, 528 bytes. After the handshake the wire carries
-  only frames of one size: no identifiers, no counters.
-- The link layer takes its primitives from the same CryptoProvider, so it works on the GOST suite
-  as well.
-- A link padding cell lives on one link only: the sender of the frame makes it and the receiving
-  end of the link drops it before it reaches a circuit. From the outside it looks like any other
-  frame.
+CryptoProvider supplies HandshakeInfo, NoiseDH and NoiseKDF2; sizes and ownership rules are in
+[CRYPTO](CRYPTO.md). The primitive combination names are:
+
+```text
+Noise_<NN|NK|KK>_25519_JimichiXChaChaPoly_SHA256
+Noise_<NN|NK|KK>_JimichiVKO1_JimichiKuznyechikMGM_Streebog256
+```
+
+Both combinations are custom; no stock Noise wire interoperability is claimed. GOST additionally
+uses VKO with UKM=1 and separate public-key and agreement-output sizes. End-to-end KK retains its
+legacy contextual formulas and exact card, record, SID, Split and ratchet bytes; the link profile
+does not fall back to those formulas.
+
+| Mode | Use | Pre-messages | Initiator | Responder |
+|---|---|---|---|---|
+| 1, NK | client to entry | responder static key | e, es | e, ee |
+| 2, KK | between authenticated nodes | both static keys | e, es, ss | e, ee, se |
+| 0, NN | explicit unauthenticated baseline | none | e | e, ee |
+
+- NK authenticates the pinned responder to the initiator; the entry does not authenticate the
+  client or establish its roster membership. Protected commands take keys and identities from
+  verified descriptors. For KK the initiator sends its roster address; the responder checks the
+  matching cache entry once under the existing time policy, including certificate and descriptor lifetime and current
+  inconsistency refusal. The address alone proves no key ownership; no request triggers a fetch.
+  Public slices are cloned under the cache lock and again by the link constructor. Later cache
+  replacement, expiry or refusal does not change the handshake or revoke a live link; existing
+  deadlines and connection lifetimes bound its continued use.
+- Both handshake messages are 528 bytes. The first starts with the header
+  `0x04 | mode u8 | address length u8 | address`, followed by an ephemeral public key and payload.
+  The address is a canonical host:port of at most 64 bytes, nonempty only for KK; NK and NN omit
+  it. The answer contains an ephemeral public key and payload, without that header.
+- The payload is zero padding filling the remaining space. A 16-byte AEAD tag protects it in
+  every NK/KK message and in the NN answer. The first NN payload is clear and unauthenticated.
+  The receiver checks its exact length and zero bytes. The ephemeral key is 32 bytes on c25519
+  and 64 on GOST; the message length does not depend on the suite or mode. The clear mode, KK
+  address and key encoding remain visible.
+- For public-key size D and header size H = 3 + address length, the first NN payload is 528-H-D
+  bytes, the first NK/KK payload 528-H-D-16 bytes, and every answer payload 528-D-16 bytes.
+- The prologue has the exact encoding below. Every length is u16be, the cell version is u8,
+  and the suite is c25519 or gost. Static keys enter as pre-messages; the machine mixes in
+  ephemeral keys and ciphertexts.
+
+  ```text
+  ASCII("jimichi/link/v1/<suite>/<nn|nk|kk>") | 00 | wire.Version
+  | headerLength:u16be | header
+  | 01 | identityILength:u16be | identityI
+  | 02 | identityRLength:u16be | identityR
+  ```
+
+- Both identities are empty in NN; the initiator identity is empty in NK. Both endpoints must
+  configure identical bytes and identical presence for each identity. Key-only NK requires an
+  empty responder identity at both endpoints; key-only KK requires both identities empty. Each
+  KK identity may be present independently if both endpoints have matching configuration. The
+  header does not negotiate this; a mismatch never retries without identities or through NN.
+  An empty identity authenticates a key without a certificate-identity claim.
+- The initiator sends no setup cell before opening the answer and checking its payload.
+  There is no separate confirmation frame. The responder starts unconfirmed: WriteCell returns
+  nonfatal ErrUnconfirmed without a write or nonce change. The first authenticated transport
+  frame, including padding, confirms the initiator key before cell delivery. Padding is then
+  discarded. A first message alone creates no circuit, extension or setup effect.
+- The first KK message is replayable; compromise of the responder static key also permits
+  forging it as a selected initiator (KCI). It is not proof of a fresh initiator. The answer
+  confirms the responder to the initiator; the responder receives transport-key confirmation
+  only with the first initiator frame. Under the Noise payload-property model, the responder's
+  outbound direction has weak forward secrecy before that frame and a stronger boundary after
+  it, assuming the required secrets remain safe and ephemerals are handled correctly. Applying
+  those properties to both custom combinations is an explicit composition assumption. The
+  responder sends nothing before confirmation.
+- SplitTransport transfers two CipherState instances to transport. The same CipherState
+  operations encrypt protected handshake payloads. Each direction starts its nonce at zero: a zero prefix followed
+  by LE64(n). MaxUint64 is rejected before AEAD; the counter advances only on success. A frame
+  is a 512-byte cell and a 16-byte tag, 528 bytes, with empty associated data and no clear
+  identifiers or counters. The lab harness skips the first 528 bytes of each direction as the
+  handshake.
+- The generic production noise API limits a complete handshake message and transport ciphertext
+  to 65535 bytes, including keys and tags; a 16-byte tag permits at most 65519 transport plaintext
+  bytes. Oversize input returns ErrMessageTooLarge without changing state or nonce. The link
+  format is always smaller: exactly 528 bytes per handshake message or frame.
+- With -auth a node extends only to a roster node with a live descriptor and uses KK. Missing
+  its own address or a verified peer key never falls back to NK/NN. It refuses inbound NN and
+  accepts NK as a client link. A setup naming an address outside the roster is refused without
+  a connection (refused_extend); after a failed handshake no setup cell is sent to the next
+  node (failed_extend). Both count with the dropped setups as well.
+- Without -auth a node extends to any address through NN and permits inbound NN. This is the
+  explicit baseline: hiding headers from a passive observer without protection against a
+  substituted neighbour. The lab harness uses this configuration; no block compares it with
+  the authenticated one.
+- Defaults are c25519, -auth=true and NN disabled. Accept refuses NN; AcceptWithConfig and relay
+  allow it only with explicit AllowAnonymous. Without a roster, outbound NN also needs that
+  permission. A missing protected-client key or an NK/KK failure never selects NN.
+- Versions are not negotiated. Former hellos starting with 0 or 1 and draft version 3 are
+  refused, with no automatic fallback. Nodes, clients and observers are updated together;
+  the cell version and end-to-end record format do not change.
+- The machine borrows the node static key until the handshake ends and does not release it.
+  Ephemeral keys and intermediate secrets in secmem are released after successful Split or
+  Close. Messages and Split are transactional: errors preserve prior state bytes and ownership.
+  Refused or discarded plaintext is wiped. Borrowed keys must stay live until the handshake
+  ends; HandshakeState does not support concurrent operations. Copies inside AEAD, HMAC and
+  big-integer libraries remain an implementation limitation (CRYPTO, "Known gaps").
+- Dial, DialPeer, Accept and AcceptWithConfig take ownership of the raw socket at entry.
+  Configuration, handshake and transport-construction errors close it; success transfers it to
+  Conn. ReadFull permits fragmentation; a short write with nil returns io.ErrShortWrite, and a
+  partially written message is not resumed. Truncation, write or authentication failure, required
+  I/O deadline failure and nonce exhaustion close the entire link. It retains the first terminal
+  error, closes the socket immediately and destroys both CipherState instances; later operations
+  perform no I/O. Close and cipher destruction are idempotent and unblock waiting I/O.
+- A link padding cell lives on one link only: the receiver drops it before it reaches a circuit.
+  From outside it looks like any other transport frame.
+
+Cacophony vectors in a noisevectors build use public NewNoise and SplitTransport. The test adapter
+changes only deterministic ephemeral generation, ChaChaPoly and cipher metadata. Initialisation,
+hashing, KDF and CipherState are production operations. This checks Noise transitions rather than
+stock Noise interoperability of the custom combinations. Separate frozen fixtures cover both
+production suites; all previous expected end-to-end KK bytes are preserved.
 
 ## Sending modes
 
@@ -1644,13 +1714,13 @@ scripts/stats.sh prints the counters to the terminal.
 | crypto/secmem | key memory | x/sys/unix |
 | crypto/providertest | contract conformance tests | crypto |
 | wire | cell format, layers, counter order | crypto, crypto/secmem |
-| link | link encryption between neighbours, frames of one size | crypto, crypto/secmem, wire |
+| link | link encryption between neighbours, frames of one size | crypto, crypto/secmem, noise, pki, wire |
 | pki | certificate, descriptor and request of a node, roster and mirror formats, issuing and checking, descriptor consistency rules and the proof of inconsistency | crypto, crypto/secmem, wire |
 | internal/fetch | reading bundles and the mirror from an info port | pki |
 | internal/verify | node bundle checks over pki: the client reads every bundle of its entry's mirror on its own (one that fails counts as not served), applies the mirror rule and draws the other hops among those that pass; a node takes a peer's link key and identity only from a verified bundle; the record of a node's statements, mirrors carrying proofs, refused nodes counted apart from -missing. One implementation for cmd/client and cmd/relay, against which a lab test checks the chain sampler | client, crypto, pki, relay |
-| relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
+| relay | relay node, sending on its own clock | crypto, crypto/secmem, link, pki, wire |
 | client | choice of the chain, send, receive, cover traffic; the mirror rule with refused nodes (JudgeMirrorAmong) | crypto, crypto/secmem, link, wire |
-| noise | the Noise-shaped handshake machine over CryptoProvider, only the KK pattern today | crypto, crypto/secmem |
+| noise | shared NN/NK/KK tokens and transactions over CryptoProvider, a Noise profile for links, a legacy profile for end-to-end KK, shared CipherState | crypto, crypto/secmem |
 | e2e | the end-to-end layer: contact card, identity, KK session, hash ratchet, session recovery | crypto, crypto/secmem, noise, wire, pki |
 | mailbox | queue store at the exit, request and reply format | crypto |
 | conversation | a client's conversation with its contact: a request per tick, the window of puts, the sticky record, matching replies, epochs, rebuilding the circuit | crypto, crypto/secmem, e2e, mailbox |
@@ -1868,10 +1938,37 @@ is indistinguishable from it.
   the other relays stay at zero, which scripts/e2e.sh checks. There are no volumes, the root
   filesystem is read-only, the user is 65532, seccomp is RuntimeDefault and every capability is
   dropped; relays and clients keep only IPC_LOCK for mlock.
-- The clients are deployed with the Recreate strategy and the selector `{app: client, client:
-  a|b}`: every pod is a new identity, so there are never two pods of one client. The selector of a
-  Deployment cannot change, so `make deploy` deletes a client-a with the old selector `{app:
-  client}` before it applies the manifest, and scripts/e2e.sh deletes both clients first.
+- The clients use the Recreate strategy and the selector `{app: client, client: a|b}`; every
+  pod is a new identity. A full deployment, protocol rollout, suite switch or rollback requires
+  a complete stop barrier; per-Deployment Recreate does not replace it. make deploy,
+  scripts/redeploy.sh and direct scripts/e2e.sh invocation share this path.
+- Before workload mutation, preflight checks SUITE (only c25519 or gost), the local kind context,
+  NAMESPACE=jimichi, healthy nodes and exclusive control of the stand. Host lab and observer
+  processes attached to it are stopped separately. The entire namespace controller and pod
+  inventory is checked: only the known client-a, client-b and relay-1 to relay-5 Deployments
+  with expected labels and templates, their ReplicaSets and pods with ownership traced to those
+  Deployment UIDs are allowed. Missing Deployments and their old ReplicaSets are allowed.
+  Unexpected workloads, broken ownership, HPAs or external reconciliation stop the deployment;
+  they are never deleted automatically. An app label or namespace membership alone is insufficient.
+- The barrier first foreground-deletes only the verified client Deployments, with a 180 s wait,
+  and checks deletion of every recorded client pod. It then does the same for only the five
+  verified relay Deployments. Before a new process starts, all old pod UIDs and controllers able
+  to recreate them must be gone, and the namespace pod set must be empty. Deletion is graceful,
+  without force, ignored errors or continuation after timeout. An unhealthy node prevents treating
+  pod deletion as process-stop evidence. A confirmed namespace NotFound means an empty stand;
+  any other API error aborts deployment.
+- After the barrier, the namespace is created if absent, selected images are loaded, public
+  configuration is replaced, relays start and all receive certificates under a fresh CA, then
+  clients start and are introduced again. Optional lab and observer workloads stay stopped
+  until deliberately restarted from the same revision. Rollback selects the previous binaries,
+  images, helpers and observers, then repeats the same barrier and fresh enrollment; a rolling
+  restart is not rollback evidence.
+- ConfigMap jimichi-config holds the public suite field. All five relays and both clients take
+  JIMICHI_SUITE from it and explicit `-suite $(JIMICHI_SUITE)` arguments. The suite also selects
+  enrollment and helpers; a missing ConfigMap prevents pods from silently starting with a
+  default. Relay suite selection is checked before enrollment. Deployment evidence ties the
+  ConfigMap value, arguments and environment of all seven current pods, relay suite startup
+  lines, fresh anchor and verified descriptors to a successful three-hop conversation.
 - scripts/introduce.sh introduces the clients: with RESTART=yes (the default) it restarts both,
   reads from the log of the current container of each exactly one card_hash= line, waits for the
   admin listening line, takes the cards from GET /card through port-forwards to the local ports
@@ -1883,8 +1980,8 @@ is indistinguishable from it.
 - The manifests hold no Secret at all: node keys are created in process memory and a node stores
   them nowhere else, in no Secret, volume or file. Only the secmem buffers are locked: the copies
   the libraries keep on the heap are not, and whether those reach swap depends on the host
-  ([#36](https://github.com/jimichi-org/jimichi/issues/36)). The only thing that enters the
-  cluster is the public anchor, in ConfigMap jimichi-ca.
+  ([#36](https://github.com/jimichi-org/jimichi/issues/36)). The public anchor is in ConfigMap
+  jimichi-ca and suite selection in ConfigMap jimichi-config; neither holds secrets.
 - The CA runs outside the cluster: `jimichi enroll` (cmd/jimichi) through scripts/enroll.sh on the
   operator's machine or the CI runner.
 - Nodes are deployed with the Recreate strategy, so each Deployment has exactly one live pod and
@@ -1905,3 +2002,10 @@ is indistinguishable from it.
 - Each relay Service exposes the cell port 9000 and the info port 9100. A client uses both ports
   of its entry only; nodes use the info port of every roster node for the peer descriptors and
   the cell port of the next node of a circuit.
+- CI retains the c25519 conversation gate. Separate mandatory delivery evidence checks c25519,
+  GOST and c25519 restoration in sequence, each with the complete barrier and a fresh CA.
+  artifacts records the revision, images, suite assertions, barrier completion and full E2E
+  result. Restoration is attempted after GOST failure too and does not mask that failure. This
+  proves deployment and conversation for the named suite; it is no new measurement and does not
+  replace negative, vector, memory or rollback tests. Historical numbers retain their original
+  revision scope.

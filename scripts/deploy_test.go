@@ -3,6 +3,7 @@ package scripts
 import (
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -104,6 +105,16 @@ func hardened(t *testing.T, m manifest) {
 	}
 }
 
+func explicitSuite(t *testing.T, m manifest) {
+	t.Helper()
+	if got := flagValue(argsOf(t, m), "-suite"); got != "$(JIMICHI_SUITE)" {
+		t.Errorf("%s: -suite %q, want ConfigMap environment reference", m.name, got)
+	}
+	if !regexp.MustCompile(`name: JIMICHI_SUITE\s+valueFrom:\s+configMapKeyRef: \{name: jimichi-config, key: suite\}`).MatchString(m.text) {
+		t.Errorf("%s: no jimichi-config/suite environment source", m.name)
+	}
+}
+
 // the two clients of the conversation: each its own deployment, selected by
 // its own label besides app=client, which the network policy admits to the
 // cell ports, with no port of its own and the arguments of -peer through the
@@ -133,6 +144,7 @@ func TestClientManifestsKeepTheConversation(t *testing.T) {
 			t.Fatalf("no deployment %s", c.name)
 		}
 		hardened(t, m)
+		explicitSuite(t, m)
 		labels := "{app: client, client: " + c.label + "}"
 		if strings.Count(m.text, labels) != 3 || !strings.Contains(m.text, "matchLabels: "+labels) {
 			t.Errorf("%s: want the labels and the selector %s", c.name, labels)
@@ -174,6 +186,7 @@ func TestRelayManifestsRunTheMailbox(t *testing.T) {
 		}
 		relays++
 		hardened(t, m)
+		explicitSuite(t, m)
 		if got := flagValue(argsOf(t, m), "-exit"); got != "mailbox" {
 			t.Errorf("%s: -exit %q, want mailbox", m.name, got)
 		}
@@ -205,5 +218,45 @@ func TestKindClusterKeepsTheAPIServerOnLoopback(t *testing.T) {
 	}
 	if p, err := strconv.Atoi(string(port[1])); err != nil || p < 1024 || p >= 49152 {
 		t.Errorf("apiServerPort %s, want 1024 to 49151", port[1])
+	}
+}
+
+func TestUpOrdersBuildBeforeCommonDeploymentWithoutPreload(t *testing.T) {
+	makefile, err := os.ReadFile(filepath.Join("..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := regexp.MustCompile(`(?m)^up:\n((?:\t[^\n]*\n)+)`).FindStringSubmatch(strings.ReplaceAll(string(makefile), "\r\n", "\n"))
+	if up == nil {
+		t.Fatal("up has no explicitly sequenced recipe")
+	}
+	if got := strings.TrimSpace(up[1]); got != "$(MAKE) kind-up\n\t$(MAKE) images\n\t$(MAKE) deploy" {
+		t.Fatalf("up must sequence kind-up, image build and shared deployment: %s", got)
+	}
+	e2e, err := os.ReadFile(script(t, "e2e.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2eText := strings.ReplaceAll(string(e2e), "\r\n", "\n")
+	load := "kind load docker-image jimichi/relay:dev jimichi/client:dev"
+	barrier := strings.Index(e2eText, "\ndeployment_barrier\n")
+	if barrier < 0 || strings.Count(e2eText, load) != 1 || strings.Index(e2eText, load) < barrier {
+		t.Fatal("common deployment must load selected images once after its barrier")
+	}
+	makeCommand, err := exec.LookPath("make")
+	if err != nil {
+		t.Log("make unavailable; recipe ordering and common load count checked directly")
+		return
+	}
+	cmd := exec.Command(makeCommand, "--no-print-directory", "-n", "-j", "up")
+	cmd.Dir = ".."
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("make dry run: %v: %s", err, output)
+	}
+	text := string(output)
+	cluster, build, deploy := strings.Index(text, "kind create cluster"), strings.Index(text, "docker build"), strings.Index(text, "bash scripts/e2e.sh")
+	if cluster < 0 || build <= cluster || deploy <= build || strings.Count(text, "docker build") != 2 || strings.Count(text, "bash scripts/e2e.sh") != 1 || strings.Contains(text, "kind load") {
+		t.Fatalf("unexpected up dry run ordering or count: %s", text)
 	}
 }

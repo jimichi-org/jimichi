@@ -311,6 +311,7 @@ type consistencyAnswers struct {
 	honestToHonest, honestToRogue                               int
 	// relay-5 after them
 	rogueLinks, rogueAccepted, rogueDelivered int64
+	rogueFailed                               int64
 	rogueToHonest                             int
 }
 
@@ -354,23 +355,18 @@ func drawnWithoutCheck(e int) [][]int {
 // Then the 36 chains of 3 distinct relays with relay-5 on them, composed past
 // the client's choice as in TestHonestRelaysExtendOnlyToRelaysOfTheSessionCA,
 // relay-5's node read from its own mirror: for each of the 12 ordered pairs
-// (a, b) of honest relays [5 a b], [a 5 b] and [a b 5]. Relay-5 holds every
-// honest key and no honest relay holds relay-5's, so [5 a b] echoes, a
-// refuses the extend to relay-5 on [a 5 b] without a dial and b does the same
-// on [a b 5]. Links are accepted connections, one per chain a relay is on; an
-// accepted cell is one read on such a link, so a link of a chain that echoes
-// carries the setup cell and the message, 2, and a link of a chain that ends
-// unanswered its setup cell alone, 1; the echo comes back on the outbound
-// link and is not counted. Per honest j: on [5 a b] 3 chains as a and 3 as b,
-// 6 links and 12 cells, exit of the 3 as b, 3 delivered; on [a 5 b] 3 as a,
-// 3 links, 3 cells, 3 refused extends; on [a b 5] 3 as a and 3 as b, 6 links,
-// 6 cells, 3 refused as b: links 15, accepted 21, delivered 3, RefusedExtend 6
-// and the 6 setup cells in Dropped; dials 1 to each other honest relay as a on
-// [5 a b] and 1 as a on [a b 5], 2, none to relay-5. Relay-5: entry of the 12
-// [5 a b], 12 links, 24 cells, delivered 0, refused 0, dials 3 to each honest
-// relay (as a, b varying). The 24 honest chains dialled afterwards all echo
-// and add per honest relay what stand A of that test counts: 18 links, 36
-// cells, 6 delivered, 4 dials to each other honest relay, nothing at relay-5.
+// (a, b) of honest relays [5 a b], [a 5 b] and [a b 5]. All 36 end unanswered:
+// on [5 a b], a refuses relay-5's inbound KK before a setup arrives; on [a 5 b]
+// a refuses the extend without a dial; on [a b 5], b does the same. Each honest
+// j accepts 3 TCP connections as a on [5 a b] but no cells; 3 links and 3 setup
+// cells as a on [a 5 b]; 6 links and 6 setup cells as a or b on [a b 5]. Totals:
+// links 12, accepted 9, delivered 0, RefusedExtend 6 and Dropped 6. Each ordered
+// honest pair is dialled once, on [a b 5], never on [5 a b]. Relay-5 accepts the
+// 12 client links and their setup cells; its 12 outbound KK attempts fail, so
+// FailedExtend and Dropped are both 12, with 3 dials to each honest relay.
+// The 24 honest chains afterwards all echo and add per honest relay 18 links,
+// 36 cells, 6 delivered and 4 dials to each other honest relay; no failed
+// extends are added, and nothing is added at relay-5.
 //
 // The baseline leaves the records aside: every mirror lists relay-5 with a
 // bundle, A in those of relays 1 and 2 and B in those of relays 3 and 4; the
@@ -400,15 +396,16 @@ func TestNodeWithTwoOnionKeysIsRefusedByEveryHonestNode(t *testing.T) {
 					proofs:          1,
 					usable:          []bool{true, true, true, true, false},
 					drawnWithRogue:  0,
-					echoes:          func(pattern int) bool { return pattern == 0 },
-					honestLinks:     15,
-					honestAccepted:  21,
-					honestDelivered: 3,
+					echoes:          func(int) bool { return false },
+					honestLinks:     12,
+					honestAccepted:  9,
+					honestDelivered: 0,
 					honestRefused:   6,
-					honestToHonest:  2,
+					honestToHonest:  1,
 					honestToRogue:   0,
 					rogueLinks:      12,
-					rogueAccepted:   24,
+					rogueAccepted:   12,
+					rogueFailed:     12,
 					rogueDelivered:  0,
 					rogueToHonest:   3,
 				})
@@ -585,10 +582,14 @@ func runConsistencyStand(t *testing.T, s jcrypto.Suite, check bool, want consist
 		if j == twoKeyRelay {
 			links, accepted, delivered, refused = want.rogueLinks, want.rogueAccepted, want.rogueDelivered, 0
 		}
+		failed := int64(0)
+		if j == twoKeyRelay {
+			failed = want.rogueFailed
+		}
 		c := counters[j]
-		if got := tr.links.Load(); got != links || c.Accepted != uint64(accepted) || c.Delivered != uint64(delivered) || c.RefusedExtend != uint64(refused) || c.Dropped != uint64(refused) || c.FailedExtend != 0 {
-			t.Errorf("relay %d: %d links, %d cells accepted, %d delivered, %d extends refused, %d dropped, %d extends failed; want %d, %d, %d, %d, %d, 0",
-				j, got, c.Accepted, c.Delivered, c.RefusedExtend, c.Dropped, c.FailedExtend, links, accepted, delivered, refused, refused)
+		if got := tr.links.Load(); got != links || c.Accepted != uint64(accepted) || c.Delivered != uint64(delivered) || c.RefusedExtend != uint64(refused) || c.Dropped != uint64(refused+failed) || c.FailedExtend != uint64(failed) {
+			t.Errorf("relay %d: %d links, %d cells accepted, %d delivered, %d extends refused, %d dropped, %d extends failed; want %d, %d, %d, %d, %d, %d",
+				j, got, c.Accepted, c.Delivered, c.RefusedExtend, c.Dropped, c.FailedExtend, links, accepted, delivered, refused, refused+failed, failed)
 		}
 		for y := range cs.relays {
 			dials := 0
@@ -640,9 +641,9 @@ func runConsistencyStand(t *testing.T, s jcrypto.Suite, check bool, want consist
 			links, accepted, delivered, dials = 0, 0, 0, 0
 		}
 		before, c := counters[j], after[j]
-		if got := tr.links.Load() - linksBefore[j]; got != links || c.Accepted-before.Accepted != accepted || c.Delivered-before.Delivered != delivered || c.RefusedExtend != before.RefusedExtend || c.Dropped != before.Dropped || c.FailedExtend != 0 {
+		if got := tr.links.Load() - linksBefore[j]; got != links || c.Accepted-before.Accepted != accepted || c.Delivered-before.Delivered != delivered || c.RefusedExtend != before.RefusedExtend || c.Dropped != before.Dropped || c.FailedExtend != before.FailedExtend {
 			t.Errorf("honest chains, relay %d: %d more links, %d more cells, %d more delivered, %d more refused extends, %d more dropped, %d failed; want %d, %d, %d, 0, 0, 0",
-				j, got, c.Accepted-before.Accepted, c.Delivered-before.Delivered, c.RefusedExtend-before.RefusedExtend, c.Dropped-before.Dropped, c.FailedExtend, links, accepted, delivered)
+				j, got, c.Accepted-before.Accepted, c.Delivered-before.Delivered, c.RefusedExtend-before.RefusedExtend, c.Dropped-before.Dropped, c.FailedExtend-before.FailedExtend, links, accepted, delivered)
 		}
 		for y := range cs.relays {
 			more := 0
