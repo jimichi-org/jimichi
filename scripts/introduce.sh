@@ -28,10 +28,6 @@ fi
 
 logs=$(mktemp -d)
 forwards=()
-stop_forwards() {
-  for pid in "${forwards[@]}"; do kill "$pid" 2>/dev/null || true; done
-  forwards=()
-}
 cleanup() {
   local status=$?
   stop_forwards
@@ -117,7 +113,7 @@ attempt() {
     log="$logs/${CLIENTS[$i]}.log"
     # the admin port listens on loopback inside the pod, so only a
     # port-forward through the kube API reaches it
-    kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod" "$port:$ADMIN_PORT" >"$log" 2>&1 &
+    kubectl_exec -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod" "$port:$ADMIN_PORT" >"$log" 2>&1 &
     forwards+=("$!")
     wait_forward "$!" "$log" "$port" || return 1
   done

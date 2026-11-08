@@ -22,7 +22,7 @@ logs=$(mktemp -d)
 forwards=()
 cleanup() {
   local status=$?
-  for pid in "${forwards[@]}"; do kill "$pid" 2>/dev/null || true; done
+  stop_forwards
   if [ "$status" -ne 0 ]; then
     for f in "$logs"/*.log; do
       [ -e "$f" ] && { echo "--- $(basename "$f" .log) port-forward" >&2; cat "$f" >&2; }
@@ -71,7 +71,7 @@ for relay in $relay_list; do
   log="$logs/$relay.log"
   # the admin port listens on loopback inside the pod, so only a port-forward
   # through the kube API reaches it
-  kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod" "$admin:9101" "$info:9100" >"$log" 2>&1 &
+  kubectl_exec -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod" "$admin:9101" "$info:9100" >"$log" 2>&1 &
   forwards+=("$!")
   wait_forward "$!" "$log" "$admin" "$info"
   args+=(-node "$relay=$(relay_addr "$relay"),admin=127.0.0.1:$admin,info=127.0.0.1:$info,identity=$identity")
@@ -103,8 +103,7 @@ echo "anchor $anchor"
 clients=$(kubectl -n "$NAMESPACE" get deployment -l app=client -o name)
 if [ -n "$clients" ]; then
   # the forwards to the relays go first: the introduction forwards the clients
-  for pid in "${forwards[@]}"; do kill "$pid" 2>/dev/null || true; done
-  forwards=()
+  stop_forwards
   kubectl -n "$NAMESPACE" rollout restart deployment -l app=client >/dev/null
   for deploy in $clients; do
     kubectl -n "$NAMESPACE" rollout status "$deploy" --timeout=180s >/dev/null

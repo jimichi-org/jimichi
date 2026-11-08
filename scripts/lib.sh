@@ -11,6 +11,22 @@ kubectl() {
   fi
 }
 
+# a background caller must own the executable PID, not a waiting shell wrapper
+kubectl_exec() {
+  if [ -n "${JIMICHI_CONTEXT:-}" ]; then
+    exec kubectl --context "$JIMICHI_CONTEXT" "$@"
+  else
+    exec kubectl "$@"
+  fi
+}
+
+stop_forwards() {
+  local pid
+  for pid in "${forwards[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for pid in "${forwards[@]}"; do wait "$pid" 2>/dev/null || true; done
+  forwards=()
+}
+
 # the relay deployments, found by label and printed in the order of their
 # names: the scripts take the relays from here, however many the testbed runs
 relays() {
