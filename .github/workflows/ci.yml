@@ -50,6 +50,21 @@ jobs:
           grep -Fq -- '--- PASS: TestMarkLiveGOSTSixFlowsOptimized/gost-sham (' "$log"
       - name: standard handshake vectors
         run: go test -race -count=1 -tags noisevectors ./noise ./crypto/noisevector
+      - name: optimized cooperative key memory integration
+        run: |
+          log="$RUNNER_TEMP/keymem-optimized.log"
+          go test -count=1 -v -run '^TestKeymemLiveOptimized$' ./lab/keymem > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          ! grep -Fq -- '--- SKIP: TestKeymemLiveOptimized' "$log"
+          test "$(grep -c -- '--- PASS: TestKeymemLiveOptimized' "$log")" -eq 13
+          grep -Fq -- '--- PASS: TestKeymemLiveOptimized (' "$log"
+          for suite in c25519 gost; do
+            for policy in none all; do
+              for checkpoint in active closed-now closed-1s; do
+                grep -Fq -- "--- PASS: TestKeymemLiveOptimized/$suite/$policy/$checkpoint (" "$log"
+              done
+            done
+          done
       # the threat model cites these as the check of key memory: the log must show
       # both as passed, and a rename that leaves the pattern matching nothing fails
       - name: key memory flags

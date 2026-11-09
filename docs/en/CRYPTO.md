@@ -1089,6 +1089,15 @@ The Go heap does not move objects, but freed memory is not wiped, and goroutine 
 when they grow. Locking and MADV_DONTDUMP do not reach these copies: only secmem pages are locked,
 so key copies on the heap and on stacks can be written to swap, and with -harden=false they can
 end up in a core dump. Locking all process memory is planned
-([#36](https://github.com/jimichi-org/jimichi/issues/36)). Measuring how many copies remain and
-how long they live is planned as block 4 of the research programme
-([#24](https://github.com/jimichi-org/jimichi/issues/24)) and has not been done yet.
+([#36](https://github.com/jimichi-org/jimichi/issues/36)).
+
+The cooperative `lab -set keymem` assay (EXPERIMENT, block 4) counts only exact representations
+of three client circuit cell keys in parsed Object payloads of a voluntary Go 1.27.3 export.
+It compares `none`/`all` during the circuit and after Close in independent fresh processes; its
+registered series is complete ([README](../../README.md#cooperative-key-memory-results)). The copy register above remains applicable: transformed state,
+other key classes and regions outside the view are not tested. Protected primary mmap buffers
+are excluded even while live. Extra exact matches cannot distinguish library residuals from
+compiler/runtime copies induced by reference export. Zero matches establish neither complete
+erasure nor a lifetime bound. External acquisition, disk/swap searches and broader persistence
+measurements remain unmeasured and deferred beyond v0.4.0
+([#192](https://github.com/jimichi-org/jimichi/issues/192)).

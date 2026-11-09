@@ -32,6 +32,23 @@ English | [Русский](../ru/LIMITATIONS.md)
   that until the memory is reused. secmem protects only its own buffers; CRYPTO lists the copies.
   Building the AEAD state per call from the secmem key is planned
   ([#39](https://github.com/jimichi-org/jimichi/issues/39)).
+- The cooperative `keymem` assay (EXPERIMENT, block 4) matches only the three selected client
+  cell keys as exact contiguous bytes in parsed Object payloads of one voluntary Go 1.27.3 export
+  (`go-exported-object-payloads-v1`). It excludes stacks, globals, runtime/system regions and mmap
+  payloads; the protected primary buffers lie outside this view even while live. A complete parse
+  is not complete heap or process coverage. The runtime ignores some export-write results, so even
+  structural validity and passing controls cannot rule out silent omission.
+- `keymem` compares combined `none`/`all` policies. A reduction may reflect offheap view exclusion;
+  it isolates neither locking, zeroing, MADV_DONTDUMP nor process hardening. Extra exact matches
+  cannot be attributed uniquely to application/library copies rather than compiler/runtime copies
+  induced by reference export. Transformed or reconstructed key states are not searched.
+- `keymem` takes one snapshot per fresh child. Natural GC and actual endpoint delays vary and are
+  recorded; no forced GC is used. Non-observation means only absence of the selected exact
+  representation in evaluated payloads, not erasure or an erasure deadline. The registered series is complete ([README](../../README.md#cooperative-key-memory-results)).
+  c25519 exact bytes remained observable under all after Close; GOST post-Close zeros do not prove
+  erasure. External acquisition, resistance to root, disk/swap/history and relay, link, setup,
+  end-to-end, ratchet and vault secrets remain unmeasured; broader work is deferred beyond v0.4.0
+  ([#192](https://github.com/jimichi-org/jimichi/issues/192)).
 - mlock keeps only the secmem buffers out of swap. The heap copies listed above lie on ordinary
   pages and can be written to swap; locking all process memory is planned
   ([#36](https://github.com/jimichi-org/jimichi/issues/36)). mlock does not stop reading by a
@@ -657,8 +674,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   [#158](https://github.com/jimichi-org/jimichi/issues/158)); k_s in HMAC buffers; the identity
   key in library copies (on c25519 the unclamped key in the hkdf reader and the scalar in
   crypto/ecdh, on GOST the candidate in the Streebog buffers and the math/big scalar); all of this
-  can reach swap, the page file and the hibernation file. The measurement is planned (EXPERIMENT,
-  block 4, [#24](https://github.com/jimichi-org/jimichi/issues/24)).
+  can reach swap, the page file and the hibernation file. These representations are outside the
+  cooperative cell-key assay and remain unmeasured (EXPERIMENT, block 4,
+  [#192](https://github.com/jimichi-org/jimichi/issues/192)).
 - Opening time on the device itself: the number of GOST candidates is constant for a volume and
   tells volumes apart, and repeated openings narrow it down; it tells nothing about the key.
   gogost's multiplication and the table-driven Streebog and Kuznyechik vary in time and in memory

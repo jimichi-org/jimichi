@@ -22,14 +22,16 @@ derived from the seed in the same way. The seeds of the training runs of block 7
 seed through a stream of their own, and the shift and the permutation of the labels of its null
 level from streams of their own of the run's seed. The phases of node clocks come from the node's
 own generator, not from the seed, as in a real deployment. Every report row records the
-configuration, the seeds, the code revision and the host load before and after the run.
+configuration, the seeds, the code revision and the host load before and after the run for these
+traffic sets. Block 4 records its own schedule and environment without seeded secrets.
 
 ## Adversary models
 
 The codes are used in every results table. Measured so far: A1 with the count correlation attack
 (block 1) and the choice of chains for A4 (block 3). The A3 timing-mark experiment is implemented
-(block 2), without a published full series here. A5 and A6 experiments remain planned; for A2 the
-cell distinguisher is implemented (block 7) and its series remains planned.
+(block 2), without a published full series here. Block 4 implements a narrow cooperative client
+cell-key assay with a completed descriptive series, without full A5 validation; broader A5 and A6 experiments
+remain planned. For A2 the cell distinguisher is implemented (block 7) and its series remains planned.
 
 | Code | Adversary | What it sees and can do |
 |---|---|---|
@@ -114,16 +116,23 @@ in block 7. The flow distinguisher is planned.
 
 ### Key material hygiene
 
-Status: planned, not implemented ([#24](https://github.com/jimichi-org/jimichi/issues/24)). The
-lab takes no memory dumps and records no setup cells yet. That a replaced onion key stops opening
-setups after its release is covered by the tests of the node; the fraction against the age of a
-cell is not measured.
+The cooperative assay ([#24](https://github.com/jimichi-org/jimichi/issues/24)) compares exact
+representations of three client circuit cell keys in voluntarily exported Go Object payloads.
+Its registered series is complete ([results and provenance](../../README.md#cooperative-key-memory-results)). External acquisition, disk/swap searches,
+other secrets and recorded-traffic decryption remain unmeasured
+([#192](https://github.com/jimichi-org/jimichi/issues/192), block 4).
 
 | Metric | Definition |
 |---|---|
-| Extraction success rate | in what fraction of N attempts the key is found in a dump |
-| Key lifetime window | time from the end of a session until the key no longer appears in memory |
-| Decrypted fraction after a node key theft | forward secrecy check: zero for a wire capture (links run on ephemeral keys); for a neighbour that kept the setup cells, the fraction of them whose layer opens with the keys in node memory, by the age of the cell at the moment of the theft. With onion key rotation it is expected to be one while the key of the cell is held and zero past the rotation period plus the descriptor lifetime plus the clock allowance; without rotation one for the whole time the node ran |
+| Exact occurrences | overlapping contiguous occurrences of one selected 32-byte key within one parsed Object payload; no matching across objects |
+| Trial presence | at least one occurrence of any of the three keys in an evaluated trial |
+| Presence proportion | trials with a match / evaluated trials, separately by suite, policy and checkpoint; each per-hop proportion uses the same denominator |
+| View and timing | parsed stream bytes, Object records and payload bytes, unscored blob bytes, monotonic endpoint timings and natural-GC counters; no estimate of full-memory coverage |
+
+A zero count means only that the selected exact representation was not observed in the evaluated
+object payloads. It gives neither a key lifetime nor an erasure deadline. Relay tests separately
+check that a replaced onion key stops opening setups after release; this assay never uses observed
+key bytes to open recorded cells.
 
 ### Client container
 
@@ -288,7 +297,8 @@ hand-computed answers. The view of a node, that is what the testbed's nodes see 
 measured in this revision: what a node that follows the protocol knows is given by the model
 derived from the protocol ([#117](https://github.com/jimichi-org/jimichi/issues/117)). The lab
 has no scenario in which nodes record what they see, and replay and tampering are covered by the
-tests of the node and of the client, not measured as a share.
+tests of the node and of the client, not measured as a share. The remaining full #117 measurements
+are required for v0.4.0; they are in design and not implemented.
 
 | Scenario | Metric |
 |---|---|
@@ -561,21 +571,89 @@ message.
 
 ### Block 4. Key material, adversary A5
 
-Status: planned, not implemented ([#24](https://github.com/jimichi-org/jimichi/issues/24)). The
-measures are switched by the -keymem and -harden flags of the node and the client; the scenarios
-with memory dumps, the search on disk and the recording of setup cells do not exist yet. The
-client container exists ([#20](https://github.com/jimichi-org/jimichi/issues/20)); its row is
-planned with the other scenarios.
+The implemented cooperative stage is `lab -set keymem` ([#24](https://github.com/jimichi-org/jimichi/issues/24)).
+The registered series evaluated all 360 planned observations, 30 fresh processes per
+suite/policy/checkpoint, with no exclusions. Counts, binary provenance and host-load diagnostics
+are in the [README](../../README.md#cooperative-key-memory-results). It observes exposure during
+an instrumented production workload; it does not validate the full A5 model.
 
-| Scenario | Metric |
+| Component | Method |
 |---|---|
-| Memory dump of a node during a session | extraction success rate, a run without the measures (-keymem none, -harden=false) against a run with mlock and dumps disabled |
-| Dump after the session | key lifetime window in seconds |
-| Search on disk and in the image | found or not |
-| Node key theft at a given age of the recorded setup cells | fraction of recorded setups whose layer opens, against the time from the recording to the theft, with and without onion key rotation |
-| Memory dump of a -peer client during a conversation | extraction success rate of the identity key, the ratchet chains and the fetch capability F, with and without the measures |
-| Dump of a -peer client after the keys moved on | whether a record key is found after its record opened and a previous chain key after a ratchet step |
-| Client | whether the volume key is still in memory after the container is closed |
+| Workload | a fresh client process dials three real relays over authenticated links, verifies their CA-certified bundles, sends `jimichi/keymem/v1` and requires its exact echo; production CryptoProvider, client, wire, link and relay paths |
+| Selected secrets | three fresh 32-byte cell keys, in entry/middle/exit order, returned by production `DeriveKey` with purpose `cell` and used by `NewAEAD`; no other key class |
+| Observation | the client voluntarily calls `runtime/debug.WriteHeapDump` once; a separate controller parses the bounded stream and matches only Object payloads (`go-exported-object-payloads-v1`) |
+| Policies | both `none` and `all`, fixed per child before any key allocation; controller and relay keys always use `all`; process hardening remains enabled in both conditions |
+| Endpoints | `active`: echo verified and client open; `closed-now`: successful `Client.Close` returned, with no intentional wait; `closed-1s`: at least one monotonic second after that return |
+| Independent unit | one fresh child and relay fixture per snapshot; checkpoints never reuse a child or key |
+
+At active capture the original selected buffers have length 32; after Close their safe lengths
+are zero. Released byte aliases are never read. The seed controls only the shuffled six-condition
+schedule in each repeat block, never cryptographic randomness. No explicit GC or GOGC override is
+used; GC counters and actual Close-to-export delays are recorded. `closed-now` does not mean a
+zero delay, and independent checkpoints do not trace one key's lifetime.
+
+Controls and evaluation:
+
+- A fresh positive marker must match at its actual allocated Object range; a stray copy does not
+  satisfy the control. An independent negative marker stays in the controller and must not match.
+- Controller reference values and raw-stream scratch stay in protected controller buffers. Raw exports,
+  keys, secret hashes, addresses and fragments are not persisted. Observed bytes are never crypto inputs.
+- Evaluation requires the supported runtime, effective protection, successful echo and lifecycle,
+  complete structural parse and real EOF, successful child exit/cleanup, and both controls.
+- Truncated, invalid, limited, failed and unsupported observations are excluded, with null key counts
+  and presence. Missing or inapplicable diagnostics stay null; unavailable results never become zero.
+- Report planned, started, evaluated, excluded and not_started counts and exclusion reasons.
+  `planned = evaluated + excluded = started + not_started`; excluded includes unstarted rows.
+- Presence is `trials_with_any_match / evaluated`. Per-hop proportions also divide by evaluated,
+  not three times evaluated. Show planned and evaluated denominators; an empty denominator gives null.
+  Occurrence summaries include evaluated zero counts. Coverage and timing summaries use only evaluated
+  rows with that member non-null, including reached zero values.
+
+This version reports descriptive counts and proportions, with no p-values, confidence intervals or
+superiority claim. Matches under `all`, no policy difference and non-observation are valid outcomes.
+
+Run a stable optimized binary on Linux/amd64 with exactly Go 1.27.3 and working mlock. Keep the host
+quiet and do not rebuild that binary during the series. The completed registered series used:
+
+```
+lab -set keymem -suite c25519 -repeats 30 -seed 1 -rev eddddb226e7224140f8655b1566a55ce33f3ceda -out artifacts
+lab -set keymem -suite gost -repeats 30 -seed 1 -rev eddddb226e7224140f8655b1566a55ce33f3ceda -out artifacts
+```
+
+Each invocation fixes both policies and all three endpoints; `-repeats` accepts 1..100.
+Only `-set`, `-suite`, `-repeats`, `-seed`, `-rev`, `-out` and help apply; other experiment flags
+and positional arguments are rejected. No arbitrary target, snapshot or search-pattern input exists.
+The Go entry point is `keymem.Run(context.Context, keymem.Config)`, with Suite, Repeats, Seed and
+Revision fields ([lab/keymem](../../lab/keymem)).
+
+A unique directory below `-out` holds only `manifest.json`, `trials.jsonl` and `summary.json`
+(schema `keymem-cooperative-v1`). Rows retain every planned attempt; the summary is recomputable
+from those rows; fresh secrets and destroyed raw streams cannot be replayed. The manifest records the view, revision, binary digest with its hash suite,
+platform/runtime, schedule, bounds and effective protection. One trial is bounded by 60 s and
+128 MiB of export bytes. Unsupported runtime/platform or unavailable mlock produces explicit
+unavailable rows. Exit 0 requires every trial evaluated and reports written; 1 indicates an
+unavailable/failed series or report failure, 2 invalid public arguments.
+
+`all` changes allocation, locking, dump exclusion and zeroing together. Its primary mmap buffers
+lie outside Object payloads even while live, so fewer matches may reflect view exclusion rather
+than destruction. No individual measure, hardening effectiveness, complete heap/process coverage,
+erasure, erasure time or resistance to root follows. Exporter-induced/compiler copies cannot be
+distinguished from library copies; transformed state and runtime-export omissions are not detected
+([LIMITATIONS](LIMITATIONS.md), [CRYPTO](CRYPTO.md), "Known gaps").
+
+The broader scenarios below remain unimplemented and unmeasured, deferred beyond v0.4.0
+([#192](https://github.com/jimichi-org/jimichi/issues/192)). Existing node/client `-keymem` and
+`-harden` switches do not supply these measurements.
+
+| Deferred scenario | Intended observation |
+|---|---|
+| External acquisition of node memory during a session | known-key occurrence rate with and without the memory measures, outside the cooperative view |
+| External acquisition after the session | post-session persistence and the observed time window in the selected acquisition view |
+| Search on disk, in swap and in the image | whether selected key material is found |
+| Node key theft at a given age of recorded setup cells | fraction of recorded setups whose layer opens, against time from recording to theft, with and without onion key rotation |
+| Memory of a `-peer` client during a conversation | identity key, ratchet chains and fetch capability F |
+| Memory of a `-peer` client after keys move on | record key after opening and previous chain key after a ratchet step |
+| Client container after closing | remaining volume-key representations |
 
 ### Block 5. Client container, adversaries A5 and A6
 
@@ -1033,10 +1111,11 @@ comparison will be made: the conditions differ, and that will be stated.
 3. The bandwidth multiplier against AUC curve. The published figure has no intervals; confidence
    intervals across runs are planned with the full series
    ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
-4. Planned ([#24](https://github.com/jimichi-org/jimichi/issues/24)): the search for key bytes in
-   memory dumps with and without the key-memory measures. The measured result will be shown as
-   it is; copies of keys that libraries keep on the heap are listed in [CRYPTO](CRYPTO.md),
-   "Known gaps".
+4. The cooperative client cell-key assay (`lab -set keymem`, block 4), with `none` and `all`
+   at three independent checkpoints. The registered series is complete ([results](../../README.md#cooperative-key-memory-results)); exact non-observation
+   in evaluated Object payloads does not establish erasure. Broader memory/disk/history scenarios
+   remain unmeasured ([#192](https://github.com/jimichi-org/jimichi/issues/192)); known library
+   copies remain listed in [CRYPTO](CRYPTO.md), "Known gaps".
 5. The container ([#20](https://github.com/jimichi-org/jimichi/issues/20)): `jimichi vault
    init` and `jimichi vault show`, one password opens the decoy volume and another the second
    volume; the distinguisher of block 5 is planned. NIST STS results are no evidence about a

@@ -101,14 +101,52 @@ bash scripts/sweep.sh -set paths -rogue 2
 - `scripts/sweep.sh` builds the lab image, runs `cmd/lab` in it and records the revision in every row, marked `-dirty` when the tree differs from the commit.
 - Reports are JSON files in `artifacts/`, which is not part of the repository: rows with the configuration, seeds and revision (`correlation-*`, `paths-*`), medians (`summary-*`), window counts (`detail-*`) and verdicts (`deny-*`). The figures above are drawn from the `summary-*` reports. Stop the kind cluster and run no build on the host while a series runs.
 
+## Cooperative key-memory results
+
+Exact contiguous 32-byte occurrences per selected client cell key in parsed Object payloads
+(`go-exported-object-payloads-v1`), after an authenticated three-relay echo:
+
+| Suite | Policy | active | closed-now | closed-1s |
+|---|---|---:|---:|---:|
+| c25519 | none | 3 | 3 | 3 |
+| c25519 | all | 2 | 2 | 2 |
+| gost | none | 3 | 3 | 3 |
+| gost | all | 1 | 0 | 0 |
+
+Each condition planned and evaluated 30 fresh processes; all 360 evaluated, with no exclusions.
+Every selected key in every process had the displayed count. Any-key presence was 30/30 except
+GOST `all` at the two post-Close points, 0/30. Each hop uses 30 processes, not 90 independent
+observations. Checkpoints use different keys and processes; these are descriptive counts,
+without p-values, confidence intervals or a superiority claim.
+
+Measured 2026-11-09 from clean commit
+[`eddddb226e7224140f8655b1566a55ce33f3ceda`](https://github.com/jimichi-org/jimichi/commit/eddddb226e7224140f8655b1566a55ce33f3ceda),
+optimized Go 1.27.3, Linux/amd64, seed 1. Binary SHA256:
+`a715234e5347d3ade2689dd585cf7c5cc36c82c1e9ec26c2cd29ffedc7067dc7`.
+The aggregate rows and summaries were independently recomputed; commands and the method are in
+[EXPERIMENT](docs/en/EXPERIMENT.md), block 4.
+
+The exact c25519 representation remained observable under `all` after Close. GOST zeros mean
+only non-observation in this view: transformed states and export omissions are not searched.
+Protected primary mmap buffers are outside it even while live. `none`/`all` changes several
+measures together. Additional exact matches cannot distinguish library remnants from possible
+compiler/runtime copies induced by instrumentation.
+These counts establish neither full-memory coverage, erasure, an erasure deadline, hardening
+efficacy nor resistance to privileged acquisition. Natural GC and actual export delays belong to this observation schedule.
+
+Acquisition ran with kind stopped and no concurrent builds or source writes. Whole-host CPU
+monitoring had 30 samples during the series: 3-33%, median 11.5%, mean 12.4%. They include assay
+work and cannot isolate unrelated load. No row was discarded for load; no performance or
+load-robustness conclusion is drawn. The passive results above retain their original revision.
+
 ## What is measured
 
 | Block | Today | Planned |
 |---|---|---|
 | Metadata | a traffic correlation attack links flows on the entry link to flows on the last link between relays from cell timings and counts alone; AUC and top-1 accuracy ([Results](#results)), and TPR at FPR 0.01 in the reports, against cover traffic rate, a constant client rate and relays sending on their own clocks | node delay levels ([#45](https://github.com/jimichi-org/jimichi/issues/45)), message size classes ([#68](https://github.com/jimichi-org/jimichi/issues/68)), the topology of a conversation, two entries and the mailbox ([#47](https://github.com/jimichi-org/jimichi/issues/47)) |
-| Partial compromise | how often a randomly drawn chain meets rogue nodes, computed and sampled with the client's own choice, that of a client without `-peer` (`cmd/lab -set paths`); what one node knows of the route by its position, derived from the protocol; a lab test with real nodes that a node certified by another CA joins no chain | what the testbed's nodes see and link from their own records, measured rather than derived ([#117](https://github.com/jimichi-org/jimichi/issues/117)) |
-| Key material | the switches that start a node without each measure (`-keymem`, `-harden`) | memory dumps of a live relay searched for known key bytes, with and without memory locking and dump prevention, and the same search in the container image and the node's files ([#24](https://github.com/jimichi-org/jimichi/issues/24)) |
-| Forward secrecy | unit tests: a setup cell stops opening once the node releases the onion key it was built for | setup cells recorded by a neighbour attacked with the keys taken from node memory, by the age of the recording ([#24](https://github.com/jimichi-org/jimichi/issues/24)) |
+| Partial compromise | how often a randomly drawn chain meets rogue nodes, computed and sampled with the client's own choice, that of a client without `-peer` (`cmd/lab -set paths`); what one node knows of the route by its position, derived from the protocol; a lab test with real nodes that a node certified by another CA joins no chain | the remaining full node-observation measurements, required for v0.4.0, in design and not implemented ([#117](https://github.com/jimichi-org/jimichi/issues/117)) |
+| Key material | `lab -set keymem`: cooperative exact-byte matching of three client circuit cell keys in exported Go Object payloads, `none` versus `all`, active and after Close; registered series measured ([results](#cooperative-key-memory-results), [EXPERIMENT](docs/en/EXPERIMENT.md), block 4) | external memory acquisition, disk/swap searches and other secrets, deferred beyond v0.4.0 ([#192](https://github.com/jimichi-org/jimichi/issues/192)) |
+| Forward secrecy | unit tests: a setup cell stops opening once the node releases the onion key it was built for | setup cells recorded by a neighbour attacked with keys taken from node memory, by the age of the recording, unmeasured and deferred beyond v0.4.0 ([#192](https://github.com/jimichi-org/jimichi/issues/192)) |
 | Cost | round-trip latency through the chain, the bandwidth multiplier of cover and padding, benchmarks of key agreement, signing and sealing a cell, GOST versus X25519 | node throughput at saturation, goodput per client, a setup while a node holds two onion keys, the latency of a one-node chain, the cost of memory locking ([#118](https://github.com/jimichi-org/jimichi/issues/118)) |
 
 Threat modelling follows the FSTEC methodology of 2021-02-05; scenarios are named in plain words.
@@ -201,9 +239,10 @@ docs/         documentation, en/ and ru/
 
 ## Requirements
 
-Go 1.27. Memory locking and dump prevention are Linux-only, and so will be the planned
-key-extraction scenarios ([#24](https://github.com/jimichi-org/jimichi/issues/24)); other
-platforms build against stubs that report memory as unlocked, so a node refuses to start there.
+Go 1.27. Memory locking and dump prevention are Linux-only; other platforms build against stubs
+that report memory as unlocked, so a node refuses to start there. The cooperative `keymem` assay
+requires Linux/amd64, exactly Go 1.27.3 and working mlock; unsupported or unavailable observations
+are explicit failures, not zero-match results ([EXPERIMENT](docs/en/EXPERIMENT.md), block 4).
 Docker and kind for the testbed; a Compose setup for development is planned
 ([#22](https://github.com/jimichi-org/jimichi/issues/22)).
 
