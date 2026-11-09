@@ -42,43 +42,226 @@ func TestMarkEnvironmentErrorIdentity(t *testing.T) {
 		t.Fatal("circuit refusal became fatal")
 	}
 }
-func TestMarkLiveBothSuites(t *testing.T) {
-	if testing.Short() || runtime.GOOS != "linux" {
-		t.Skip("bounded Linux integration")
+
+func TestMarkExitWaitStartsAfterDialBudget(t *testing.T) {
+	clock := newTestMarkClock()
+	start := clock.Now()
+	clock.advance(80 * time.Millisecond)
+	ready := func() bool { return !clock.Now().Before(start.Add(110 * time.Millisecond)) }
+	fresh, shared := make(chan error, 1), make(chan error, 1)
+	go func() { fresh <- markWaitWithin(context.Background(), 100*time.Millisecond, ready, clock) }()
+	go func() { shared <- markWaitWithin(context.Background(), 20*time.Millisecond, ready, clock) }()
+	for i := 0; i < 4; i++ {
+		clock.wait(t)
 	}
-	for _, suite := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
-		for _, active := range []bool{true, false} {
-			t.Run(suite.String()+map[bool]string{true: "-active", false: "-sham"}[active], func(t *testing.T) {
-				cfg := Config{Flows: 6, Hops: 3, Duration: time.Second, SendEvery: 200 * time.Millisecond, Mode: client.ConstantRate, Rate: 50 * time.Millisecond, Payload: 128, Suite: suite, Mark: &MarkConfig{Enabled: active, Flow: 2, Code: []int8{1, -1}, Slot: 100 * time.Millisecond, Offset: 20 * time.Millisecond}}
-				run, err := executeMarked(cfg, markPlan{ctx: context.Background(), readiness: 5 * time.Second, probe: 900 * time.Millisecond})
-				if err != nil {
-					t.Fatalf("%v entry=%d exit=%d mark=%+v", err, len(run.Entry), len(run.Exit), run.Mark)
+	clock.advance(30 * time.Millisecond)
+	for _, test := range []struct {
+		result <-chan error
+		want   error
+	}{{fresh, nil}, {shared, context.DeadlineExceeded}} {
+		select {
+		case err := <-test.result:
+			if !errors.Is(err, test.want) {
+				t.Fatal(err, test.want)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("exit wait did not finish")
+		}
+	}
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	for _, timer := range clock.timers {
+		if !timer.stopped {
+			t.Fatal("timer retained")
+		}
+	}
+}
+
+func TestMarkExitWaitDeadlineAndCancellation(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancelled), func(t *testing.T) {
+			clock := newTestMarkClock()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { result <- markWaitWithin(ctx, 100*time.Millisecond, func() bool { return false }, clock) }()
+			clock.wait(t)
+			clock.wait(t)
+			want := context.DeadlineExceeded
+			if cancelled {
+				cancel()
+				want = context.Canceled
+			} else {
+				clock.advance(101 * time.Millisecond)
+			}
+			select {
+			case err := <-result:
+				if !errors.Is(err, want) {
+					t.Fatal(err, want)
 				}
-				if run.Mark.SetupStatus != "established" || run.Mark.CaptureStatus != "complete" || *run.Mark.CaptureEnd-*run.Mark.CaptureStart != cfg.Duration || len(run.Exit) != 6 {
-					t.Fatal(run.Mark)
+			case <-time.After(time.Second):
+				t.Fatal("exit wait did not stop")
+			}
+			clock.mu.Lock()
+			defer clock.mu.Unlock()
+			for _, timer := range clock.timers {
+				if !timer.stopped {
+					t.Fatal("timer retained")
 				}
-				if active && run.Mark.Counters.Realization == "none" {
-					t.Fatal("no delayed frame")
+			}
+		})
+	}
+}
+
+type markDeadlineContext struct {
+	context.Context
+	at *time.Time
+}
+
+func (c markDeadlineContext) Deadline() (time.Time, bool) { return *c.at, true }
+
+func TestMarkWaitRejectsReadyAfterCancellationOrExpiry(t *testing.T) {
+	for _, finite := range []bool{false, true} {
+		for _, kind := range []string{"cancelled", "expired", "callback_cancel", "callback_expire"} {
+			t.Run(fmt.Sprint(finite)+"/"+kind, func(t *testing.T) {
+				clock := newTestMarkClock()
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var owner context.Context = ctx
+				deadline := time.Date(9999, time.January, 1, 0, 0, 0, 0, time.UTC)
+				want := context.Canceled
+				if kind == "expired" || kind == "callback_expire" {
+					owner = markDeadlineContext{Context: ctx, at: &deadline}
+					want = context.DeadlineExceeded
 				}
-				if !active && run.Mark.Counters.WaitStarted != 0 {
-					t.Fatal(run.Mark.Counters)
+				if kind == "cancelled" {
+					cancel()
 				}
-				for _, f := range run.Mark.Flows {
-					if f.Preflight.Echo == nil || f.Probe.Invoked == nil || f.Open == nil || f.Responsive == nil {
-						t.Fatal(f)
+				if kind == "expired" {
+					deadline = time.Unix(1, 0)
+				}
+				ready := func() bool {
+					switch kind {
+					case "callback_cancel":
+						cancel()
+					case "callback_expire":
+						deadline = time.Unix(1, 0)
 					}
+					return true
 				}
-				for _, group := range [][]*Trace{run.Entry, run.Exit, run.EntryBack, run.ExitBack} {
-					for _, trace := range group {
-						for _, at := range trace.Events() {
-							if at < run.Origin || at >= *run.Mark.CaptureEnd {
-								t.Fatal("unfiltered event", at)
-							}
-						}
-					}
+				var err error
+				if finite {
+					err = markWaitWithin(owner, 100*time.Millisecond, ready, clock)
+				} else {
+					err = markWait(owner, ready)
+				}
+				if !errors.Is(err, want) {
+					t.Fatal(err, want)
 				}
 			})
 		}
+	}
+}
+
+func TestMarkExitWaitRejectsCallbackCrossingBudget(t *testing.T) {
+	clock := newTestMarkClock()
+	err := markWaitWithin(context.Background(), 100*time.Millisecond, func() bool { clock.advance(100 * time.Millisecond); return true }, clock)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	for _, timer := range clock.timers {
+		if !timer.stopped {
+			t.Fatal("timer retained")
+		}
+	}
+}
+
+func TestMarkPreflightStrictCommonDeadline(t *testing.T) {
+	start, deadline := 2*time.Second, 7*time.Second
+	s := newMarkState(time.Now(), 6)
+	for i := range s.calls {
+		s.calls[i][markPreflight] = &MarkCall{Invoked: durationPtr(start), Returned: durationPtr(start + time.Millisecond), Echo: durationPtr(deadline - time.Nanosecond)}
+	}
+	if !s.preflightReady(deadline) {
+		t.Fatal("preflight just before deadline rejected")
+	}
+	last := s.calls[5][markPreflight]
+	for _, late := range []time.Duration{deadline, deadline + time.Nanosecond} {
+		last.Echo = durationPtr(late)
+		if s.preflightReady(deadline) {
+			t.Fatal("late final echo accepted", late)
+		}
+	}
+	last.Echo = durationPtr(deadline - time.Nanosecond)
+	for _, late := range []time.Duration{deadline, deadline + time.Nanosecond} {
+		last.Returned = durationPtr(late)
+		if s.preflightReady(deadline) {
+			t.Fatal("late final return accepted", late)
+		}
+	}
+	last.Returned = durationPtr(deadline - time.Nanosecond)
+	if !s.preflightReady(deadline) {
+		t.Fatal("successful timestamps before deadline rejected")
+	}
+}
+func TestMarkLiveBothSuites(t *testing.T) {
+	for _, suite := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		flows := 6
+		if suite == jcrypto.SuiteGOST {
+			flows = 1
+		}
+		testMarkLiveSuite(t, suite, flows)
+	}
+}
+
+func testMarkLiveSuite(t *testing.T, suite jcrypto.Suite, flows int) {
+	t.Helper()
+	if testing.Short() || runtime.GOOS != "linux" {
+		t.Skip("bounded Linux integration")
+	}
+	for _, active := range []bool{true, false} {
+		t.Run(suite.String()+map[bool]string{true: "-active", false: "-sham"}[active], func(t *testing.T) {
+			cfg := Config{Flows: flows, Hops: 3, Duration: 5 * time.Second, SendEvery: 200 * time.Millisecond, Mode: client.ConstantRate, Rate: 50 * time.Millisecond, Payload: 128, Suite: suite, Mark: &MarkConfig{Enabled: active, Flow: min(2, flows-1), Code: []int8{1, -1}, Slot: 500 * time.Millisecond, Offset: 20 * time.Millisecond}}
+			run, err := executeMarked(cfg, markPlan{ctx: context.Background(), readiness: 5 * time.Second, probe: 4500 * time.Millisecond})
+			if err != nil {
+				t.Fatalf("%v entry=%d exit=%d mark=%+v", err, len(run.Entry), len(run.Exit), run.Mark)
+			}
+			if run.Mark.SetupStatus != "established" || run.Mark.CaptureStatus != "complete" || *run.Mark.CaptureEnd-*run.Mark.CaptureStart != cfg.Duration || len(run.Exit) != flows {
+				t.Fatal(run.Mark)
+			}
+			if len(run.Entry) != flows || len(run.Mark.Setup) != flows || run.Mark.SetupComplete == nil || run.Mark.PreflightStarted == nil || run.Mark.PreflightDeadline == nil || run.Mark.PreflightComplete == nil || run.Mark.ReadinessDeadline != 5*time.Second || *run.Mark.PreflightDeadline-*run.Mark.PreflightStarted != 5*time.Second {
+				t.Fatal("incomplete readiness observations", run.Mark)
+			}
+			if active && run.Mark.Counters.Realization == "none" {
+				events := run.Entry[cfg.Mark.Flow].Events()
+				for i := range events {
+					events[i] -= run.Origin
+				}
+				t.Fatalf("no delayed frame: counters=%+v entry_after_origin=%v", run.Mark.Counters, events)
+			}
+			if !active && run.Mark.Counters.WaitStarted != 0 {
+				t.Fatal(run.Mark.Counters)
+			}
+			for i, f := range run.Mark.Flows {
+				if f.Preflight.Echo == nil || f.Probe.Invoked == nil || f.Open == nil || f.Responsive == nil {
+					t.Fatal(f)
+				}
+				if *f.Preflight.Echo >= *run.Mark.PreflightDeadline || f.Preflight.Returned == nil || *f.Preflight.Returned >= *run.Mark.PreflightDeadline || run.Mark.Setup[i].ExitLinkSeen == nil || run.Mark.Setup[i].ExitFrame == nil || *run.Mark.Setup[i].ExitFrame >= run.Origin {
+					t.Fatal("readiness boundary", i, run.Mark.Setup[i], f.Preflight)
+				}
+			}
+			for _, group := range [][]*Trace{run.Entry, run.Exit, run.EntryBack, run.ExitBack} {
+				for _, trace := range group {
+					for _, at := range trace.Events() {
+						if at < run.Origin || at >= *run.Mark.CaptureEnd {
+							t.Fatal("unfiltered event", at)
+						}
+					}
+				}
+			}
+		})
 	}
 }
 func TestMarkSetupFailureRetained(t *testing.T) {

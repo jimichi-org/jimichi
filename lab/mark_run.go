@@ -58,6 +58,7 @@ type MarkResult struct {
 	Setup             []MarkSetup    `json:"setup_timings"`
 	SetupComplete     *time.Duration `json:"setup_complete"`
 	PreflightStarted  *time.Duration `json:"preflight_started"`
+	PreflightDeadline *time.Duration `json:"preflight_deadline"`
 	PreflightComplete *time.Duration `json:"preflight_complete"`
 	ReadinessDeadline time.Duration  `json:"readiness_deadline"`
 }
@@ -258,18 +259,20 @@ func executeMarked(cfg Config, plan markPlan) (run *Run, err error) {
 	schedule := max(cfg.Rate, cfg.CoverEvery)
 	for i := 0; i < cfg.Flows; i++ {
 		run.Mark.Setup[i].Started = durationPtr(time.Since(start))
-		flowCtx, flowCancel := context.WithTimeout(setupCtx, plan.readiness)
-		if schedule > 0 && !markSleep(flowCtx, time.Duration(phases.Int63n(int64(schedule)))) {
-			flowCancel()
-			return fail("readiness", flowCtx.Err())
+		if schedule > 0 && !markSleep(setupCtx, time.Duration(phases.Int63n(int64(schedule)))) {
+			return fail("readiness", setupCtx.Err())
 		}
 		a, b := NewTrace(start), NewTrace(start)
 		run.Entry = append(run.Entry, a)
 		run.EntryBack = append(run.EntryBack, b)
 		dialFailed := false
-		c, e := client.Dial(client.Config{Provider: provider, Chain: chain, Mode: cfg.Mode, Rate: cfg.Rate, CoverRate: cfg.CoverEvery, Jitter: cfg.Jitter, DialTimeout: plan.readiness, HandshakeTimeout: plan.readiness, Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, e := client.Dial(client.Config{Provider: provider, Chain: chain, Mode: cfg.Mode, Rate: cfg.Rate, CoverRate: cfg.CoverEvery, Jitter: cfg.Jitter, Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			var d net.Dialer
-			raw, e := d.DialContext(flowCtx, network, addr)
+			dialCtx, cancelDial := context.WithCancel(ctx)
+			stopOwnerCancel := context.AfterFunc(setupCtx, cancelDial)
+			defer cancelDial()
+			defer stopOwnerCancel()
+			raw, e := d.DialContext(dialCtx, network, addr)
 			if e != nil {
 				dialFailed = true
 				return nil, e
@@ -290,7 +293,6 @@ func executeMarked(cfg Config, plan markPlan) (run *Run, err error) {
 			return conn, nil
 		}})
 		if e != nil {
-			flowCancel()
 			if dialFailed {
 				return fail("dial", e)
 			}
@@ -298,11 +300,9 @@ func executeMarked(cfg Config, plan markPlan) (run *Run, err error) {
 		}
 		clients = append(clients, c)
 		run.Mark.Setup[i].ClientReady = durationPtr(time.Since(start))
-		if e := markWait(flowCtx, func() bool { exitMu.Lock(); defer exitMu.Unlock(); return len(run.Exit) == i+1 }); e != nil {
-			flowCancel()
+		if e := markWaitWithin(setupCtx, plan.readiness, func() bool { exitMu.Lock(); defer exitMu.Unlock(); return len(run.Exit) == i+1 }, realMarkClock{}); e != nil {
 			return fail("readiness", e)
 		}
-		flowCancel()
 		run.Mark.Setup[i].ExitLinkSeen = durationPtr(time.Since(start))
 	}
 	finalSetupCtx, finalSetupCancel := context.WithTimeout(setupCtx, plan.readiness)
@@ -338,8 +338,11 @@ func executeMarked(cfg Config, plan markPlan) (run *Run, err error) {
 		collectors.Add(1)
 		go func(flow int, c *client.Client) { defer collectors.Done(); state.collect(flow, c.Replies()) }(i, c)
 	}
-	preCtx, preCancel := context.WithTimeout(plan.ctx, plan.readiness)
-	run.Mark.PreflightStarted = durationPtr(time.Since(start))
+	preflightStart := time.Since(start)
+	preflightDeadline := preflightStart + plan.readiness
+	run.Mark.PreflightStarted = durationPtr(preflightStart)
+	run.Mark.PreflightDeadline = durationPtr(preflightDeadline)
+	preCtx, preCancel := context.WithDeadline(plan.ctx, start.Add(preflightDeadline))
 	defer preCancel()
 	preDone := make(chan struct{})
 	watchers.Add(1)
@@ -363,7 +366,7 @@ func executeMarked(cfg Config, plan markPlan) (run *Run, err error) {
 			state.send(flow, markPreflight, c, cfg.Payload)
 		}(i, c)
 	}
-	if e := markWait(preCtx, func() bool { return state.preflightReady() }); e != nil {
+	if e := markWait(preCtx, func() bool { return state.preflightReady(preflightDeadline) }); e != nil {
 		close(preDone)
 		return fail("readiness", e)
 	}
@@ -511,12 +514,77 @@ func markSleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 func markWait(ctx context.Context, ready func() bool) error {
-	for !ready() {
+	for {
+		if err := markWaitError(ctx, time.Now(), time.Time{}); err != nil {
+			return err
+		}
+		ok := ready()
+		if err := markWaitError(ctx, time.Now(), time.Time{}); err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
 		if !markSleep(ctx, time.Millisecond) {
 			return ctx.Err()
 		}
 	}
+}
+
+func markWaitError(ctx context.Context, now, end time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !now.Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	if !end.IsZero() && !now.Before(end) {
+		return context.DeadlineExceeded
+	}
 	return nil
+}
+
+func markWaitWithin(ctx context.Context, limit time.Duration, ready func() bool, clock markClock) error {
+	end := clock.Now().Add(limit)
+	deadline := clock.Timer(limit)
+	defer func() {
+		if !deadline.Stop() {
+			select {
+			case <-deadline.C():
+			default:
+			}
+		}
+	}()
+	for {
+		if err := markWaitError(ctx, clock.Now(), end); err != nil {
+			return err
+		}
+		ok := ready()
+		if err := markWaitError(ctx, clock.Now(), end); err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		tick := clock.Timer(time.Millisecond)
+		var err error
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-deadline.C():
+			err = context.DeadlineExceeded
+		case <-tick.C():
+		}
+		if !tick.Stop() {
+			select {
+			case <-tick.C():
+			default:
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 const (
@@ -576,12 +644,12 @@ func (s *markState) collect(flow int, replies <-chan []byte) {
 	s.lastEvent = max(s.lastEvent, at)
 	s.mu.Unlock()
 }
-func (s *markState) preflightReady() bool {
+func (s *markState) preflightReady(deadline time.Duration) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, m := range s.calls {
 		c := m[markPreflight]
-		if c == nil || c.Echo == nil || c.Returned == nil || c.ErrorClass != "" {
+		if c == nil || c.Echo == nil || c.Returned == nil || c.ErrorClass != "" || *c.Echo >= deadline || *c.Returned >= deadline {
 			return false
 		}
 	}
