@@ -1094,7 +1094,7 @@ end up in a core dump. Locking all process memory is planned
 The cooperative `lab -set keymem` assay (EXPERIMENT, block 4) counts only exact representations
 of three client circuit cell keys in parsed Object payloads of a voluntary Go 1.27.3 export.
 It compares `none`/`all` during the circuit and after Close in independent fresh processes; its
-full series is not published. The copy register above remains applicable: transformed state,
+registered series is complete ([README](../../README.md#cooperative-key-memory-results)). The copy register above remains applicable: transformed state,
 other key classes and regions outside the view are not tested. Protected primary mmap buffers
 are excluded even while live. Extra exact matches cannot distinguish library residuals from
 compiler/runtime copies induced by reference export. Zero matches establish neither complete

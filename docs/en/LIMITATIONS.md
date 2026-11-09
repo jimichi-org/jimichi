@@ -44,8 +44,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   induced by reference export. Transformed or reconstructed key states are not searched.
 - `keymem` takes one snapshot per fresh child. Natural GC and actual endpoint delays vary and are
   recorded; no forced GC is used. Non-observation means only absence of the selected exact
-  representation in evaluated payloads, not erasure or an erasure deadline. Its full series is not
-  published. External acquisition, resistance to root, disk/swap/history and relay, link, setup,
+  representation in evaluated payloads, not erasure or an erasure deadline. The registered series is complete ([README](../../README.md#cooperative-key-memory-results)).
+  c25519 exact bytes remained observable under all after Close; GOST post-Close zeros do not prove
+  erasure. External acquisition, resistance to root, disk/swap/history and relay, link, setup,
   end-to-end, ratchet and vault secrets remain unmeasured; broader work is deferred beyond v0.4.0
   ([#192](https://github.com/jimichi-org/jimichi/issues/192)).
 - mlock keeps only the secmem buffers out of swap. The heap copies listed above lie on ordinary

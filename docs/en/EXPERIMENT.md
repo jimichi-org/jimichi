@@ -30,7 +30,7 @@ traffic sets. Block 4 records its own schedule and environment without seeded se
 The codes are used in every results table. Measured so far: A1 with the count correlation attack
 (block 1) and the choice of chains for A4 (block 3). The A3 timing-mark experiment is implemented
 (block 2), without a published full series here. Block 4 implements a narrow cooperative client
-cell-key assay, without a published full series or full A5 validation; broader A5 and A6 experiments
+cell-key assay with a completed descriptive series, without full A5 validation; broader A5 and A6 experiments
 remain planned. For A2 the cell distinguisher is implemented (block 7) and its series remains planned.
 
 | Code | Adversary | What it sees and can do |
@@ -118,7 +118,7 @@ in block 7. The flow distinguisher is planned.
 
 The cooperative assay ([#24](https://github.com/jimichi-org/jimichi/issues/24)) compares exact
 representations of three client circuit cell keys in voluntarily exported Go Object payloads.
-Its full measurement series has not been published. External acquisition, disk/swap searches,
+Its registered series is complete ([results and provenance](../../README.md#cooperative-key-memory-results)). External acquisition, disk/swap searches,
 other secrets and recorded-traffic decryption remain unmeasured
 ([#192](https://github.com/jimichi-org/jimichi/issues/192), block 4).
 
@@ -297,7 +297,8 @@ hand-computed answers. The view of a node, that is what the testbed's nodes see 
 measured in this revision: what a node that follows the protocol knows is given by the model
 derived from the protocol ([#117](https://github.com/jimichi-org/jimichi/issues/117)). The lab
 has no scenario in which nodes record what they see, and replay and tampering are covered by the
-tests of the node and of the client, not measured as a share.
+tests of the node and of the client, not measured as a share. The remaining full #117 measurements
+are required for v0.4.0; they are in design and not implemented.
 
 | Scenario | Metric |
 |---|---|
@@ -571,8 +572,10 @@ message.
 ### Block 4. Key material, adversary A5
 
 The implemented cooperative stage is `lab -set keymem` ([#24](https://github.com/jimichi-org/jimichi/issues/24)).
-Its full measurement series has not been published. It observes exposure during an instrumented
-production workload; it does not validate the full A5 model.
+The registered series evaluated all 360 planned observations, 30 fresh processes per
+suite/policy/checkpoint, with no exclusions. Counts, binary provenance and host-load diagnostics
+are in the [README](../../README.md#cooperative-key-memory-results). It observes exposure during
+an instrumented production workload; it does not validate the full A5 model.
 
 | Component | Method |
 |---|---|
@@ -610,11 +613,11 @@ This version reports descriptive counts and proportions, with no p-values, confi
 superiority claim. Matches under `all`, no policy difference and non-observation are valid outcomes.
 
 Run a stable optimized binary on Linux/amd64 with exactly Go 1.27.3 and working mlock. Keep the host
-quiet and do not rebuild that binary during the series. The prespecified full series is:
+quiet and do not rebuild that binary during the series. The completed registered series used:
 
 ```
-lab -set keymem -suite c25519 -repeats 30 -seed 1 -rev <40-character-lowercase-commit> -out artifacts
-lab -set keymem -suite gost -repeats 30 -seed 1 -rev <40-character-lowercase-commit> -out artifacts
+lab -set keymem -suite c25519 -repeats 30 -seed 1 -rev eddddb226e7224140f8655b1566a55ce33f3ceda -out artifacts
+lab -set keymem -suite gost -repeats 30 -seed 1 -rev eddddb226e7224140f8655b1566a55ce33f3ceda -out artifacts
 ```
 
 Each invocation fixes both policies and all three endpoints; `-repeats` accepts 1..100.
@@ -1109,7 +1112,7 @@ comparison will be made: the conditions differ, and that will be stated.
    intervals across runs are planned with the full series
    ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
 4. The cooperative client cell-key assay (`lab -set keymem`, block 4), with `none` and `all`
-   at three independent checkpoints. Its full series has not been published; exact non-observation
+   at three independent checkpoints. The registered series is complete ([results](../../README.md#cooperative-key-memory-results)); exact non-observation
    in evaluated Object payloads does not establish erasure. Broader memory/disk/history scenarios
    remain unmeasured ([#192](https://github.com/jimichi-org/jimichi/issues/192)); known library
    copies remain listed in [CRYPTO](CRYPTO.md), "Known gaps".
