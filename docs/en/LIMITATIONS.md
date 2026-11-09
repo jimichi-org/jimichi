@@ -573,13 +573,18 @@ English | [Русский](../ru/LIMITATIONS.md)
   adding it to the lab attack is planned ([#43](https://github.com/jimichi-org/jimichi/issues/43)).
 - The correlation attack runs in laboratory conditions where the true flow labels are known.
   Transferring the estimates to a real network requires care.
-- The attack that is implemented is the baseline one: a passive observer counts frames per window
+- The baseline passive attack counts frames per window
   on the client-entry link and on the last link between nodes and ranks pairs of flows by Pearson
   correlation, with no time shift and on the forward direction only. Replies cross the same links
   and are not scored. An AUC near 0.5 says that this attack fails, not that a stronger one would:
-  a learned correlator ([#67](https://github.com/jimichi-org/jimichi/issues/67)) and an active
-  adversary with a timing watermark ([#116](https://github.com/jimichi-org/jimichi/issues/116))
-  are planned.
+  a learned correlator ([#67](https://github.com/jimichi-org/jimichi/issues/67)) remains planned.
+  The separate implemented timing-mark experiment (`cmd/lab -set mark`, EXPERIMENT block 2)
+  delays one encrypted client-entry connection and scores completed frames into relay 3.
+  It uses a known epoch, common loopback clock, six candidates and a fixed code/lag search.
+  Its global no-mark randomization p does not bound marked-run wrong attribution. Shared-host
+  effects, synchronous backpressure and closure can affect timing evidence. Queue overload or
+  a nonresponsive circuit is an availability loss, not demonstrated protection. Passive results
+  do not become active-attack results; neither experiment establishes resistance to arbitrary attacks.
 - The cell distinguisher of block 7 (EXPERIMENT) applies only to a client without -peer: its cover
   cells travel on the link to the entry, and the exit answers every data cell. A -peer client sends
   a request on every tick, and its fact of sending is a real or a dummy record inside a request;

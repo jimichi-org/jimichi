@@ -40,6 +40,14 @@ jobs:
       # actually run, so the race detector and the real secmem path go together
       - name: unit and integration tests
         run: go test -race -count=1 ./...
+      - name: optimized six-flow GOST timing-mark integration
+        run: |
+          log="$RUNNER_TEMP/mark-gost-optimized.log"
+          go test -count=1 -v -run '^TestMarkLiveGOSTSixFlowsOptimized$' ./lab > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          test "$(grep -c -- '--- PASS: TestMarkLiveGOSTSixFlowsOptimized' "$log")" -eq 3
+          grep -Fq -- '--- PASS: TestMarkLiveGOSTSixFlowsOptimized/gost-active (' "$log"
+          grep -Fq -- '--- PASS: TestMarkLiveGOSTSixFlowsOptimized/gost-sham (' "$log"
       - name: standard handshake vectors
         run: go test -race -count=1 -tags noisevectors ./noise ./crypto/noisevector
       # the threat model cites these as the check of key memory: the log must show
