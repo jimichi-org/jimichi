@@ -81,7 +81,7 @@ Suite c25519, base seed 1. Each client starts its schedule at a random phase; ev
 - One process on loopback, not the kind testbed below: no network delay, no certificates, onion key rotation or per-address limits, and anonymous links between relays; network emulation is planned ([#46](https://github.com/jimichi-org/jimichi/issues/46)).
 - Echo topology: the last relay echoes every message, so the conversation of two clients through a mailbox is not in these numbers ([#47](https://github.com/jimichi-org/jimichi/issues/47)).
 - 5 runs per point: no difference is claimed as significant; the full series of thirty runs per point is still to come ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
-- The attack is the baseline one: it counts cells only and ranks pairs of flows by Pearson correlation of the counts per window, on the forward direction only and with no time shift; the moments the connections of a circuit open and close match along the chain and are not part of it yet ([#43](https://github.com/jimichi-org/jimichi/issues/43)), and stronger attacks are planned ([#67](https://github.com/jimichi-org/jimichi/issues/67), [#116](https://github.com/jimichi-org/jimichi/issues/116)).
+- The attack is the baseline one: it counts cells only and ranks pairs of flows by Pearson correlation of the counts per window, on the forward direction only and with no time shift; the moments the connections of a circuit open and close match along the chain and are not part of it yet ([#43](https://github.com/jimichi-org/jimichi/issues/43)); a learned correlator remains planned ([#67](https://github.com/jimichi-org/jimichi/issues/67)); a separate timing-mark series is measured ([#116](https://github.com/jimichi-org/jimichi/issues/116), [results](#timing-mark-results)).
 - The observer watches two links and does not model the entry node, which sees the client's cells directly; whether a constant client rate hides from it the moments the client sends is not measured yet: the cell distinguisher is in place ([EXPERIMENT](docs/en/EXPERIMENT.md), block 7) and its series is planned ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
 - The round trip without protection or with cover only is below a millisecond and differs between sets by about 0.01 ms (0.14 to 0.15 ms without protection), so its last digits carry no meaning.
 - Series are run with the kind cluster stopped and no build on the host; every `correlation-*` row records the load inside the VM the lab runs in, the seeds and the code revision, and every `paths-*` row the seed and the revision. The seeds fix the client schedules, not the run: in the paced set, run twice with the same seeds and image, one relay-clock median moved by about 0.15. See [LIMITATIONS](docs/en/LIMITATIONS.md).
@@ -100,6 +100,42 @@ bash scripts/sweep.sh -set paths -rogue 2
 
 - `scripts/sweep.sh` builds the lab image, runs `cmd/lab` in it and records the revision in every row, marked `-dirty` when the tree differs from the commit.
 - Reports are JSON files in `artifacts/`, which is not part of the repository: rows with the configuration, seeds and revision (`correlation-*`, `paths-*`), medians (`summary-*`), window counts (`detail-*`) and verdicts (`deny-*`). The figures above are drawn from the `summary-*` reports. Stop the kind cluster and run no build on the host while a series runs.
+
+## Timing-mark results
+
+Historical c25519 series: 40 repeat blocks, 24 conditions per block, 960 completed executions.
+Each client mode, relay period and arm has its own denominator of 40. The primary endpoint is a
+correct declaration with the original circuit still open and its reserved probe echoed before cutoff.
+
+| Tested relay periods, ms | Correct + responsive, active | Responsive target, active and sham |
+|---|---:|---:|
+| off | 40/40 | 40/40 in each arm |
+| 25, 47.5, 50, 52.5 | 0/40 at each period | 40/40 in each arm at each period |
+| 75 | 0/40 | 0/40 in each arm |
+
+These counts held separately for both client modes: Immediate with additive cover and
+ConstantRate at 50 ms. They are not pooled across modes or periods. All attempts established
+and were scorable; all outcomes remain included. At 75 ms all six original circuits closed in
+every one of 160 active/sham executions across the two modes: availability loss, not protection.
+Seven wrong active declarations and seven sham declarations remain in the full condition table;
+Immediate with unpaced relays had 4/40 sham declarations. A Send return alone does not prove
+responsiveness. The independent comparison unit is the repeat block, not its six circuits.
+
+Measured 2026-11-09 at clean commit
+[`f0f188539ca9241b67ad6593f1e66687e80ed967`](https://github.com/jimichi-org/jimichi/commit/f0f188539ca9241b67ad6593f1e66687e80ed967),
+optimized Go 1.27.3, Linux/amd64, base seed 1. Binary SHA256:
+`404796bd0feb555b2f04629169e979f4531303dc5188ab71eaba9746be521ae1`.
+One-minute Linux load across all 1920 before/after samples: min/median/max 0.34/0.69/1.32 on a
+reported 32-CPU environment. These are load averages, not percentages or independent trials;
+no load threshold or post-hoc exclusion was applied. Timing/load effects were not isolated.
+
+This is one-process loopback echo: one delayed client-entry flow, five ungated candidates,
+completed forward frames into relay 3 including padding, a known epoch, common clock and fixed
+code/lag search. Zero observed primary outcomes establish neither zero population probability,
+a pacing threshold nor resistance to arbitrary active attacks. The detector's global no-mark
+calibration does not bound wrong attribution when a mark is present. The full condition table
+and method are in [EXPERIMENT](docs/en/EXPERIMENT.md), block 2. These numbers retain their
+historical revision; the passive series and cooperative key-memory series keep theirs.
 
 ## Cooperative key-memory results
 

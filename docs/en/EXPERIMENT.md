@@ -28,8 +28,8 @@ traffic sets. Block 4 records its own schedule and environment without seeded se
 ## Adversary models
 
 The codes are used in every results table. Measured so far: A1 with the count correlation attack
-(block 1) and the choice of chains for A4 (block 3). The A3 timing-mark experiment is implemented
-(block 2), without a published full series here. Block 4 implements a narrow cooperative client
+(block 1) and the choice of chains for A4 (block 3). The A3 timing-mark series is measured on its recorded historical revision
+(block 2). Block 4 implements a narrow cooperative client
 cell-key assay with a completed descriptive series, without full A5 validation; broader A5 and A6 experiments
 remain planned. For A2 the cell distinguisher is implemented (block 7) and its series remains planned.
 
@@ -178,7 +178,8 @@ multiplier against attack AUC; confidence intervals across runs are planned with
 
 ### Block 2. Active adversary A3, timing watermark
 
-Status: implemented in `cmd/lab -set mark`. This is a separate local loopback echo experiment
+Status: the registered series is complete in `cmd/lab -set mark`; historical measured revision
+f0f188539ca9241b67ad6593f1e66687e80ed967. This is a separate local loopback echo experiment
 with six real clients and three real relays. Batching remains a separate planned feature
 ([#82](https://github.com/jimichi-org/jimichi/issues/82)); this experiment preserves production
 encryption, queues, padding and timeout policy.
@@ -285,6 +286,46 @@ manifest. The preset has 960 runs and 4 h 16 min of capture, plus setup, cleanup
 Limits: one process on loopback, application frame-completion timestamps, known epoch/common
 clock, six candidates, one mark scale and a bounded lag search. The experiment does not establish
 resistance to arbitrary active attacks. Forty repeats give limited precision for rare declarations.
+
+#### Recorded series
+
+The completed c25519 series has 40 repeat blocks and 24 conditions per block, 960 executions.
+All established and were scorable; setup failures, unexecuted and unknown slots are zero.
+Each count below uses 40 executions in that exact client/period/arm, one per repeat block.
+The primary endpoint is correct declaration plus original-circuit responsive survival:
+open at cutoff and the matched reserved probe echoed before cutoff. Send success alone is insufficient.
+
+| Client | Relay period, ms | Correct + responsive, active | Wrong declarations, active | Responsive target, active | Any declaration, sham | Responsive target, sham |
+|---|---:|---:|---:|---:|---:|---:|
+| Immediate + cover | off | 40/40 | 0/40 | 40/40 | 4/40 | 40/40 |
+| Immediate + cover | 25 | 0/40 | 1/40 | 40/40 | 1/40 | 40/40 |
+| Immediate + cover | 47.5 | 0/40 | 0/40 | 40/40 | 1/40 | 40/40 |
+| Immediate + cover | 50 | 0/40 | 1/40 | 40/40 | 0/40 | 40/40 |
+| Immediate + cover | 52.5 | 0/40 | 0/40 | 40/40 | 0/40 | 40/40 |
+| Immediate + cover | 75 | 0/40 | 1/40 | 0/40 | 0/40 | 0/40 |
+| ConstantRate 50 ms | off | 40/40 | 0/40 | 40/40 | 0/40 | 40/40 |
+| ConstantRate 50 ms | 25 | 0/40 | 1/40 | 40/40 | 0/40 | 40/40 |
+| ConstantRate 50 ms | 47.5 | 0/40 | 1/40 | 40/40 | 0/40 | 40/40 |
+| ConstantRate 50 ms | 50 | 0/40 | 1/40 | 40/40 | 0/40 | 40/40 |
+| ConstantRate 50 ms | 52.5 | 0/40 | 0/40 | 40/40 | 0/40 | 40/40 |
+| ConstantRate 50 ms | 75 | 0/40 | 1/40 | 0/40 | 1/40 | 0/40 |
+
+The seven wrong active declarations and seven sham declarations are retained, not hidden by the
+primary endpoint. At 75 ms every one of the six original circuits closed in all 160 executions
+across modes and arms; this is availability loss. Immediate active 75 ms realized the complete
+mark in 26 attempts and only part in 14; all 40 remain included. All other active conditions had
+complete realization in 40/40. Six circuits per execution do not provide 240 independent repeats.
+Zero observed primary outcomes imply neither zero population probability, equivalence to chance,
+a safe relay-period threshold nor resistance to arbitrary active attacks. No contrast p-values
+or inferential intervals are published here; the registered method above remains unchanged.
+
+The [README](../../README.md#timing-mark-results) records the historical source commit, optimized
+Go 1.27.3 Linux/amd64 binary digest and load diagnostics. All 1920 before/after load samples are
+available; no load threshold or post-hoc exclusion was used. They describe shared-host conditions,
+not isolated load effects on timing or latency. Detector replay uses retained completed-frame
+timestamps; ordinary per-call histories and entry/backward raw timestamps were not retained.
+Stored latency samples and counters can be recalculated, but their raw event origins cannot all
+be reconstructed. Conditional echo latency does not establish unconditional service performance.
 
 ### Block 3. Node compromise, adversary A4
 
@@ -1083,7 +1124,7 @@ Rules:
 | External | the testbed runs on one machine and the series in one process over loopback, network delays are not modelled | absolute latency figures belong to loopback and do not carry over to a network; network emulation profiles are planned ([#46](https://github.com/jimichi-org/jimichi/issues/46)) |
 | Construct | AUC alone does not imply a practical attack | TPR at FPR 0.01 and top-1 accuracy are reported alongside; the precision at the base rate is in the summary: for linking at the F of the testbed and at a pi fixed before the series, for cells at the share of payload cells on the testbed |
 | Reproducibility | randomness across runs | fixed seeds, configuration and code version in every report |
-| Survival bias | medians without broken and limited runs describe the runs where every circuit survived; when closures depend on the configuration, such as a node period close to the client's, its medians describe the luckier runs | runs, broken_runs, limited_runs and clean_runs, and in block 7 label_mismatch_runs as well, stand next to every median, and every row records which circuits closed and when (flow_closed, flow_closed_after); a survival series over the ratio of periods is planned (block 2) |
+| Survival bias | medians without broken and limited runs describe the runs where every circuit survived; when closures depend on the configuration, such as a node period close to the client's, its medians describe the luckier runs | runs, broken_runs, limited_runs and clean_runs, and in block 7 label_mismatch_runs as well, stand next to every median, and every row records which circuits closed and when (flow_closed, flow_closed_after); block 2 separately reports its completed marked series with all closed outcomes retained |
 
 ## Comparison with existing systems
 
