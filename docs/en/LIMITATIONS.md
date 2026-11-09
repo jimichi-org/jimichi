@@ -602,6 +602,13 @@ English | [Русский](../ru/LIMITATIONS.md)
   effects, synchronous backpressure and closure can affect timing evidence. Queue overload or
   a nonresponsive circuit is an availability loss, not demonstrated protection. Passive results
   do not become active-attack results; neither experiment establishes resistance to arbitrary attacks.
+  The recorded c25519 series f0f1885 is complete ([README](../../README.md#timing-mark-results)).
+  Its primary endpoint combines a correct declaration with an original circuit that remains open
+  and echoes the reserved probe before cutoff. At 75 ms all six original circuits closed in every
+  active/sham execution, an availability loss. Wrong active and sham declarations remain reported;
+  zero observed primary outcomes establish neither zero probability nor a safe period threshold.
+  The independent unit is the repeat block. Load was observed, not experimentally isolated;
+  no load-based exclusion or unconditional service-performance conclusion follows.
 - The cell distinguisher of block 7 (EXPERIMENT) applies only to a client without -peer: its cover
   cells travel on the link to the entry, and the exit answers every data cell. A -peer client sends
   a request on every tick, and its fact of sending is a real or a dummy record inside a request;
