@@ -126,6 +126,26 @@ func TestScriptsRefuseMoreRelaysThanTheirPortsHold(t *testing.T) {
 	}
 }
 
+func TestWaitForwardHandlesDelayedLogCreation(t *testing.T) {
+	check := `. "$1"
+log="$2"
+polls=0
+sleep() {
+  polls=$((polls + 1))
+  printf 'Forwarding from 127.0.0.1:19101 -> 9000\nForwarding from 127.0.0.1:19102 -> 9001\n' >"$log"
+}
+wait_forward "$$" "$log" 19101 19102 || exit $?
+[ "$polls" -eq 1 ]
+`
+	log := filepath.ToSlash(filepath.Join(t.TempDir(), "forward.log"))
+	cmd := exec.Command(bash(t), "-c", check, "bash", script(t, "lib.sh"), log)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil || stderr.Len() != 0 {
+		t.Fatalf("wait_forward: error %v, stderr %q; want success without diagnostics", err, stderr.String())
+	}
+}
+
 func TestPortsFitUpToNinetyNineRelays(t *testing.T) {
 	check := `. "$1"; ports_fit "$(relays)"`
 	for _, c := range []struct{ relays, status int }{{1, 0}, {99, 0}, {100, 1}, {250, 1}} {

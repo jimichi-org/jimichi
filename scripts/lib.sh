@@ -91,7 +91,7 @@ wait_forward() {
     kill -0 "$pid" 2>/dev/null || { echo "port-forward $(basename "$log" .log) exited" >&2; return 1; }
     local ready=yes
     for port in "$@"; do
-      grep -q "Forwarding from 127.0.0.1:$port " "$log" || ready=""
+      [ -e "$log" ] && grep -q "Forwarding from 127.0.0.1:$port " "$log" || ready=""
     done
     [ -n "$ready" ] && return 0
     sleep 0.1
