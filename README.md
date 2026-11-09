@@ -107,8 +107,8 @@ bash scripts/sweep.sh -set paths -rogue 2
 |---|---|---|
 | Metadata | a traffic correlation attack links flows on the entry link to flows on the last link between relays from cell timings and counts alone; AUC and top-1 accuracy ([Results](#results)), and TPR at FPR 0.01 in the reports, against cover traffic rate, a constant client rate and relays sending on their own clocks | node delay levels ([#45](https://github.com/jimichi-org/jimichi/issues/45)), message size classes ([#68](https://github.com/jimichi-org/jimichi/issues/68)), the topology of a conversation, two entries and the mailbox ([#47](https://github.com/jimichi-org/jimichi/issues/47)) |
 | Partial compromise | how often a randomly drawn chain meets rogue nodes, computed and sampled with the client's own choice, that of a client without `-peer` (`cmd/lab -set paths`); what one node knows of the route by its position, derived from the protocol; a lab test with real nodes that a node certified by another CA joins no chain | what the testbed's nodes see and link from their own records, measured rather than derived ([#117](https://github.com/jimichi-org/jimichi/issues/117)) |
-| Key material | the switches that start a node without each measure (`-keymem`, `-harden`) | memory dumps of a live relay searched for known key bytes, with and without memory locking and dump prevention, and the same search in the container image and the node's files ([#24](https://github.com/jimichi-org/jimichi/issues/24)) |
-| Forward secrecy | unit tests: a setup cell stops opening once the node releases the onion key it was built for | setup cells recorded by a neighbour attacked with the keys taken from node memory, by the age of the recording ([#24](https://github.com/jimichi-org/jimichi/issues/24)) |
+| Key material | `lab -set keymem`: cooperative exact-byte matching of three client circuit cell keys in exported Go Object payloads, `none` versus `all`, active and after Close; full series not published ([EXPERIMENT](docs/en/EXPERIMENT.md), block 4) | external memory acquisition, disk/swap searches and other secrets, deferred beyond v0.4.0 ([#192](https://github.com/jimichi-org/jimichi/issues/192)) |
+| Forward secrecy | unit tests: a setup cell stops opening once the node releases the onion key it was built for | setup cells recorded by a neighbour attacked with keys taken from node memory, by the age of the recording, unmeasured and deferred beyond v0.4.0 ([#192](https://github.com/jimichi-org/jimichi/issues/192)) |
 | Cost | round-trip latency through the chain, the bandwidth multiplier of cover and padding, benchmarks of key agreement, signing and sealing a cell, GOST versus X25519 | node throughput at saturation, goodput per client, a setup while a node holds two onion keys, the latency of a one-node chain, the cost of memory locking ([#118](https://github.com/jimichi-org/jimichi/issues/118)) |
 
 Threat modelling follows the FSTEC methodology of 2021-02-05; scenarios are named in plain words.
@@ -201,9 +201,10 @@ docs/         documentation, en/ and ru/
 
 ## Requirements
 
-Go 1.27. Memory locking and dump prevention are Linux-only, and so will be the planned
-key-extraction scenarios ([#24](https://github.com/jimichi-org/jimichi/issues/24)); other
-platforms build against stubs that report memory as unlocked, so a node refuses to start there.
+Go 1.27. Memory locking and dump prevention are Linux-only; other platforms build against stubs
+that report memory as unlocked, so a node refuses to start there. The cooperative `keymem` assay
+requires Linux/amd64, exactly Go 1.27.3 and working mlock; unsupported or unavailable observations
+are explicit failures, not zero-match results ([EXPERIMENT](docs/en/EXPERIMENT.md), block 4).
 Docker and kind for the testbed; a Compose setup for development is planned
 ([#22](https://github.com/jimichi-org/jimichi/issues/22)).
 

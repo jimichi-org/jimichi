@@ -64,7 +64,10 @@ English | [Русский](../ru/GLOSSARY.md)
 | Mirror cross-check | a node with -consistency reads the mirrors of four randomly drawn roster nodes once per -consistency-every (1 min), feeds every statement of every node into that node's record, adopts a newer descriptor and refuses a node whose statements break a rule |
 | Certificate issuance | the CA checks a node's signed request, carrying a nonce the CA chose, against the operator roster and signs the certificate |
 | Counter order | on every link a node accepts only the counter one above the previous one, anything else closes the circuit; the client takes the numbers of replies the same way; the replay defence |
-| Memory dump | a snapshot of process memory; the key extraction scenarios that will search it are planned ([#24](https://github.com/jimichi-org/jimichi/issues/24)) |
+| Memory dump | a snapshot of selected process-memory regions; its coverage depends on the acquisition mechanism, not on the name |
+| Process core dump | an OS diagnostic image of process state, subject to core limits, dumpability and mapping exclusions; the cooperative keymem assay does not acquire it |
+| Runtime heap export | a voluntary `runtime/debug.WriteHeapDump` stream; keymem parses the Go 1.27.3 format and scores only Object payloads, not stacks, globals or every process region |
+| Cooperative known-secret exposure assay | exact-byte matching of three known client cell keys in one evaluated runtime-export Object view; no unknown-key discovery, external acquisition or proof of erasure (EXPERIMENT, block 4) |
 | ROC, AUC | the error curve and the area under it, the measure of success of the correlation attack and of the cell distinguisher |
 | Discriminant | a linear rule that turns the features of a cell into one number, its score: w = S_t^-1 (mu1 - mu0), trained on the training runs (EXPERIMENT, "Traffic indistinguishability") |
 | Cell labels | the truth "the cell carries a message" for every data cell of a client; a wrapper of the client's provider in the lab gives it, and the observer has no access to it (EXPERIMENT, block 7) |

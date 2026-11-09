@@ -18,6 +18,7 @@ import (
 	"github.com/jimichi-org/jimichi/client"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/lab"
+	"github.com/jimichi-org/jimichi/lab/keymem"
 	"github.com/jimichi-org/jimichi/lab/metrics"
 )
 
@@ -158,6 +159,9 @@ func main() {
 }
 
 func command(args []string, stdout, stderr io.Writer) int {
+	if handled, code := keymem.MaybeRunChild(args); handled {
+		return code
+	}
 	fs := flag.NewFlagSet("lab", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	flows := fs.Int("flows", 6, "concurrent flows")
@@ -167,7 +171,7 @@ func command(args []string, stdout, stderr io.Writer) int {
 	binList := fs.String("bins", "100ms", "comma-separated observation windows, each scored on the same runs")
 	repeats := fs.Int("repeats", 1, "runs per configuration")
 	out := fs.String("out", "artifacts", "directory for the json report")
-	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, mark: active timing marks with sham controls and survival, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic, cover: payload against cover cells at the entry, immediate with cover against constant rate")
+	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, mark: active timing marks with sham controls and survival, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic, cover: payload against cover cells at the entry, immediate with cover against constant rate, keymem: cooperative object exposure with both policies and every endpoint fixed")
 	markReplay := fs.String("mark-replay", "", "mark set: replay a mark-v1 observation JSONL without truth")
 	rev := fs.String("rev", "unknown", "code revision recorded in every row")
 	seed := fs.Int64("seed", 1, "base seed; every repeat derives its own from it")
@@ -187,6 +191,11 @@ func command(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		return 2
+	}
+	if *set == "keymem" {
+		explicit := make(map[string]bool)
+		fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+		return keymemCommand(keymemFlags{suite: *suiteName, repeats: *repeats, seed: *seed, revision: *rev, out: *out, explicit: explicit, positional: fs.NArg()}, stdout, stderr)
 	}
 	if *set == "mark" {
 		explicit := make(map[string]bool)
