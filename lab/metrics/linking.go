@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"maps"
 	"math"
 	"net/netip"
 	"slices"
@@ -65,6 +64,8 @@ func SharedLinkScores(out, in []Link, truth map[int]int) []Score {
 		return parsed
 	}
 	from, to := parse(out), parse(in)
+	defer clear(from)
+	defer clear(to)
 	scores := make([]Score, 0, len(out)*len(in))
 	for i, o := range from {
 		for j, n := range to {
@@ -93,15 +94,18 @@ func endpoint(s string) (netip.AddrPort, bool) {
 // not link
 func BestMatches(scores []Score, flows int, floor float64) []int {
 	var kept []Score
+	defer func() { clear(kept[:cap(kept)]) }()
 	exits := 0
 	for _, s := range scores {
 		if s.Entry >= 0 && s.Entry < flows && s.Exit >= 0 && s.Value > floor {
-			kept = append(kept, s)
+			kept = appendScratchScores(kept, s)
 			exits = max(exits, s.Exit+1)
 		}
 	}
 	rows := leaders(kept, flows, func(s Score) (int, int) { return s.Entry, s.Exit })
 	columns := leaders(kept, exits, func(s Score) (int, int) { return s.Exit, s.Entry })
+	defer clear(rows)
+	defer clear(columns)
 	links := make([]int, flows)
 	for i, j := range rows {
 		links[i] = -1
@@ -118,6 +122,8 @@ func leaders(scores []Score, n int, sides func(Score) (own, other int)) []int {
 	top := make([]float64, n)
 	lead := make([]int, n)
 	tied := make([]bool, n)
+	defer clear(top)
+	defer clear(tied)
 	for i := range lead {
 		top[i], lead[i] = math.Inf(-1), -1
 	}
@@ -141,8 +147,14 @@ func leaders(scores []Score, n int, sides func(Score) (own, other int)) []int {
 // a first-node circuit whose exit is honest cannot be linked right, so
 // counting it would put top-1 below 1 by construction
 func Partnered(scores []Score, truth map[int]int) ([]Score, int) {
-	keys := slices.Sorted(maps.Keys(truth))
+	keys := make([]int, 0, len(truth))
+	defer clear(keys[:cap(keys)])
+	for key := range truth {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
 	index := make(map[int]int, len(keys))
+	defer clear(index)
 	for r, key := range keys {
 		index[key] = r
 	}
@@ -150,7 +162,7 @@ func Partnered(scores []Score, truth map[int]int) ([]Score, int) {
 	for _, s := range scores {
 		if r, ok := index[s.Entry]; ok {
 			s.Entry = r
-			kept = append(kept, s)
+			kept = appendScratchScores(kept, s)
 		}
 	}
 	return kept, len(keys)

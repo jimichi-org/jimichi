@@ -50,6 +50,21 @@ jobs:
           grep -Fq -- '--- PASS: TestMarkLiveGOSTSixFlowsOptimized/gost-sham (' "$log"
       - name: standard handshake vectors
         run: go test -race -count=1 -tags noisevectors ./noise ./crypto/noisevector
+      - name: optimized controlled-node observation integration
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          log="$RUNNER_TEMP/nodeview-optimized.log"
+          go test -count=1 -timeout 20m -v -run '^TestNodeViewLiveOptimized$' ./lab/nodeview > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          ! grep -Eq -- '--- SKIP: TestNodeViewLiveOptimized|warning: no tests to run' "$log"
+          test "$(grep -c -- '--- PASS: TestNodeViewLiveOptimized' "$log")" -eq 19
+          grep -Fq -- '--- PASS: TestNodeViewLiveOptimized (' "$log"
+          for suite in c25519 gost; do
+            grep -Fq -- "--- PASS: TestNodeViewLiveOptimized/$suite (" "$log"
+            for case in one-role two-edge two-adjacent-first two-adjacent-last trusted-admission foreign-peer foreign-mailbox mailbox-records; do
+              grep -Fq -- "--- PASS: TestNodeViewLiveOptimized/$suite/$case (" "$log"
+            done
+          done
       - name: optimized cooperative key memory integration
         run: |
           log="$RUNNER_TEMP/keymem-optimized.log"

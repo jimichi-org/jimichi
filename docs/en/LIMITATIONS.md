@@ -2,12 +2,39 @@
 
 English | [Русский](../ru/LIMITATIONS.md)
 
-- The testbed is a laboratory one. In the cluster the nodes are containers on a single machine.
-  The correlation series do not run in the cluster: cmd/lab starts every node and every client
-  inside one process and connects them over loopback. Network delay, loss and jitter are neither
+- The testbed is a lab. In the cluster nodes are containers on one machine. The original correlation
+  series run all nodes and clients in one process over loopback; `lab/nodeview` launches its own
+  participants in separate processes on the same host. Network delay, loss and jitter are neither
   reproduced nor emulated; network emulation is planned
-  ([#46](https://github.com/jimichi-org/jimichi/issues/46)). The separation between operators is
-  modelled only as the number of rogue nodes in the choice of a chain (EXPERIMENT, block 3).
+  ([#46](https://github.com/jimichi-org/jimichi/issues/46)). These are not independent operators.
+- One/two-node observation in `lab/nodeview` covers actual API buffers and metadata of the own
+  layer, transport and Deliver. It neither snapshots all memory nor proves other copies absent.
+  Same-user processes have separate address spaces but are not isolated from each other's OS
+  capabilities. Participant keys never reach the controller; this is a measurement boundary,
+  not protection against root or the same user.
+- The 128 MiB bound covers combined raw controller/scorer/evaluator data, not all program memory.
+  Earlier released aggregates and serialization have a separate finite budget and current host
+  capacity checks. Unresolved cgroup limits cause refusal. `Manifest.Resources` reports the maximum
+  individual owned-process peak through finalization, including pooled fitting, rather than a sum,
+  simultaneous stand RSS or OOM guarantee. Later serialization and subsequent loss of host memory
+  are outside that measured peak.
+- Node views use ideal one-kernel clocks and a fixed five-position roster. Four per-source-IP
+  limits are explicitly disabled for the shared loopback address; aggregate handshake/link caps
+  remain (EXPERIMENT, block 3). Signed-bundle verification measures neither HTTP, gossip, rotation,
+  Sybil admission nor arbitrary roster expansion. A trusted, including compromised, CA certificate
+  does not replace a roster position.
+- Linking depends on the selected score, exact ties, partner availability, exposure and close
+  timing. Local cryptographic processing does not guarantee a later channel write. Post-cutoff
+  drain establishes provenance without adding measured events. Merged-view R uses private choice
+  of component/order and remains an upper bound for that rule. The model neither replaces absent
+  views nor proves protection against node compromise or arbitrary linking attacks.
+- Block 3 mailbox distinguishers cover the declared 30-second workload, Rate 35 ms, ReplyTimeout
+  7 s, Keepalive 1 s and 18 coarse observable features. They do not test arbitrary distinguishers
+  or default Keepalive 30 s. Missing classes, directions or mandatory scenarios remain unavailable.
+  Cover puts does not guarantee q = 0 during a full window, stale state or failure. Even releasable
+  aggregates, ranks and models can disclose statistics and encoded categories given side information;
+  raw counters, times, F, records, messages and events are never released. The full #117 series is
+  not published here; earlier calculations and the trust test are not its empirical results.
 - The GOST implementation is not a certified cryptographic facility. It applies to systems handling
   commercial data, not to state information systems or significant critical infrastructure. The
   algorithms are the same and conformance is checked against the test vectors from the standards,
@@ -371,11 +398,14 @@ English | [Русский](../ru/LIMITATIONS.md)
   with probability 19/27 under an honest entry and so learns the entry (the item on rebuilding the
   chain above); what it sees in the requests is listed in the previous item; neither is measured
   on the testbed ([#117](https://github.com/jimichi-org/jimichi/issues/117)).
-- Before the session the puts carry handshake records only, so the mailbox sees the moment of the
-  handshake. Without -cover-puts the mailbox also sees the moment and number of real messages,
-  the initiator's first record after kk2 and a keepalive every 30 s; with a round trip longer than
-  W x rate the ticks without a put show. A refused put shows the contact and the mailbox that the
-  other side does not fetch.
+- Before the session the puts carry handshake records only, so the mailbox sees the handshake
+  timing. Put times, public record kinds/numbers, outcomes and repeated bytes are observable.
+  Without -cover-puts these are activity features, not direct real/dummy labels or exact source
+  message times/counts: keepalive can produce dummy records, while sticky copies repeat one record
+  in several requests. Block 3 computes q from actual labels, not from put presence alone.
+  Production Keepalive defaults to 30 s; the primary matrix explicitly uses 1 s and the separate
+  descriptive controls explicitly use 30 s. With a round trip longer than W x rate, ticks without put show.
+  A refused put shows the contact and the mailbox that the other side does not fetch.
 - There is no post-compromise recovery: a hash ratchet without a DH ratchet, and a new handshake
   after staleness gives it only on the side. Whoever holds the recipient's private identity key
   (KCI), or a mailbox that replays an old kk1, can only reset a session that is absent,
