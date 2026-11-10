@@ -28,6 +28,91 @@ func TestFixtureShutdownUsesOneCohortDeadline(t *testing.T) {
 	}
 }
 
+func TestClientTruthReceivedMessageOwnResourceRefusal(t *testing.T) {
+	for _, resource := range []string{"stream", "frames", "scalar", "arena", "sticky"} {
+		t.Run(resource, func(t *testing.T) {
+			p := capacityTestCapture(t)
+			storage := p.truth.messages
+			defer func() { p.truth.messages = storage[:len(p.truth.messages)] }()
+			blockMessageResource(p, resource)
+			want := ReasonLimit
+			if resource == "sticky" {
+				p.err, want = ReasonContract, ReasonContract
+			}
+			body := bytes.Repeat([]byte{7}, 128)
+			before := capturePrefix(p)
+			markPeerReply(p, body)
+			if p.err != want || !bytes.Equal(body, bytes.Repeat([]byte{7}, 128)) {
+				t.Fatal("receive refusal changed the borrowed body or precise sticky cause")
+			}
+			assertCapturePrefix(t, p, before)
+			p.truth.messages = storage[:0]
+			p.truth.setups = p.truth.setups[:0]
+			p.truth.capacity = clientTruthCapacity{}
+			p.truth.arena.used = 0
+			after := capturePrefix(p)
+			markPeerReply(p, body)
+			if p.err != want {
+				t.Fatal("later receive replaced its first failure")
+			}
+			assertCapturePrefix(t, p, after)
+		})
+	}
+}
+
+func TestClientTruthReceivedMessageRejectsMalformedWidthBeforeRetention(t *testing.T) {
+	for _, width := range []int{0, 127, 129} {
+		p := capacityTestCapture(t)
+		body := bytes.Repeat([]byte{7}, width)
+		before := capturePrefix(p)
+		markPeerReply(p, body)
+		if p.err != ReasonLabel || !bytes.Equal(body, bytes.Repeat([]byte{7}, width)) {
+			t.Fatal("malformed received width was treated as a capacity refusal or changed its input")
+		}
+		assertCapturePrefix(t, p, before)
+		markPeerReply(p, bytes.Repeat([]byte{8}, 128))
+		if p.err != ReasonLabel {
+			t.Fatal("valid later receive replaced the malformed-width cause")
+		}
+		assertCapturePrefix(t, p, before)
+	}
+}
+
+func TestClientTruthReceivedMessageExactArenaFitCopiesOnce(t *testing.T) {
+	p := capacityTestCapture(t)
+	p.side = 3
+	p.truth.arena.used = clientArenaBytes - 128
+	body := bytes.Repeat([]byte{7}, 128)
+	markPeerReply(p, body)
+	if p.err != ReasonNone || len(p.truth.messages) != 1 || p.truth.arena.used != clientArenaBytes || p.truth.capacity.messages != 1 || p.truth.capacity.wireBytes != 165 || p.truth.capacity.frames != 1 {
+		t.Fatal("received body did not use its exact final arena extent")
+	}
+	m := p.truth.messages[0]
+	if m.side != 3 || m.sent || !m.replied || m.body.offset != clientArenaBytes-128 || m.body.size != 128 || !bytes.Equal(p.truth.arena.bytes(m.body), body) || &p.truth.arena.bytes(m.body)[0] == &body[0] {
+		t.Fatal("received row lost ownership, reply facts or its separate protected copy")
+	}
+	clear(body)
+	if !bytes.Equal(p.truth.arena.bytes(m.body), bytes.Repeat([]byte{7}, 128)) {
+		t.Fatal("received protected body retained a borrowed caller alias")
+	}
+}
+
+func TestClientTruthLiveConstructorUsesProtectedPrepayment(t *testing.T) {
+	p, e := newPrivateCapture(3)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer p.close()
+	if p.side != 3 || !p.truth.client || p.truth.arena == nil || p.truth.arena.buffer == nil || !p.truth.arena.buffer.Locked() || p.truth.arena.buffer.Len() != clientArenaBytes || ([4]int{cap(p.truth.messages), cap(p.truth.setups), cap(p.truth.seals), cap(p.truth.requests)}) != ([4]int{6355, 8192, 2628, 32768}) || len(p.truth.clientPacket) != 65506 || cap(p.truth.clientPacket) != 65506 || p.truth.capacity != (clientTruthCapacity{}) {
+		t.Fatal("live capture constructor bypassed protection or prepaid owners")
+	}
+	buffer := p.truth.arena.buffer
+	p.close()
+	if buffer.Len() != 0 || p.truth.arena != nil || p.truth.client || p.truth.clientPacket != nil {
+		t.Fatal("live capture construction retained its actual protected startup owners")
+	}
+}
+
 func TestFixtureAll37WaitsAndReaderRetainQuarantine(t *testing.T) {
 	buffer, err := secmem.New(4096)
 	if err != nil {

@@ -27,6 +27,20 @@ func TestTrainingAndMetricWorkingSetKnownAnswers(t *testing.T) {
 	}
 }
 
+func TestSourceCapacityFixedControllerOverlapKnownAnswer(t *testing.T) {
+	// 37 retained application descriptors can coexist with the later scorer descriptor
+	controls := uint64(38*88 + 32*8 + 32*4 + 8*256)
+	owner, e := sourceReplayBackingBytes()
+	if e != nil {
+		t.Fatal(e)
+	}
+	// the 3584-byte scan backing needs its header/class, while bounded locals occupy at most 1024 bytes
+	cold := owner + 4096 + 1024
+	if controls != 5776 || controls > 16384 || cold != 15984 || cold > 16384 || 8002256+16384+16384 != 8035024 || (8<<20)-8035024 != 353584 {
+		t.Fatal("source-capacity controls do not fit the existing fixed reservation")
+	}
+}
+
 func TestMethodRejectsScratchBeforeAnnotation(t *testing.T) {
 	b := &memoryBudget{limit: 1}
 	_, _, e := summarizeMethod(predictedMethod{values: []pairValue{{}}}, evaluationInput{budget: b}, "x", 0, 0)

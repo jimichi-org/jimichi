@@ -8,7 +8,7 @@ func (s *streamSize) add(records, width, batch uint64) error {
 	if records == 0 {
 		return nil
 	}
-	if batch == 0 || records > math.MaxUint64-width || width > 0 && records > math.MaxUint64/width {
+	if batch == 0 || width > 0 && records > math.MaxUint64/width {
 		return fail(ReasonLimit)
 	}
 	frames := (records-1)/batch + 1
@@ -58,9 +58,21 @@ func truthStreamSize(t privateTruth) (streamSize, error) {
 		}
 	}
 	for _, q := range t.requests {
+		if q.record.size != 0 && q.record.size != 392 {
+			return s, fail(ReasonContract)
+		}
+		if uint64(q.record.size) > math.MaxUint64-s.bytes {
+			return s, fail(ReasonLimit)
+		}
 		s.bytes += uint64(q.record.size)
 	}
 	for _, f := range t.fragments {
+		if f.data.size < 0 {
+			return s, fail(ReasonContract)
+		}
+		if uint64(f.data.size) > math.MaxUint64-s.bytes {
+			return s, fail(ReasonLimit)
+		}
 		s.bytes += uint64(f.data.size)
 	}
 	return s, nil

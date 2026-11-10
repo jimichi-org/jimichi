@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"sync"
 	"time"
 
@@ -43,6 +44,7 @@ func encodeWorkload(w workloadPlan, budgets ...*memoryBudget) encoder {
 	}
 	b.u8(w.topology)
 	b.bytes(w.contact, 2048)
+	b.u32(w.sourceLimit)
 	return b
 }
 func decodeWorkload(r *decoder, a *lockedArena) (workloadPlan, error) {
@@ -50,7 +52,7 @@ func decodeWorkload(r *decoder, a *lockedArena) (workloadPlan, error) {
 	if r.u8() != 3 {
 		return w, fail(ReasonIPC)
 	}
-	seen := map[uint8]bool{}
+	var seen [5]bool
 	for i := range w.route {
 		w.route[i] = r.u8()
 		if w.route[i] >= 5 || seen[w.route[i]] {
@@ -63,22 +65,48 @@ func decodeWorkload(r *decoder, a *lockedArena) (workloadPlan, error) {
 	if n > 128 {
 		return w, fail(ReasonIPC)
 	}
-	for range n {
-		body := r.take(128)
-		ref, ok := a.copy(body)
+	bodyAt := r.at
+	r.take(n * payloadBytes)
+	w.topology = r.u8()
+	contact := r.bytes(2048)
+	w.sourceLimit = r.u32()
+	ceiling, e := sourceAttemptCeiling()
+	if e != nil {
+		return w, e
+	}
+	if r.end() != nil || w.side >= maxClients || w.topology < 1 || w.topology > 2 || w.topology == 1 && w.sourceLimit != 0 || w.topology == 2 && (w.sourceLimit == 0 || w.sourceLimit > ceiling) {
+		return w, fail(ReasonIPC)
+	}
+	if a == nil || a.buffer == nil || a.maximum != 0 || len(a.free) != 0 || n*payloadBytes > a.buffer.Len()-a.used {
+		return w, fail(ReasonLimit)
+	}
+	w.bodies = make([]arenaRef, 0, n)
+	for i := range n {
+		ref, ok := a.copy(r.b[bodyAt+i*payloadBytes : bodyAt+(i+1)*payloadBytes])
 		if !ok {
+			for j := range w.bodies {
+				a.erase(&w.bodies[j])
+			}
+			clear(w.bodies[:cap(w.bodies)])
+			w.bodies = nil
 			return w, fail(ReasonLimit)
 		}
 		w.bodies = append(w.bodies, ref)
 	}
-	w.bodyArena = a
-	w.structural = n == 1
-	w.topology = r.u8()
-	w.contact = append([]byte(nil), r.bytes(2048)...)
-	if r.end() != nil || w.topology < 1 || w.topology > 2 {
-		return w, fail(ReasonIPC)
-	}
+	w.bodyArena, w.structural = a, n == 1
+	w.contact = append([]byte(nil), contact...)
 	return w, nil
+}
+
+func decodeWorkloadBegin(r *decoder, expectedDuration int64) (int64, int64, error) {
+	if r == nil {
+		return 0, 0, fail(ReasonIPC)
+	}
+	epoch, duration, cutoff := r.i64(), r.i64(), r.i64()
+	if r.end() != nil || epoch <= 0 || duration <= 0 || duration != expectedDuration || epoch > math.MaxInt64-duration || cutoff != epoch+duration {
+		return 0, 0, fail(ReasonIPC)
+	}
+	return epoch, cutoff, nil
 }
 
 func clientChild(c *childIO) (err error) {
@@ -413,9 +441,9 @@ func clientChild(c *childIO) (err error) {
 	if e != nil {
 		return e
 	}
-	epoch, duration, cutoff := r.i64(), r.i64(), r.i64()
-	if r.end() != nil || duration != cfg.settings.DurationNS || cutoff != epoch+duration {
-		return fail(ReasonIPC)
+	epoch, cutoff, e := decodeWorkloadBegin(r, cfg.settings.DurationNS)
+	if e != nil {
+		return e
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -598,7 +626,7 @@ func markReply(p *privateCapture, body []byte) {
 			return
 		}
 	}
-	p.err = ReasonLabel
+	p.latch(ReasonLabel)
 }
 
 func dialObservedClient(cfg client.Config, p *privateCapture) (*client.Client, uint32, error) {
@@ -652,16 +680,25 @@ func prescribedChoiceReader(usable []bool, path []int, peer bool) io.Reader {
 func markPeerReply(p *privateCapture, body []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(body) != 128 || len(p.truth.messages) >= maxMessages {
-		p.err = ReasonLabel
+	if len(body) != 128 {
+		p.latch(ReasonLabel)
+		return
+	}
+	if p.frozen || p.err != ReasonNone {
+		return
+	}
+	next, e := p.truth.nextClient(1, 0, len(body))
+	if e != nil {
+		p.latch(reasonOf(e))
 		return
 	}
 	r, ok := p.truth.arena.copy(body)
 	if !ok {
-		p.err = ReasonLimit
+		p.latch(ReasonLimit)
 		return
 	}
 	p.truth.messages = append(p.truth.messages, actualMessage{side: p.side, body: r, replied: true})
+	p.truth.capacity = next
 }
 func initialClientFailure(c *childIO, p *privateCapture, counts Counts, cleanup func(), cause error) error {
 	counts.SetupFailed = 1
@@ -723,9 +760,12 @@ func peerWorkload(ctx context.Context, c *conversation.Conversation, p *privateC
 				return e
 			}
 			p.mu.Lock()
-			p.truth.messages = append(p.truth.messages, actualMessage{side: p.side, body: w.bodies[i]})
-			index := len(p.truth.messages) - 1
-			e := c.Send(p.truth.arena.bytes(w.bodies[i]))
+			index, e := p.sourceMessage(w.bodies[i])
+			if e != nil {
+				p.mu.Unlock()
+				return e
+			}
+			e = c.Send(p.truth.arena.bytes(w.bodies[i]))
 			p.truth.messages[index].sent = e == nil
 			p.mu.Unlock()
 			if e != nil {
@@ -739,7 +779,7 @@ func peerWorkload(ctx context.Context, c *conversation.Conversation, p *privateC
 		next := epoch + segment[0]
 		end := min(cutoff, epoch+segment[1])
 		for next < end {
-			if count >= 128 {
+			if uint32(count) >= w.sourceLimit {
 				return fail(ReasonLimit)
 			}
 			if e := waitUntil(ctx, next); e != nil {
@@ -748,10 +788,14 @@ func peerWorkload(ctx context.Context, c *conversation.Conversation, p *privateC
 			p.mu.Lock()
 			i, e := -1, error(nil)
 			if structural && len(w.bodies) == 1 {
-				p.truth.messages = append(p.truth.messages, actualMessage{side: p.side, body: w.bodies[0]})
-				i = len(p.truth.messages) - 1
+				i, e = p.sourceMessage(w.bodies[0])
+			} else if p.err != ReasonNone {
+				e = fail(p.err)
 			} else {
 				i, e = randomMessage(&p.truth, p.side)
+				if e != nil {
+					p.latch(reasonOf(e))
+				}
 			}
 			if e == nil {
 				e = c.Send(p.truth.arena.bytes(p.truth.messages[i].body))
@@ -765,7 +809,14 @@ func peerWorkload(ctx context.Context, c *conversation.Conversation, p *privateC
 			if structural {
 				return nil
 			}
-			next += int64(rng.ExpFloat64() * float64(200*time.Millisecond))
+			var more bool
+			next, more, e = sourceGapTime(next, end, rng.ExpFloat64()*float64(200*time.Millisecond))
+			if e != nil {
+				return e
+			}
+			if !more {
+				break
+			}
 		}
 	}
 	return nil

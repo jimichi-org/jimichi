@@ -157,6 +157,16 @@ func TestNodeViewLiveOptimized(t *testing.T) {
 
 func exerciseTrustedWorkloadLimit(t *testing.T, ctx context.Context, c Config, task executionTask) {
 	t.Helper()
+	exerciseTrustedWorkloadGrant(t, ctx, c, task, 128)
+	grant, e := sourceAttemptCeiling()
+	if e != nil {
+		t.Fatal(e)
+	}
+	exerciseTrustedWorkloadGrant(t, ctx, c, task, grant)
+}
+
+func exerciseTrustedWorkloadGrant(t *testing.T, ctx context.Context, c Config, task executionTask, grant uint32) {
+	t.Helper()
 	if c.Set != Mailbox || c.Phase != Structural || task.coordinate.Settings != peerSettings(false, 0) {
 		t.Fatal("source-cap fixture changed its pinned phase or workload")
 	}
@@ -197,7 +207,7 @@ func exerciseTrustedWorkloadLimit(t *testing.T, ctx context.Context, c Config, t
 	plans := make([]workloadPlan, len(task.routes))
 	defer clear(plans)
 	for i, route := range task.routes {
-		plans[i] = workloadPlan{side: uint16(i), route: route, gapSeed: nodeSeed(c, uint64(task.coordinate.Settings.RelayPeriodNS), uint64(task.repeat), uint64(i), lab.StreamNodeGaps), lifetimeSeed: nodeSeed(c, coordinateID(task.coordinate.ID), uint64(task.repeat), uint64(i), lab.StreamNodeLifetime), phaseSeed: nodeSeed(c, coordinateID(task.coordinate.ID), uint64(task.repeat), uint64(i), lab.StreamNodeSetup), topology: 2, bodyArena: f.arena}
+		plans[i] = workloadPlan{side: uint16(i), route: route, gapSeed: nodeSeed(c, uint64(task.coordinate.Settings.RelayPeriodNS), uint64(task.repeat), uint64(i), lab.StreamNodeGaps), lifetimeSeed: nodeSeed(c, coordinateID(task.coordinate.ID), uint64(task.repeat), uint64(i), lab.StreamNodeLifetime), phaseSeed: nodeSeed(c, coordinateID(task.coordinate.ID), uint64(task.repeat), uint64(i), lab.StreamNodeSetup), topology: 2, bodyArena: f.arena, sourceLimit: grant}
 	}
 	clients, err := f.addClients(plans, false)
 	if err != nil {
@@ -234,7 +244,24 @@ func exerciseTrustedWorkloadLimit(t *testing.T, ctx context.Context, c Config, t
 		want := 91
 		reason := ReasonNone
 		if i == 0 {
-			want, reason = 128, ReasonLimit
+			want = 129
+			if grant == 128 {
+				want, reason = 128, ReasonLimit
+			}
+		}
+		size, sizeErr := truthStreamSize(child.truth)
+		var payload uint64
+		for _, message := range child.truth.messages {
+			payload += uint64(message.body.size)
+		}
+		for _, seal := range child.truth.seals {
+			payload += uint64(seal.record.size)
+		}
+		for _, request := range child.truth.requests {
+			payload += uint64(request.record.size)
+		}
+		if sizeErr != nil || size.bytes+165 > clientArenaBytes || size.frames+1 > maxIPCMessages || payload+128 > clientArenaBytes {
+			t.Fatal("source grant witness reached an independent truth or payload bound")
 		}
 		created, sent := 0, 0
 		for _, message := range child.truth.messages {
@@ -252,7 +279,7 @@ func exerciseTrustedWorkloadLimit(t *testing.T, ctx context.Context, c Config, t
 			t.Fatal("source cap did not retain its actual accepted prefix and truthful completed terminal")
 		}
 	}
-	t.Log("source-cap prefix and End reasons verified")
+	t.Logf("source grant %d prefix and End reasons verified", grant)
 	if terminalErr != nil {
 		t.Fatalf("source-cap terminal exchange: %s", reasonOf(terminalErr))
 	}

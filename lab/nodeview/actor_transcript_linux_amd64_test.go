@@ -488,7 +488,11 @@ func exerciseActorEnrollmentFailures(t *testing.T, s jcrypto.Suite) {
 					w.u16(0)
 					a.send(t, opContact, w)
 				case "plan-route", "plan-contact":
-					plan := workloadPlan{topology: 2, route: [3]uint8{0, 1, 4}}
+					grant, e := sourceAttemptCeiling()
+					if e != nil {
+						t.Fatal(e)
+					}
+					plan := workloadPlan{topology: 2, route: [3]uint8{0, 1, 4}, sourceLimit: grant}
 					if state == "plan-route" {
 						plan.route = [3]uint8{0, 0, 4}
 					} else {
@@ -531,7 +535,11 @@ func actorClientPlan(t *testing.T, a *actorTranscript, f *fixture, side uint16) 
 	if side == 1 {
 		path = [3]uint8{2, 3, 4}
 	}
-	plan := workloadPlan{side: side, topology: 2, route: path, gapSeed: 1171 + int64(side), lifetimeSeed: 1172 + int64(side), phaseSeed: 1173 + int64(side)}
+	grant, e := sourceAttemptCeiling()
+	if e != nil {
+		t.Fatal(e)
+	}
+	plan := workloadPlan{sourceLimit: grant, side: side, topology: 2, route: path, gapSeed: 1171 + int64(side), lifetimeSeed: 1172 + int64(side), phaseSeed: 1173 + int64(side)}
 	a.send(t, opClientPlan, encodeWorkload(plan))
 	return card
 }

@@ -7,11 +7,17 @@ func (t *privateTruth) wipeMetadata() {
 	clear(t.requests[:cap(t.requests)])
 	clear(t.fragments[:cap(t.fragments)])
 	clear(t.ownership)
-	releaseCapacity(t.setups, t.budget)
-	releaseCapacity(t.messages, t.budget)
-	releaseCapacity(t.seals, t.budget)
-	releaseCapacity(t.requests, t.budget)
-	releaseCapacity(t.fragments, t.budget)
+	clear(t.clientPacket[:cap(t.clientPacket)])
+	t.clientPacket = nil
+	if !t.client {
+		releaseCapacity(t.setups, t.budget)
+		releaseCapacity(t.messages, t.budget)
+		releaseCapacity(t.seals, t.budget)
+		releaseCapacity(t.requests, t.budget)
+		releaseCapacity(t.fragments, t.budget)
+	}
+	t.client = false
+	t.capacity = clientTruthCapacity{}
 	t.setups = nil
 	t.messages = nil
 	t.seals = nil

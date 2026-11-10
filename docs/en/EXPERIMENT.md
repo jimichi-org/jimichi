@@ -408,11 +408,17 @@ The constructor rejects that Rate with the default ReplyTimeout 10 s; defaults a
 Controls `mail-P0-defaults` and `mail-P33250000-defaults` retain 30 s observation,
 Keepalive 30 s and cover puts off. Each side has exactly 100 predeclared attempts: 50 in
 each active segment, at 0.1 + 0.2j and 20.1 + 0.2j s, j = 0..49.
-No new messages enter during quiet 10..20 s, while polling continues; the overall cap
-of 128 attempts is unchanged. No dummy records gives `missing_class`; any actual dummy
+No new messages enter during quiet 10..20 s, while polling continues.
+An absence of dummy records gives `missing_class`; any actual dummy
 records are also retained without relabelling. These descriptive controls enter neither
 training, pilot nor primary collection and do not replace the mandatory cover-puts-off
 distinguisher. The primary matrix's exponential workload is unchanged.
+
+Before participant creation, the stochastic source schedule is checked against a necessary
+capacity condition. Observation retention checks actual protected memory, scalar array
+capacities and the complete internal measurement stream's byte and frame limits.
+Exceeding those bounds makes the capture incomplete and blocks dependent phases. The original
+schedule is not clipped; failed and unstarted positions remain without replacement.
 
 Every loopback node explicitly disables only four per-source-IP limits:
 MaxHandshakesPerSource, MaxLinksPerSource, SourceLinkRate and SourceSetupRate are -1.

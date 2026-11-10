@@ -47,6 +47,7 @@ var revisionPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type Config struct {
+	sourceReplay     *sourceReplayScratch
 	binarySHA        string
 	retainedRawBytes uint64
 	resultCharge     *resultCharge

@@ -74,6 +74,17 @@ func run(ctx context.Context, c Config) (Report, error) {
 	if e != nil {
 		return Report{}, e
 	}
+	var replayOwned bool
+	c, replayOwned, e = acquireSourceReplay(c)
+	if e != nil {
+		return Report{}, e
+	}
+	if replayOwned {
+		defer c.sourceReplay.close()
+	}
+	if e = preflightTaskSources(c, tasks); e != nil {
+		return Report{}, e
+	}
 	if e = protectProcess(controllerArenaBytes); e != nil {
 		return Report{}, ErrUnsupported
 	}
@@ -366,6 +377,59 @@ func linkRoutes(row Coordinate, seed int64, repeat int) [][3]uint8 {
 	return out
 }
 
+func describeWorkloads(c Config, task executionTask, plans []workloadPlan) error {
+	n := max(len(task.routes), task.plannedSides)
+	if n > maxClients || n < 0 || len(plans) != n {
+		return fail(ReasonContract)
+	}
+	ceiling, e := sourceAttemptCeiling()
+	if e != nil {
+		return e
+	}
+	topology := uint8(1)
+	if task.coordinate.Topology == "peer" {
+		topology = 2
+	}
+	for i := range plans {
+		path := [3]uint8{}
+		if len(task.routes) != 0 {
+			path = task.routes[i]
+		}
+		pairID := coordinateID(task.coordinate.ID)
+		if topology == 2 {
+			pairID = uint64(task.coordinate.Settings.RelayPeriodNS)
+		}
+		plans[i] = workloadPlan{side: uint16(i), route: path, gapSeed: nodeSeed(c, pairID, uint64(task.repeat), uint64(i), lab.StreamNodeGaps), lifetimeSeed: nodeSeed(c, coordinateID(task.coordinate.ID), uint64(task.repeat), uint64(i), lab.StreamNodeLifetime), phaseSeed: nodeSeed(c, coordinateID(task.coordinate.ID), uint64(task.repeat), uint64(i), lab.StreamNodeSetup), topology: topology, structural: task.structural, defaultsControl: task.coordinate.Population == "defaults-control"}
+		if topology == 2 {
+			plans[i].sourceLimit = ceiling
+		}
+	}
+	return nil
+}
+
+func preflightTaskSources(c Config, tasks []executionTask) error {
+	var backing [maxClients]workloadPlan
+	defer clear(backing[:])
+	for _, task := range tasks {
+		if task.membership {
+			continue
+		}
+		n := max(len(task.routes), task.plannedSides)
+		if n < 0 || n > len(backing) {
+			return fail(ReasonContract)
+		}
+		plans := backing[:n]
+		if e := describeWorkloads(c, task, plans); e != nil {
+			return e
+		}
+		if e := admitPeerSources(plans, task.coordinate.Settings, c.sourceReplay); e != nil {
+			return e
+		}
+		clear(plans)
+	}
+	return nil
+}
+
 func executeTask(ctx context.Context, c Config, task executionTask, models []FrozenModel) (RunResult, []RankAudit, []encodedTrainingRow, error) {
 	if c.resources == nil {
 		c.resources = &resourceUsage{}
@@ -384,6 +448,15 @@ func executeTask(ctx context.Context, c Config, task executionTask, models []Fro
 	}
 	if e := c.hostCapacity.cohort(c.retainedRawBytes, max(len(task.routes), task.plannedSides)); e != nil {
 		return unavailableTask(c, task, reasonOf(e)), nil, nil, e
+	}
+	var replayOwned bool
+	var replayErr error
+	c, replayOwned, replayErr = acquireSourceReplay(c)
+	if replayErr != nil {
+		return unavailableTask(c, task, reasonOf(replayErr)), nil, nil, replayErr
+	}
+	if replayOwned {
+		defer c.sourceReplay.close()
 	}
 	charge := &resultCharge{}
 	c.resultCharge = charge
@@ -414,6 +487,16 @@ func executeTask(ctx context.Context, c Config, task executionTask, models []Fro
 }
 
 func executeTaskSource(ctx context.Context, c Config, task executionTask, models []FrozenModel) (result RunResult, resultAudit []RankAudit, resultTraining []encodedTrainingRow, resultErr error) {
+	var replayOwned bool
+	var replayErr error
+	c, replayOwned, replayErr = acquireSourceReplay(c)
+	if replayErr != nil {
+		return unavailableTask(c, task, reasonOf(replayErr)), nil, nil, replayErr
+	}
+	if replayOwned {
+		defer c.sourceReplay.close()
+	}
+
 	if task.plannedSides > 0 {
 		if len(task.routes) != 0 || task.plannedSides > maxClients {
 			return RunResult{Configuration: task.coordinate.ID, Repeat: task.repeat, Phase: c.Phase}, nil, nil, ErrInvalid
@@ -446,6 +529,30 @@ func executeTaskSource(ctx context.Context, c Config, task executionTask, models
 	if task.coordinate.Topology == "peer" {
 		topology = 2
 	}
+	var planBacking [maxClients]workloadPlan
+	if len(task.routes) > len(planBacking) {
+		return row, nil, nil, fail(ReasonLimit)
+	}
+	plans := planBacking[:len(task.routes)]
+	defer func() {
+		for i := range plans {
+			clear(plans[i].bodies[:cap(plans[i].bodies)])
+		}
+		clear(planBacking[:])
+	}()
+	if e := describeWorkloads(c, task, plans); e != nil {
+		return row, nil, nil, e
+	}
+	if e := admitPeerSources(plans, task.coordinate.Settings, c.sourceReplay); e != nil {
+		return row, nil, nil, e
+	}
+	host := c.hostCapacity
+	if host == nil {
+		host = &hostCapacity{}
+	}
+	if e := host.cohort(c.retainedRawBytes, len(plans)); e != nil {
+		return row, nil, nil, e
+	}
 	f, e := newFixture(ctx, c.Suite, task.coordinate.Settings, topology, task.coordinate.Controlled, task.foreign, c.binarySHA, task.missing, fixtureResources{retained: c.retainedRawBytes, usage: c.resources, host: c.hostCapacity})
 	if e != nil {
 		row.Flags = []Reason{reasonOf(e)}
@@ -474,21 +581,9 @@ func executeTaskSource(ctx context.Context, c Config, task executionTask, models
 	if e := f.budget.checkAllocation(uint64(len(task.routes)*count)*2*uint64(unsafe.Sizeof(arenaRef{})) + uint64(len(task.routes))*uint64(unsafe.Sizeof(workloadPlan{}))); e != nil {
 		return row, nil, nil, e
 	}
-	plans := make([]workloadPlan, len(task.routes))
-	defer func() {
-		for i := range plans {
-			clear(plans[i].bodies[:cap(plans[i].bodies)])
-		}
-		clear(plans)
-	}()
 	declared := make([]arenaRef, 0, len(task.routes)*count)
 	defer func() { clear(declared[:cap(declared)]) }()
-	for i, path := range task.routes {
-		pairID := coordinateID(task.coordinate.ID)
-		if topology == 2 {
-			pairID = uint64(task.coordinate.Settings.RelayPeriodNS)
-		}
-		plans[i] = workloadPlan{side: uint16(i), route: path, gapSeed: nodeSeed(c, pairID, uint64(task.repeat), uint64(i), lab.StreamNodeGaps), lifetimeSeed: nodeSeed(c, coordinateID(task.coordinate.ID), uint64(task.repeat), uint64(i), lab.StreamNodeLifetime), phaseSeed: nodeSeed(c, coordinateID(task.coordinate.ID), uint64(task.repeat), uint64(i), lab.StreamNodeSetup), topology: topology, structural: task.structural}
+	for i := range plans {
 		plans[i].bodyArena = f.arena
 		plans[i].bodies = make([]arenaRef, 0, count)
 		for range count {
@@ -890,8 +985,20 @@ func closeTrainingRole(f *fixture, operationErr, resourceErr error) error {
 }
 
 func runTraining(ctx context.Context, c Config, r *Report) (resultErr error) {
+	var replayOwned bool
+	var replayErr error
+	c, replayOwned, replayErr = acquireSourceReplay(c)
+	if replayErr != nil {
+		return replayErr
+	}
+	if replayOwned {
+		defer c.sourceReplay.close()
+	}
 	tasks := pairedMailboxTasks(c, r.Plan)
 	defer clear(tasks)
+	if e := preflightTaskSources(c, tasks); e != nil {
+		return e
+	}
 	accountingFailed := false
 	defer func() {
 		if resultErr != nil && !accountingFailed {

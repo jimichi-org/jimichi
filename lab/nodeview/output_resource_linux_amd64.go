@@ -38,7 +38,18 @@ func prepareOutputResources(c Config, p Plan, tasks []executionTask) (Config, er
 		return c, e
 	}
 	c.publicTaskBytes = uint64(cap(tasks)) * uint64(unsafe.Sizeof(executionTask{}))
-	if e = checkOutputHost(plan, available, 320<<20); e != nil {
+	participant, e := clientTruthBackingBytes()
+	if e != nil {
+		return c, e
+	}
+	sides := 0
+	for _, task := range tasks {
+		sides = max(sides, max(len(task.routes), task.plannedSides))
+	}
+	if sides < 0 || sides > maxClients {
+		return c, fail(ReasonLimit)
+	}
+	if e = checkOutputHost(plan, available, (320<<20)+uint64(sides)*participant); e != nil {
 		return c, e
 	}
 	c.hostCapacity = &hostCapacity{available: available, output: plan}
@@ -102,5 +113,9 @@ func (h *hostCapacity) cohort(retained uint64, sides int) error {
 	if retained > controllerArenaBytes || sides < 0 || sides > maxClients {
 		return fail(ReasonLimit)
 	}
-	return h.checkGrowth(uint64(controllerArenaBytes) - retained + 5*relayArenaBytes + uint64(sides)*clientArenaBytes)
+	participant, e := clientTruthBackingBytes()
+	if e != nil {
+		return e
+	}
+	return h.checkGrowth(uint64(controllerArenaBytes) - retained + 5*relayArenaBytes + uint64(sides)*(clientArenaBytes+participant))
 }

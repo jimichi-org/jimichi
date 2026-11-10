@@ -101,9 +101,12 @@ func boundaryWorkload(ctx context.Context, c *childIO, conv *conversation.Conver
 			return fail(ReasonIncomplete)
 		}
 		p.mu.Lock()
-		p.truth.messages = append(p.truth.messages, actualMessage{side: p.side, body: w.bodies[i]})
-		at := len(p.truth.messages) - 1
-		e := conv.Send(p.truth.arena.bytes(w.bodies[i]))
+		at, e := p.sourceMessage(w.bodies[i])
+		if e != nil {
+			p.mu.Unlock()
+			return e
+		}
+		e = conv.Send(p.truth.arena.bytes(w.bodies[i]))
 		p.truth.messages[at].sent = e == nil
 		p.mu.Unlock()
 		if e != nil {

@@ -19,6 +19,7 @@ type workloadPlan struct {
 	defaultsControl                  bool
 	bodyArena                        *lockedArena
 	bodies                           []arenaRef
+	sourceLimit                      uint32
 }
 
 func echoWorkload(ctx context.Context, c *client.Client, p *privateCapture, w workloadPlan, epoch, cutoff int64, structural bool) error {
@@ -48,10 +49,14 @@ func echoWorkload(ctx context.Context, c *client.Client, p *privateCapture, w wo
 		p.mu.Lock()
 		i, e := -1, error(nil)
 		if structural && len(w.bodies) == 1 {
-			p.truth.messages = append(p.truth.messages, actualMessage{side: p.side, body: w.bodies[0]})
-			i = len(p.truth.messages) - 1
+			i, e = p.sourceMessage(w.bodies[0])
+		} else if p.err != ReasonNone {
+			e = fail(p.err)
 		} else {
 			i, e = randomMessage(&p.truth, p.side)
+			if e != nil {
+				p.latch(reasonOf(e))
+			}
 		}
 		if e != nil {
 			p.mu.Unlock()
@@ -97,7 +102,14 @@ func echoWorkload(ctx context.Context, c *client.Client, p *privateCapture, w wo
 				return fail(ReasonBroken)
 			}
 		}
-		next += int64(rng.ExpFloat64() * float64(200*time.Millisecond))
+		var more bool
+		next, more, e = sourceGapTime(next, end, rng.ExpFloat64()*float64(200*time.Millisecond))
+		if e != nil {
+			return e
+		}
+		if !more {
+			break
+		}
 	}
 	if !structural {
 		if e := waitMonotonic(ctx, end); e != nil {

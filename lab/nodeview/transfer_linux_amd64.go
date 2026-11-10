@@ -392,13 +392,29 @@ func sendFragments(c *childIO, col *collector) error {
 	}
 	return nil
 }
+func truthPacketEncoder(t *privateTruth, need int, budget *memoryBudget) (encoder, error) {
+	if !t.client {
+		return encoder{budget: budget}, nil
+	}
+	if need < 0 || need > len(t.clientPacket) || need > clientPacketBytes {
+		return encoder{}, fail(ReasonLimit)
+	}
+	return encoder{b: t.clientPacket[:0:need]}, nil
+}
+
 func sendTruth(c *childIO, t *privateTruth) error {
 	size, e := truthStreamSize(*t)
 	if e != nil || size.bytes > clientArenaBytes || size.frames > maxIPCMessages {
 		return fail(ReasonLimit)
 	}
+	if t.client && (t.capacity.messages != uint64(len(t.messages)) || t.capacity.setups != uint64(len(t.setups)) || t.capacity.seals != uint64(len(t.seals)) || t.capacity.requests != uint64(len(t.requests)) || t.capacity.wireBytes != size.bytes || t.capacity.frames != size.frames || len(t.fragments) != 0) {
+		return fail(ReasonContract)
+	}
 	for _, m := range t.messages {
-		w := encoder{budget: c.truth.budget}
+		w, e := truthPacketEncoder(t, 135, c.truth.budget)
+		if e != nil {
+			return e
+		}
 		w.u8(1)
 		w.u16(1)
 		w.u16(m.side)
@@ -410,7 +426,10 @@ func sendTruth(c *childIO, t *privateTruth) error {
 		}
 	}
 	for _, s := range t.setups {
-		w := encoder{budget: c.truth.budget}
+		w, e := truthPacketEncoder(t, 15, c.truth.budget)
+		if e != nil {
+			return e
+		}
 		w.u8(2)
 		w.u16(1)
 		w.u16(s.side)
@@ -422,9 +441,12 @@ func sendTruth(c *childIO, t *privateTruth) error {
 		}
 	}
 	for at := 0; at < len(t.seals); {
-		w := encoder{budget: c.truth.budget}
-		w.u8(3)
 		n := min(128, len(t.seals)-at)
+		w, e := truthPacketEncoder(t, 3+399*n, c.truth.budget)
+		if e != nil {
+			return e
+		}
+		w.u8(3)
 		w.u16(uint16(n))
 		for _, s := range t.seals[at : at+n] {
 			w.u16(s.side)
@@ -438,9 +460,16 @@ func sendTruth(c *childIO, t *privateTruth) error {
 		at += n
 	}
 	for at := 0; at < len(t.requests); {
-		w := encoder{budget: c.truth.budget}
-		w.u8(4)
 		n := min(128, len(t.requests)-at)
+		need := 3 + 12*n
+		for _, q := range t.requests[at : at+n] {
+			need += q.record.size
+		}
+		w, e := truthPacketEncoder(t, need, c.truth.budget)
+		if e != nil {
+			return e
+		}
+		w.u8(4)
 		w.u16(uint16(n))
 		for _, q := range t.requests[at : at+n] {
 			w.u16(q.side)

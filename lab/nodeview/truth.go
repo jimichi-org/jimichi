@@ -41,13 +41,16 @@ type actualRequest struct {
 type privateTruth struct {
 	budget *memoryBudget
 	rawDenied
-	arena     *lockedArena
-	setups    []actualSetup
-	messages  []actualMessage
-	seals     []actualSeal
-	requests  []actualRequest
-	fragments []contentFragment
-	ownership setupOwnershipIndex
+	arena        *lockedArena
+	setups       []actualSetup
+	messages     []actualMessage
+	seals        []actualSeal
+	requests     []actualRequest
+	fragments    []contentFragment
+	ownership    setupOwnershipIndex
+	capacity     clientTruthCapacity
+	client       bool
+	clientPacket []byte
 }
 
 func (t *privateTruth) close() {
@@ -93,21 +96,48 @@ type privateCapture struct {
 }
 
 func newPrivateCapture(side uint16) (*privateCapture, error) {
+	return newPrivateCaptureWithResources(side, availableHostMemory, allocatePrivateCapture)
+}
+
+func newPrivateCaptureWithResources(side uint16, probe func() (uint64, error), allocate func(uint16) (*privateCapture, error)) (*privateCapture, error) {
+	if probe == nil || allocate == nil {
+		return nil, fail(ReasonContract)
+	}
+	startup, e := clientTruthStartupBytes()
+	if e != nil {
+		return nil, e
+	}
+	available, e := probe()
+	if e != nil {
+		return nil, e
+	}
+	if startup > available {
+		return nil, fail(ReasonLimit)
+	}
+	return allocate(side)
+}
+
+func allocatePrivateCapture(side uint16) (*privateCapture, error) {
 	a, e := newArena(clientArenaBytes)
 	if e != nil {
 		return nil, e
 	}
-	return &privateCapture{truth: privateTruth{arena: a}, keys: make(map[*secmem.Buffer]keyTag), dummy: make(map[[32]byte]bool), side: side, nextSetupHop: 255}, nil
+	caps := clientTruthArrayCaps()
+	return &privateCapture{truth: privateTruth{arena: a, client: true, messages: make([]actualMessage, 0, caps[0]), setups: make([]actualSetup, 0, caps[1]), seals: make([]actualSeal, 0, caps[2]), requests: make([]actualRequest, 0, caps[3]), clientPacket: make([]byte, clientPacketBytes)}, keys: make(map[*secmem.Buffer]keyTag), dummy: make(map[[32]byte]bool), side: side, nextSetupHop: 255}, nil
 }
 func (p *privateCapture) derived(k *secmem.Buffer, tag keyTag) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.keys) >= maxContexts {
-		p.err = ReasonLimit
+	if p.err != ReasonNone || p.frozen {
 		return
 	}
 	if _, ok := p.keys[k]; ok {
-		p.err = ReasonContract
+		p.latch(ReasonContract)
+		return
+	}
+	if len(p.keys) >= maxContexts {
+		p.latch(ReasonLimit)
+		return
 	}
 	p.keys[k] = tag
 }
@@ -127,7 +157,18 @@ func (p *privateCapture) beforeSeal(tag keyTag, nonce, plain, ad []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(plain) != 371 || len(ad) != 5 || ad[0] != 3 || plain[0] > 1 {
-		p.err = ReasonLabel
+		p.latch(ReasonLabel)
+		return
+	}
+	if p.err != ReasonNone || p.frozen {
+		return
+	}
+	if len(p.dummy) >= maxContexts {
+		p.latch(ReasonLimit)
+		return
+	}
+	if _, exists := p.dummy[tag.context]; exists {
+		p.latch(ReasonContract)
 		return
 	}
 	p.dummy[tag.context] = plain[0] == 1
@@ -138,72 +179,96 @@ func (p *privateCapture) afterSeal(tag keyTag, nonce, out, ad []byte) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.frozen {
+	if tag.purpose == "e2e/step/key" && (p.frozen || p.err != ReasonNone) {
+		delete(p.dummy, tag.context)
+	}
+	if p.frozen || p.err != ReasonNone {
 		return
 	}
 	switch tag.purpose {
 	case "setup":
 		id, count, dir, ok := decodeNonce(nonce)
 		if !ok || count != 0 || dir != 0 || len(ad) != 3 || ad[0] != wire.Version || ad[1] != byte(wire.KindControl) || ad[2] >= 3 {
-			p.err = ReasonContract
+			p.latch(ReasonContract)
 			return
 		}
 		hop := ad[2]
+		generation, complete, nextHop := p.generation, p.completeGeneration, p.nextSetupHop
 		if hop == 2 {
-			p.generation++
-			p.nextSetupHop = 1
-			if p.generation == 0 {
-				p.err = ReasonLimit
+			if generation == ^uint32(0) {
+				p.latch(ReasonLimit)
 				return
 			}
+			generation++
+			nextHop = 1
 		} else {
-			if p.generation == 0 || hop != p.nextSetupHop {
-				p.err = ReasonContract
+			if generation == 0 || hop != nextHop {
+				p.latch(ReasonContract)
 				return
 			}
 			if hop == 1 {
-				p.nextSetupHop = 0
+				nextHop = 0
 			} else {
-				p.nextSetupHop = 255
-				p.completeGeneration = p.generation
+				nextHop = 255
+				complete = generation
 			}
 		}
 		for _, s := range p.truth.setups {
 			if s.circuit == id {
-				p.err = ReasonContract
+				p.latch(ReasonContract)
 				return
 			}
 		}
+		next, e := p.truth.nextClient(2, 0, 0)
+		if e != nil {
+			p.latch(reasonOf(e))
+			return
+		}
 		p.truth.setups = append(p.truth.setups, actualSetup{p.side, hop, id, p.route[hop]})
+		p.truth.capacity = next
+		p.generation, p.completeGeneration, p.nextSetupHop = generation, complete, nextHop
 	case "e2e/step/key":
 		dummy, ok := p.dummy[tag.context]
 		delete(p.dummy, tag.context)
 		if !ok || len(out) != 392 || out[0] != 3 {
-			p.err = ReasonLabel
+			p.latch(ReasonLabel)
 			return
 		}
 		for _, s := range p.truth.seals {
 			if bytes.Equal(p.truth.arena.bytes(s.record), out) {
-				p.err = ReasonLabel
+				p.latch(ReasonLabel)
 				return
 			}
 		}
 		if len(p.truth.seals) >= maxTruthRecords {
-			p.err = ReasonLimit
+			p.latch(ReasonLimit)
+			return
+		}
+		next, e := p.truth.nextClient(3, 0, len(out))
+		if e != nil {
+			p.latch(reasonOf(e))
 			return
 		}
 		r, ok := p.truth.arena.copy(out)
 		if !ok {
-			p.err = ReasonLimit
+			p.latch(ReasonLimit)
 			return
 		}
 		p.truth.seals = append(p.truth.seals, actualSeal{p.side, p.generation, r, !dummy})
+		p.truth.capacity = next
 	}
 }
 
 func randomMessage(t *privateTruth, side uint16) (int, error) {
 	var b [128]byte
 	defer clear(b[:])
+	next, e := t.nextClient(1, 0, len(b))
+	if e != nil {
+		return -1, e
+	}
+	if len(t.messages) >= maxMessages {
+		return -1, fail(ReasonLimit)
+	}
 	for range 32 {
 		if _, e := io.ReadFull(rand.Reader, b[:]); e != nil {
 			return -1, fail(ReasonChild)
@@ -236,6 +301,7 @@ func randomMessage(t *privateTruth, side uint16) (int, error) {
 			return -1, fail(ReasonLimit)
 		}
 		t.messages = append(t.messages, actualMessage{side: side, body: r})
+		t.capacity = next
 		return len(t.messages) - 1, nil
 	}
 	return -1, fail(ReasonLabel)
@@ -271,11 +337,26 @@ func (o *observedCircuit) Send(payload []byte) error {
 	p := o.private
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.frozen {
+	if p.frozen || p.err != ReasonNone {
 		return err
 	}
+	for _, prior := range p.truth.requests {
+		if prior.generation == o.generation && prior.tag == req.Tag {
+			p.latch(ReasonLabel)
+			return err
+		}
+	}
 	if len(p.truth.requests) >= maxTruthRecords {
-		p.err = ReasonLimit
+		p.latch(ReasonLimit)
+		return err
+	}
+	bytes := 0
+	if req.Puts() {
+		bytes = len(req.Record)
+	}
+	next, e := p.truth.nextClient(4, bytes, bytes)
+	if e != nil {
+		p.latch(reasonOf(e))
 		return err
 	}
 	var r arenaRef
@@ -283,17 +364,12 @@ func (o *observedCircuit) Send(payload []byte) error {
 		var ok bool
 		r, ok = p.truth.arena.copy(req.Record[:])
 		if !ok {
-			p.err = ReasonLimit
-			return err
-		}
-	}
-	for _, prior := range p.truth.requests {
-		if prior.generation == o.generation && prior.tag == req.Tag {
-			p.err = ReasonLabel
+			p.latch(ReasonLimit)
 			return err
 		}
 	}
 	p.truth.requests = append(p.truth.requests, actualRequest{p.side, o.generation, req.Tag, r, elig, err == nil})
+	p.truth.capacity = next
 	return err
 }
 
