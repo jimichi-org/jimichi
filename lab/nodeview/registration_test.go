@@ -13,19 +13,43 @@ import (
 
 func planningTestSeal(t *testing.T, p Plan) Plan {
 	t.Helper()
-	p.Digest = ""
-	b, err := json.Marshal(p)
+	p, err := sealPlanningTestPlan(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.Digest = publicHash(b)
 	return p
+}
+
+func sealPlanningTestPlan(p Plan) (Plan, error) {
+	p.Digest = ""
+	b, err := json.Marshal(p)
+	if err != nil {
+		return Plan{}, err
+	}
+	p.Digest = publicHash(b)
+	return p, nil
 }
 
 func planningTestPilots(t *testing.T) (Plan, Plan) {
 	t.Helper()
+	left, right, err := makePlanningTestPilots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return left, right
+}
+
+func makePlanningTestPilots() (Plan, Plan, error) {
 	left, right := testNodeviewPlan(Collude), testNodeviewPlan(Mailbox)
-	left.ParentDigest, right.ParentDigest = planningTestSeal(t, left).Digest, planningTestSeal(t, right).Digest
+	sealedLeft, err := sealPlanningTestPlan(left)
+	if err != nil {
+		return Plan{}, Plan{}, err
+	}
+	sealedRight, err := sealPlanningTestPlan(right)
+	if err != nil {
+		return Plan{}, Plan{}, err
+	}
+	left.ParentDigest, right.ParentDigest = sealedLeft.Digest, sealedRight.Digest
 	left.Phase, right.Phase = Pilot, Pilot
 	for _, row := range canonicalCoordinates(Mailbox) {
 		if row.Population == "classifier" {
@@ -44,7 +68,15 @@ func planningTestPilots(t *testing.T) (Plan, Plan) {
 			right.Powers = append(right.Powers, input)
 		}
 	}
-	return planningTestSeal(t, left), planningTestSeal(t, right)
+	left, err = sealPlanningTestPlan(left)
+	if err != nil {
+		return Plan{}, Plan{}, err
+	}
+	right, err = sealPlanningTestPlan(right)
+	if err != nil {
+		return Plan{}, Plan{}, err
+	}
+	return left, right, nil
 }
 
 func TestRegistrationModelPlanningKnownRows(t *testing.T) {
