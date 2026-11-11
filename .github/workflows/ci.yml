@@ -39,7 +39,9 @@ jobs:
       # linux is the target platform: this is where mlock and dump prevention
       # actually run, so the race detector and the real secmem path go together
       - name: unit and integration tests
-        run: go test -race -count=1 ./...
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          go test -race -count=1 ./...
       - name: optimized six-flow GOST timing-mark integration
         run: |
           log="$RUNNER_TEMP/mark-gost-optimized.log"

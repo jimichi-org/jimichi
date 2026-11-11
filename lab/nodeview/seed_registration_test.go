@@ -10,10 +10,102 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 )
+
+var seedRegistrationTestFixture = sync.OnceValues(func() ([2]string, error) {
+	left, right, err := makePlanningTestPilots()
+	if err != nil {
+		return [2]string{}, err
+	}
+	left, right, err = CombinePilotPlans(context.Background(), left, right)
+	if err != nil {
+		return [2]string{}, err
+	}
+	return serializeJointTestReports([2]Report{{Plan: left}, {Plan: right}})
+})
+
+func seedRegistrationTestReadyPilots(t *testing.T) (Plan, Plan) {
+	t.Helper()
+	fixture, err := seedRegistrationTestFixture()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plans [2]Plan
+	for i := range plans {
+		report, err := decodeJointTestReport(fixture[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		plans[i] = report.Plan
+	}
+	return plans[0], plans[1]
+}
+
+func TestSeedRegistrationTestReadyPilotsAreIndependent(t *testing.T) {
+	a, b := seedRegistrationTestReadyPilots(t)
+	otherA, otherB := seedRegistrationTestReadyPilots(t)
+	fixture, err := seedRegistrationTestFixture()
+	if err != nil {
+		t.Fatal(err)
+	}
+	left, right, err := makePlanningTestPilots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, plan := range []Plan{a, b} {
+		input := []Plan{left, right}[i]
+		jointTestCheckSnapshot(t, Report{Plan: plan}, fixture[i])
+		if !samePlanningContract(plan, input) || !reflect.DeepEqual(plan.Configurations, input.Configurations) || plan.Set != input.Set || plan.Phase != Pilot || !plan.PilotReady || !plan.TrainingReady || plan.ModelReady || plan.MainSeedCommitment != "" || plan.ParentDigest != input.Digest || plan.Digest == input.Digest {
+			t.Fatal("seed fixture changed its original plain-pilot values, readiness or ancestry")
+		}
+		if len(plan.Powers) != 13 || len(plan.PowerSearch) != 13 || len(plan.FrozenModels) != 8 || !reflect.DeepEqual(plan.FrozenModels, right.FrozenModels) {
+			t.Fatal("seed fixture changed its original family or plain model references")
+		}
+		sealed, err := sealPlanningTestPlan(plan)
+		if err != nil || sealed.Digest != plan.Digest {
+			t.Fatal("seed fixture changed its canonical sealed digest")
+		}
+	}
+	mutate := func(plan *Plan) {
+		plan.ModelFamily.IDs[0] = "changed"
+		plan.DifferenceFamily.IDs[0] = "changed"
+		plan.WindowsNS[0]++
+		for i := range plan.Configurations {
+			row := &plan.Configurations[i]
+			row.ID = "changed"
+			for j := range row.Controlled {
+				row.Controlled[j]++
+			}
+			for j := range row.ForeignPositions {
+				row.ForeignPositions[j]++
+			}
+			row.ForeignPositions = append(row.ForeignPositions, 4)
+		}
+		for i := range plan.FrozenModels {
+			plan.FrozenModels[i].Digest = "changed"
+		}
+		plan.Samples = append(plan.Samples, SampleCalculation{ID: "changed", Slots: 1})
+		for i := range plan.Powers {
+			plan.Powers[i].PilotX[0]++
+			plan.Powers[i].PilotY[0]++
+		}
+		for i := range plan.PowerSearch {
+			plan.PowerSearch[i].Search[0].N++
+		}
+	}
+	mutate(&a)
+	jointTestCheckSnapshot(t, Report{Plan: b}, fixture[1])
+	mutate(&b)
+	jointTestCheckSnapshot(t, Report{Plan: otherA}, fixture[0])
+	jointTestCheckSnapshot(t, Report{Plan: otherB}, fixture[1])
+	freshA, freshB := seedRegistrationTestReadyPilots(t)
+	jointTestCheckSnapshot(t, Report{Plan: freshA}, fixture[0])
+	jointTestCheckSnapshot(t, Report{Plan: freshB}, fixture[1])
+}
 
 func TestMainSeedCommitmentKnownInputAndHash(t *testing.T) {
 	p := testNodeviewPlan(Collude)
@@ -74,11 +166,7 @@ func TestRegisterMainSeedPreservesReadyPredecessorAndAncestry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	left, right := planningTestPilots(t)
-	left, right, err = CombinePilotPlans(context.Background(), left, right)
-	if err != nil {
-		t.Fatal(err)
-	}
+	left, right := seedRegistrationTestReadyPilots(t)
 	inputs := []Plan{model, left, right}
 	for _, set := range []Set{Compromise, Collude, Mailbox} {
 		p := testNodeviewPlan(set)
@@ -121,11 +209,8 @@ func TestRegisterMainSeedPreservesReadyPredecessorAndAncestry(t *testing.T) {
 }
 
 func TestRegisterMainSeedRejectsPrematureAndAlteredPlanning(t *testing.T) {
-	left, right := planningTestPilots(t)
-	ready, _, err := CombinePilotPlans(context.Background(), left, right)
-	if err != nil {
-		t.Fatal(err)
-	}
+	left, _ := planningTestPilots(t)
+	ready, _ := seedRegistrationTestReadyPilots(t)
 	for _, name := range []string{"structural", "uncombined", "unsealed", "digest", "primary", "planning", "cancelled"} {
 		t.Run(name, func(t *testing.T) {
 			p := clonePlanningPlan(ready)
