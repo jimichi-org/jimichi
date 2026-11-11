@@ -98,3 +98,127 @@ func TestActorReadyOwnerRejectsMalformedAndFailedRounds(t *testing.T) {
 		}
 	}
 }
+
+func queuedPeerReady(t *testing.T, state string) (*ownedChild, *bytes.Buffer, func()) {
+	t.Helper()
+	budget := &memoryBudget{limit: 256}
+	commands := &bytes.Buffer{}
+	child := &ownedChild{role: roleClient, status: make(chan statusFrame, 3), statusBudget: budget, writer: &protocolWriter{w: commands, limit: 1024}}
+	var held [][]byte
+	add := func(op byte, body []byte) {
+		copy, charged, e := copyStatusBody(&decoder{b: body}, budget)
+		if e != nil {
+			t.Fatal(e)
+		}
+		held = append(held, copy)
+		child.status <- statusFrame{op: op, body: copy, charged: charged}
+	}
+	switch state {
+	case "success":
+		add(opReady, []byte{3, 1})
+	case "false":
+		add(opReady, []byte{3, 0})
+		add(opError, []byte{reasonByte(ReasonClock)})
+	case "malformed":
+		add(opReady, []byte{3, 2})
+	case "missing":
+	default:
+		t.Fatal("unknown owned readiness fixture")
+	}
+	return child, commands, func() {
+		child.releaseStatusBody()
+		for len(child.status) > 0 {
+			frame := <-child.status
+			clear(frame.body)
+			budget.release(frame.charged)
+		}
+		if budget.used != 0 {
+			t.Fatal("readiness failure retained a status loan")
+		}
+		for _, body := range held {
+			for _, b := range body {
+				if b != 0 {
+					t.Fatal("readiness failure did not clear owned status backing")
+				}
+			}
+		}
+	}
+}
+
+func TestPeerReadyBarrierRequiresBothParticipants(t *testing.T) {
+	for _, row := range []struct {
+		state string
+		want  Reason
+	}{{"success", ReasonNone}, {"missing", ReasonIPC}, {"false", ReasonClock}, {"malformed", ReasonIPC}} {
+		t.Run(row.state, func(t *testing.T) {
+			a, aw, releaseA := queuedPeerReady(t, "success")
+			defer releaseA()
+			b, bw, releaseB := queuedPeerReady(t, row.state)
+			defer releaseB()
+			f := &fixture{ctx: context.Background(), settings: peerSettings(false, 0), children: []*ownedChild{a, b}}
+			until := time.Now().Add(20 * time.Millisecond)
+			e := f.awaitClientsReady(f.children, false, &until)
+			if reasonOf(e) != row.want || a.statusConsumed != 1 {
+				t.Fatal("one actual kind3 or failed second round passed the cohort barrier")
+			}
+			if e == nil {
+				if e := f.begin(monotonicNS() + int64(time.Second)); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if row.want != ReasonNone && (aw.Len() != 0 || bw.Len() != 0) {
+				t.Fatal("ordinary Begin preceded the complete paired barrier")
+			}
+			if row.state == "missing" && time.Now().Before(until) {
+				t.Fatal("missing peer did not retain the shared deadline")
+			}
+			if row.state == "success" && (aw.Len() == 0 || bw.Len() == 0) {
+				t.Fatal("complete paired barrier did not permit ordinary Begin")
+			}
+		})
+	}
+}
+
+func TestPeerReadyDeadlineRejectsQueuedSuccess(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		for range 16 {
+			child, _, release := queuedPeerReady(t, "success")
+			ctx, cancel := context.WithCancel(context.Background())
+			if cancelled {
+				cancel()
+			}
+			want := ReasonIPC
+			if cancelled {
+				want = ReasonCancelled
+			}
+			if reasonOf(child.expectReady(ctx, 3, time.Now().Add(-time.Nanosecond))) != want {
+				t.Fatal("queued kind3 bypassed expiry or cancellation")
+			}
+			cancel()
+			release()
+		}
+	}
+	child, _, release := queuedPeerReady(t, "success")
+	defer release()
+	f := &fixture{ctx: context.Background()}
+	child.orphan = true
+	until := time.Now().Add(-time.Nanosecond)
+	if reasonOf(f.awaitClientsReady([]*ownedChild{child}, false, &until)) != ReasonIPC {
+		t.Fatal("final aggregate guard accepted an expired exempt cohort")
+	}
+	child.orphan = false
+	if reasonOf(f.awaitClientsReady([]*ownedChild{child}, true, &until)) != ReasonIPC {
+		t.Fatal("delayed exception reset the parent deadline")
+	}
+	f.settings = Settings{ControlProfile: 5, DurationNS: 1}
+	if reasonOf(f.begin(monotonicNS()-1)) != ReasonIPC {
+		t.Fatal("actual delayed Begin accepted an expired monotonic cutoff")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.ctx = ctx
+	f.settings.DurationNS = int64(time.Second)
+	if reasonOf(f.begin(monotonicNS()+int64(time.Second))) != ReasonCancelled {
+		t.Fatal("actual delayed Begin lost cancellation")
+	}
+}

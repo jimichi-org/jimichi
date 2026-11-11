@@ -182,6 +182,7 @@ func clientChild(c *childIO) (err error) {
 		return e
 	}
 	var identity *e2e.Identity
+	var ownCard e2e.Card
 	var fetch *secmem.Buffer
 	var circuit *client.Client
 	var initialGeneration uint32
@@ -190,6 +191,8 @@ func clientChild(c *childIO) (err error) {
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
+			clear(ownCard.Static)
+			ownCard = e2e.Card{}
 			if observer != nil {
 				observer.join()
 				receipt.ObserverJoined = true
@@ -244,7 +247,8 @@ func clientChild(c *childIO) (err error) {
 		}
 		w = encoder{}
 		w.u16(1)
-		w.bytes(identity.Card().Bytes(), 2048)
+		ownCard = identity.Card()
+		w.bytes(ownCard.Bytes(), 2048)
 		if e := c.status.send(opContact, w); e != nil {
 			return e
 		}
@@ -352,6 +356,7 @@ func clientChild(c *childIO) (err error) {
 	}
 	orphan := false
 	var peerCard e2e.Card
+	var peerRole e2e.Role
 	var boundaryState boundaryClientState
 	var boundaryResponder bool
 	if cfg.topology == 2 {
@@ -377,16 +382,24 @@ func clientChild(c *childIO) (err error) {
 		if r.end() != nil {
 			return fail(ReasonIPC)
 		}
+		if !orphan {
+			peerRole, e = peerReadinessRole(ownCard, peerCard)
+			if e != nil {
+				return e
+			}
+		}
 		gate := make(chan struct{})
 		adapter := &observedCircuit{Circuit: circuit, private: priv, gate: gate, conversation: &conv, generation: initialGeneration}
 		cs := cfg.settings
 		if boundary {
-			cs, boundaryResponder, e = boundaryClientSettings(cs, plan.side, identity.Card(), peerCard)
+			cs, boundaryResponder, e = boundaryClientSettings(cs, plan.side, ownCard, peerCard)
 			if e != nil {
 				return e
 			}
 			boundaryState.initial, boundaryState.current = initialGeneration, initialGeneration
 		}
+		clear(ownCard.Static)
+		ownCard = e2e.Card{}
 		dial := func() (conversation.Circuit, error) {
 			next, generation, e := dialObservedClient(cc, priv)
 			if e != nil {
@@ -413,25 +426,20 @@ func clientChild(c *childIO) (err error) {
 			return fail(ReasonSetup)
 		}
 		if !orphan && !delayedPair {
-			deadline := time.NewTimer(30 * time.Second)
-			tick := time.NewTicker(10 * time.Millisecond)
-			ready := false
-			for !ready {
-				select {
-				case <-deadline.C:
-					tick.Stop()
-					return fail(ReasonSetup)
-				case <-conv.Done():
-					deadline.Stop()
-					tick.Stop()
-					return fail(ReasonBroken)
-				case <-tick.C:
-					st := conv.Stats()
-					ready = st.State == e2e.StateConfirmed || st.State == e2e.StateEstablished && st.Session.DummiesReceived > 0
-				}
+			now := monotonicNS()
+			if now <= 0 || now > math.MaxInt64-int64(30*time.Second) {
+				return fail(ReasonClock)
 			}
-			deadline.Stop()
-			tick.Stop()
+			until := now + int64(30*time.Second)
+			if until <= now {
+				return fail(ReasonClock)
+			}
+			if e := awaitPeerReady(context.Background(), conv, peerRole, until); e != nil {
+				if reasonOf(e) == ReasonIncomplete {
+					return fail(ReasonSetup)
+				}
+				return e
+			}
 			if e := c.ready(3); e != nil {
 				return e
 			}
@@ -475,7 +483,7 @@ func clientChild(c *childIO) (err error) {
 	}()
 	go func() {
 		if boundary {
-			workDone <- boundaryWorkload(ctx, c, conv, circuit, &boundaryState, peerCard, priv, plan, profile, epoch, cutoff)
+			workDone <- boundaryWorkload(ctx, c, conv, circuit, &boundaryState, peerCard, peerRole, priv, plan, profile, epoch, cutoff)
 			return
 		}
 		if orphan {

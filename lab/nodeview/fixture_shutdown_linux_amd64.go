@@ -83,6 +83,9 @@ func (f *fixture) causeSnapshot() []Reason {
 }
 
 func (c *ownedChild) expectReady(ctx context.Context, kind byte, until time.Time) error {
+	if kind == 3 && ctx.Err() != nil {
+		return fail(ReasonCancelled)
+	}
 	r, e := c.expect(ctx, opReady, until)
 	if e != nil {
 		return e
@@ -92,6 +95,9 @@ func (c *ownedChild) expectReady(ctx context.Context, kind byte, until time.Time
 		return fail(ReasonIPC)
 	}
 	if success {
+		if kind == 3 {
+			return readyAcceptanceError(ctx.Err() != nil, time.Now(), until)
+		}
 		return nil
 	}
 	r, e = c.expect(ctx, opError, until)

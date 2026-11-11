@@ -65,6 +65,50 @@ jobs:
               grep -Fq -- "--- PASS: TestNodeViewLiveOptimized/$suite/$case (" "$log"
             done
           done
+      - name: optimized mailbox defaults controls
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          log="$RUNNER_TEMP/nodeview-defaults-optimized.log"
+          expected="$RUNNER_TEMP/nodeview-defaults-expected.txt"
+          go test -count=1 -timeout 20m -v -run '^TestNodeViewMailboxControlsOptimized$/(c25519|gost)/(defaults-P0|defaults-P33250000)$' ./lab/nodeview > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          ! grep -Eq -- '--- (FAIL|SKIP):|warning: no tests to run' "$log"
+          {
+            printf '%s\n' TestNodeViewMailboxControlsOptimized
+            for suite in c25519 gost; do
+              printf '%s\n' "TestNodeViewMailboxControlsOptimized/$suite"
+              for case in defaults-P0 defaults-P33250000; do
+                printf '%s\n' "TestNodeViewMailboxControlsOptimized/$suite/$case"
+              done
+            done
+          } | sort > "$expected"
+          test "$(wc -l < "$expected")" -eq 7
+          for event in RUN PASS; do
+            awk -v event="$event" '($1 == "===" && $2 == "RUN" && event == "RUN") || ($1 == "---" && $2 == "PASS:" && event == "PASS") { print $3 }' "$log" | sort > "$expected.actual"
+            cmp "$expected" "$expected.actual"
+          done
+      - name: optimized mailbox boundary controls
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          log="$RUNNER_TEMP/nodeview-boundaries-optimized.log"
+          expected="$RUNNER_TEMP/nodeview-boundaries-expected.txt"
+          go test -count=1 -timeout 20m -v -run '^TestNodeViewMailboxControlsOptimized$/(c25519|gost)/(boundary-rebuild|boundary-pre-session)$' ./lab/nodeview > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          ! grep -Eq -- '--- (FAIL|SKIP):|warning: no tests to run' "$log"
+          {
+            printf '%s\n' TestNodeViewMailboxControlsOptimized
+            for suite in c25519 gost; do
+              printf '%s\n' "TestNodeViewMailboxControlsOptimized/$suite"
+              for case in boundary-rebuild boundary-pre-session; do
+                printf '%s\n' "TestNodeViewMailboxControlsOptimized/$suite/$case"
+              done
+            done
+          } | sort > "$expected"
+          test "$(wc -l < "$expected")" -eq 7
+          for event in RUN PASS; do
+            awk -v event="$event" '($1 == "===" && $2 == "RUN" && event == "RUN") || ($1 == "---" && $2 == "PASS:" && event == "PASS") { print $3 }' "$log" | sort > "$expected.actual"
+            cmp "$expected" "$expected.actual"
+          done
       - name: optimized cooperative key memory integration
         run: |
           log="$RUNNER_TEMP/keymem-optimized.log"

@@ -52,28 +52,7 @@ func boundaryClientSettings(s Settings, side uint16, own, peer e2e.Card) (Settin
 	return cs, responder, nil
 }
 
-func awaitPeerReady(ctx context.Context, conv *conversation.Conversation, until int64) error {
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		st := conv.Stats()
-		if st.State == e2e.StateConfirmed || st.State == e2e.StateEstablished && st.Session.DummiesReceived > 0 {
-			return nil
-		}
-		if monotonicNS() >= until {
-			return fail(ReasonIncomplete)
-		}
-		select {
-		case <-ctx.Done():
-			return fail(ReasonCancelled)
-		case <-conv.Done():
-			return fail(ReasonBroken)
-		case <-tick.C:
-		}
-	}
-}
-
-func boundaryWorkload(ctx context.Context, c *childIO, conv *conversation.Conversation, initial *client.Client, b *boundaryClientState, peer e2e.Card, p *privateCapture, w workloadPlan, profile boundaryProfile, epoch, cutoff int64) error {
+func boundaryWorkload(ctx context.Context, c *childIO, conv *conversation.Conversation, initial *client.Client, b *boundaryClientState, peer e2e.Card, role e2e.Role, p *privateCapture, w workloadPlan, profile boundaryProfile, epoch, cutoff int64) error {
 	if profile.actions[w.side] == boundaryPairAtTime {
 		if e := waitUntil(ctx, epoch+profile.actionAtNS); e != nil {
 			return e
@@ -81,7 +60,7 @@ func boundaryWorkload(ctx context.Context, c *childIO, conv *conversation.Conver
 		if monotonicNS() >= cutoff || conv.Pair(peer) != nil {
 			return fail(ReasonIncomplete)
 		}
-		if e := awaitPeerReady(ctx, conv, cutoff); e != nil {
+		if e := awaitPeerReady(ctx, conv, role, cutoff); e != nil {
 			return e
 		}
 		if e := c.ready(3); e != nil {
@@ -152,15 +131,10 @@ func checkBoundaryClient(id uint8, side uint16, responder bool, st conversation.
 	}
 	if id == 7 && side == 0 {
 		b.mu.Lock()
-		closed, changed := b.closeRequested, b.current != b.initial
+		valid := b.closeRequested && b.initialEnded && b.initial != 0 && b.current > b.initial
 		b.mu.Unlock()
-		if !closed || !changed {
+		if !valid {
 			return fail(ReasonIncomplete)
-		}
-		for _, m := range p.truth.messages {
-			if !m.replied {
-				return fail(ReasonIncomplete)
-			}
 		}
 	}
 	return nil

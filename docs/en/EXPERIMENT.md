@@ -414,6 +414,15 @@ records are also retained without relabelling. These descriptive controls enter 
 training, pilot nor primary collection and do not replace the mandatory cover-puts-off
 distinguisher. The primary matrix's exponential workload is unchanged.
 
+Before ordinary mailbox observation, both peers independently report authenticated session
+readiness: the initiator is Established and the responder is Confirmed, with roles determined
+by public key order. Their shared finite barrier precedes the observation epoch; it is a
+historical readiness check, not a simultaneous session snapshot. In the rebuild control, the
+child proves original-circuit closure, a newer completed construction and rebuilt attachment.
+After merging and resolving truth, the controller separately requires each planned source's
+matching received-only row at the opposite peer. Delivery follows the owned capture and drain
+lifecycle; message rows carry no delivery timestamp.
+
 Before participant creation, the stochastic source schedule is checked against a necessary
 capacity condition. Observation retention checks actual protected memory, scalar array
 capacities and the complete internal measurement stream's byte and frame limits.

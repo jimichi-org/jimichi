@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"sync"
@@ -701,19 +702,23 @@ func (f *fixture) addClients(plans []workloadPlan, serial bool) ([]*ownedChild, 
 				return clients, e
 			}
 		}
-		for _, ch := range clients {
-			if ch.reason != ReasonNone {
-				continue
-			}
-			if ch.orphan || boundary && !profile.pairedBeforeBegin {
-				continue
-			}
-			if e := ch.expectReady(f.ctx, 3, readyUntil); e != nil {
-				return clients, e
-			}
+		if e := f.awaitClientsReady(clients, boundary && !profile.pairedBeforeBegin, &readyUntil); e != nil {
+			return clients, e
 		}
 	}
 	return clients, nil
+}
+
+func (f *fixture) awaitClientsReady(clients []*ownedChild, delayed bool, until *time.Time) error {
+	for _, ch := range clients {
+		if ch.reason != ReasonNone || ch.orphan || delayed {
+			continue
+		}
+		if e := ch.expectReady(f.ctx, 3, *until); e != nil {
+			return e
+		}
+	}
+	return readyAcceptanceError(f.ctx.Err() != nil, time.Now(), *until)
 }
 
 func (f *fixture) begin(epoch int64) error {
@@ -730,7 +735,18 @@ func (f *fixture) begin(epoch int64) error {
 		}
 	}
 	if f.settings.ControlProfile == 5 {
-		until := time.Now().Add(time.Duration(epoch + f.settings.DurationNS - monotonicNS()))
+		now := monotonicNS()
+		if now <= 0 || epoch <= 0 || f.settings.DurationNS <= 0 || epoch > math.MaxInt64-f.settings.DurationNS {
+			return fail(ReasonClock)
+		}
+		cutoff := epoch + f.settings.DurationNS
+		if f.ctx.Err() != nil {
+			return fail(ReasonCancelled)
+		}
+		if now >= cutoff {
+			return fail(ReasonIPC)
+		}
+		until := time.Now().Add(time.Duration(cutoff - now))
 		for _, ch := range f.children {
 			if ch.role != roleClient {
 				continue
@@ -738,6 +754,16 @@ func (f *fixture) begin(epoch int64) error {
 			if e := ch.expectReady(f.ctx, 3, until); e != nil {
 				return e
 			}
+		}
+		if f.ctx.Err() != nil {
+			return fail(ReasonCancelled)
+		}
+		now = monotonicNS()
+		if now <= 0 {
+			return fail(ReasonClock)
+		}
+		if now >= cutoff {
+			return fail(ReasonIPC)
 		}
 	}
 	return nil
