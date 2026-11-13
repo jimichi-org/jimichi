@@ -3,6 +3,7 @@ name: site
 on:
   release:
     types: [published, edited, deleted]
+  workflow_dispatch:
 
 permissions: {}
 
@@ -16,7 +17,7 @@ jobs:
           GH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "SITE_DISPATCH_TOKEN is not set, the site picks the release up on its daily build"
+            echo "::warning::SITE_DISPATCH_TOKEN is not set, the site picks the release up on its daily build"
             exit 0
           fi
           gh api repos/jimichi-org/jimichi-site/dispatches -f event_type=release
