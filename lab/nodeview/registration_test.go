@@ -176,6 +176,7 @@ func TestRegistrationModelRequiresFrozenStructuralPredecessor(t *testing.T) {
 }
 
 func TestRegistrationCombinesAllPairedPositions(t *testing.T) {
+	t.Parallel()
 	left, right := planningTestPilots(t)
 	leftBefore, rightBefore := clonePlanningPlan(left), clonePlanningPlan(right)
 	a, b, err := CombinePilotPlans(context.Background(), left, right)
@@ -231,6 +232,7 @@ func TestRegistrationCombinesAllPairedPositions(t *testing.T) {
 }
 
 func TestRegistrationKeepsBoundaryCoordinatesStructuralOnly(t *testing.T) {
+	t.Parallel()
 	left, right := planningTestPilots(t)
 	_, combined, err := CombinePilotPlans(context.Background(), left, right)
 	if err != nil {

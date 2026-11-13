@@ -11,12 +11,20 @@ import (
 	"testing"
 )
 
-var jointTestFixture = sync.OnceValues(func() ([2]string, error) {
+var jointTestFixture = sync.OnceValues(func() ([6]string, error) {
 	reports, err := makeJointTestReports()
 	if err != nil {
-		return [2]string{}, err
+		return [6]string{}, err
 	}
-	return serializeJointTestReports(reports)
+	var fixture [6]string
+	for i := 0; i < len(reports); i += 2 {
+		pair, err := serializeJointTestReports([2]Report{reports[i], reports[i+1]})
+		if err != nil {
+			return [6]string{}, err
+		}
+		fixture[i], fixture[i+1] = pair[0], pair[1]
+	}
+	return fixture, nil
 })
 
 func jointTestReports(t *testing.T) (Report, Report) {
@@ -66,11 +74,11 @@ func serializeJointTestReports(reports [2]Report) ([2]string, error) {
 	return fixture, nil
 }
 
-func makeJointTestReports() ([2]Report, error) {
+func makeJointTestReports() ([6]Report, error) {
 	scratchBudget := memoryBudget{limit: 81920}
 	scratch, err := acquireFitCertificate(scratchBudget.reserve)
 	if err != nil {
-		return [2]Report{}, err
+		return [6]Report{}, err
 	}
 	defer func() {
 		scratch.close()
@@ -78,11 +86,11 @@ func makeJointTestReports() ([2]Report, error) {
 	}()
 	left, right, err := makePlanningTestPilots()
 	if err != nil {
-		return [2]Report{}, err
+		return [6]Report{}, err
 	}
 	training := trainMailbox(mailboxTrainingFixture(), featureVersion, true, true, scratch)
 	if !training.Releasable {
-		return [2]Report{}, fmt.Errorf("test model unavailable")
+		return [6]Report{}, fmt.Errorf("test model unavailable")
 	}
 	var models []FrozenModel
 	right.FrozenModels = nil
@@ -94,7 +102,7 @@ func makeJointTestReports() ([2]Report, error) {
 			m := FrozenModel{Schema: "jimichi-nodeview-model-v1", Features: featureVersion, Population: population, Configuration: row.ID, Suite: right.Suite, TrainRevision: right.Revision, TransformDigest: right.TransformDigest, Training: training}
 			b, e := json.Marshal(m)
 			if e != nil {
-				return [2]Report{}, e
+				return [6]Report{}, e
 			}
 			m.Digest = publicHash(b)
 			models = append(models, m)
@@ -103,12 +111,14 @@ func makeJointTestReports() ([2]Report, error) {
 	}
 	right, err = sealPlanningTestPlan(right)
 	if err != nil {
-		return [2]Report{}, err
+		return [6]Report{}, err
 	}
 	a, b, e := CombinePilotPlans(context.Background(), left, right)
 	if e != nil {
-		return [2]Report{}, e
+		return [6]Report{}, e
 	}
+	combined := [2]Report{{Plan: clonePlanningPlan(a)}, {Plan: clonePlanningPlan(b)}}
+	var registered [2]Report
 	makeReport := func(p Plan, runs []RunResult) (Report, error) {
 		seed := int64(11704)
 		if p.Set == Mailbox {
@@ -118,6 +128,11 @@ func makeJointTestReports() ([2]Report, error) {
 		if err != nil {
 			return Report{}, err
 		}
+		index := 0
+		if p.Set == Mailbox {
+			index = 1
+		}
+		registered[index] = Report{Plan: clonePlanningPlan(p)}
 		parent := p.Digest
 		p.Phase = Primary
 		p.ParentDigest = parent
@@ -130,13 +145,13 @@ func makeJointTestReports() ([2]Report, error) {
 	}
 	leftReport, err := makeReport(a, inferenceTestLinking())
 	if err != nil {
-		return [2]Report{}, err
+		return [6]Report{}, err
 	}
 	rightReport, err := makeReport(b, inferenceTestMailbox())
 	if err != nil {
-		return [2]Report{}, err
+		return [6]Report{}, err
 	}
-	return [2]Report{leftReport, rightReport}, nil
+	return [6]Report{leftReport, rightReport, combined[0], combined[1], registered[0], registered[1]}, nil
 }
 
 func jointTestCheckSnapshot(t *testing.T, report Report, want string) {

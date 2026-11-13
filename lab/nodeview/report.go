@@ -43,6 +43,9 @@ func (r Report) validate() error {
 	if r.Schema != reportSchema || ValidatePlan(r.Plan) != nil || r.Manifest.Revision != r.Plan.Revision || r.Manifest.Tree != r.Plan.Tree || r.Manifest.BinarySHA256 != r.Plan.BinarySHA256 || r.Manifest.Suite != r.Plan.Suite {
 		return ErrInvalid
 	}
+	if r.Plan.Set == Collude && (r.Plan.TrainingReady || len(r.Models) != 0) && !commonColludeModelConsumer(&r.Plan) {
+		return ErrInvalid
+	}
 	if r.Plan.Phase == Primary {
 		commitment, err := mainSeedCommitment(r.Plan, r.Manifest.BaseSeed)
 		if err != nil || r.Plan.MainSeedCommitment != commitment {
@@ -399,17 +402,41 @@ func loadFrozen(path string, p Plan) ([]FrozenModel, error) {
 	return models, nil
 }
 
+func mailboxClassifierID(id string) bool {
+	switch id {
+	case "mail-P0-C0", "mail-P0-C1", "mail-P33250000-C0", "mail-P33250000-C1":
+		return true
+	}
+	return false
+}
+
+func commonColludeModelConsumer(p *Plan) bool {
+	return p != nil && p.Set == Collude && p.Suite == "c25519" && (p.Phase == Pilot || p.Phase == Primary) && p.TrainingReady && p.PilotReady && !p.ModelReady && len(p.Samples) == 0 && len(p.Powers) == 13 && len(p.PowerSearch) == 13 && len(p.FrozenModels) == 8 && p.ModelFamily.M == 13 && len(p.ModelFamily.IDs) == 13 && p.DifferenceFamily.M == 13 && len(p.DifferenceFamily.IDs) == 13 && p.ParentDigest != ""
+}
+
 func frozenModelMetadataValid(m *FrozenModel, p *Plan) bool {
 	if m == nil || p == nil || m.Schema != "jimichi-nodeview-model-v1" || !m.Training.Releasable || m.TrainRevision != p.Revision || m.Suite != p.Suite || m.Features != featureVersion || m.TransformDigest != p.TransformDigest || !digestPattern.MatchString(m.Digest) || m.Population != "request" && m.Population != "record" {
 		return false
 	}
-	known := false
-	for _, coordinate := range p.Configurations {
-		if coordinate.Population == "classifier" && coordinate.ID == m.Configuration {
-			known = true
-		}
+	if !mailboxClassifierID(m.Configuration) {
+		return false
 	}
-	if !known {
+	switch p.Set {
+	case Mailbox:
+		known := false
+		for _, coordinate := range p.Configurations {
+			if coordinate.Population == "classifier" && coordinate.ID == m.Configuration {
+				known = true
+			}
+		}
+		if !known {
+			return false
+		}
+	case Collude:
+		if !commonColludeModelConsumer(p) {
+			return false
+		}
+	default:
 		return false
 	}
 	matched := 0
