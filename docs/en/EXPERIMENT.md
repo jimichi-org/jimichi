@@ -492,9 +492,19 @@ checked labels, a finite nonzero direction and RAM arithmetic checks. Otherwise 
 and a reason remain, without coefficients, moments or digest; that model cannot enter primary runs.
 Aggregates, ranks and the coarse model reveal statistics and can reveal encoded categories given
 side information; impossibility of reconstructing source data is not claimed.
-Fitting-column or pivot sensitivity to roundoff forbids model release. Moments permit arithmetic
-checks but do not establish event provenance, original row order or exact raw observations;
-those require separate source and RAM checks. Inference about encoded rows is not precluded.
+Roundoff sensitivity at any original column, pivot, mean, zero, normality or finite guard
+forbids model release. The mandatory coarse enclosure C uses exact rational moments and
+the original `8*gamma(n+4)*n*D_i*D_j` bound. Independent trainer and fit-auditor processes
+also compute a directed interval enclosure R in RAM in original row order. A proved exact
+dyadic lattice permits an additional aggregate enclosure L. The nonempty intersection of
+C, R and available L must contain the actual scatter; exact directed binary64 endpoints
+then propagate through every original operation and guard. Bit-identical replay of the
+model and every training score remains mandatory and does not replace that proof.
+R is erased with the source rows. Aggregate artifacts reproduce C, available L and conditioned
+arithmetic, but cannot reproduce R, row order, event provenance or exact raw observations.
+The complete release proof also relies on qualified source and independent RAM processes;
+an artifact-only check does not reproduce it. Rows, interval traces, order digests and proof
+mode are not released. Inference about encoded rows is not precluded.
 Grouped AUC bootstrap uses 2000 resamples; anonymous group order is fixed before
 calculation and shared by the report and its audit witness.
 
@@ -795,7 +805,7 @@ message.
 ### Block 4. Key material, adversary A5
 
 The implemented cooperative stage is `lab -set keymem` ([#24](https://github.com/jimichi-org/jimichi/issues/24)).
-The registered series evaluated all 360 planned observations, 30 fresh processes per
+The registered Go 1.27.3 series evaluated all 360 planned observations, 30 fresh processes per
 suite/policy/checkpoint, with no exclusions. Counts, binary provenance and host-load diagnostics
 are in the [README](../../README.md#cooperative-key-memory-results). It observes exposure during
 an instrumented production workload; it does not validate the full A5 model.
@@ -835,8 +845,8 @@ Controls and evaluation:
 This version reports descriptive counts and proportions, with no p-values, confidence intervals or
 superiority claim. Matches under `all`, no policy difference and non-observation are valid outcomes.
 
-Run a stable optimized binary on Linux/amd64 with exactly Go 1.27.3 and working mlock. Keep the host
-quiet and do not rebuild that binary during the series. The completed registered series used:
+Run a stable optimized binary on Linux/amd64 with exactly Go 1.27.4 and working mlock. Keep the host
+quiet and do not rebuild that binary during the series. The completed registered Go 1.27.3 series used:
 
 ```
 lab -set keymem -suite c25519 -repeats 30 -seed 1 -rev eddddb226e7224140f8655b1566a55ce33f3ceda -out artifacts

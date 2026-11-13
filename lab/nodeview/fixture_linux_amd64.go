@@ -66,6 +66,10 @@ type ownedChild struct {
 	predictions                           predictions
 	training                              MailboxTraining
 	fitOK                                 bool
+	fitSeen, fitCommitted                 bool
+	fitReason                             uint8
+	fitCount                              uint32
+	fitExpected                           uint64
 }
 
 type fixture struct {
@@ -251,6 +255,21 @@ func containsInt(a []int, n int) bool {
 }
 
 func (f *fixture) spawn(role byte, selected bool) (*ownedChild, error) {
+	return f.spawnExpected(role, selected, 0)
+}
+
+func (f *fixture) spawnFit(role byte, rows int, released bool, reason Reason) (*ownedChild, error) {
+	if role != roleTrainer && role != roleFitAuditor || rows < 0 || rows > maxTrainingRows {
+		return nil, ErrInvalid
+	}
+	expected := uint64(rows) | uint64(boolInt(released))<<32 | uint64(reasonByte(reason))<<33 | uint64(1)<<63
+	return f.spawnExpected(role, false, expected)
+}
+
+func (f *fixture) spawnExpected(role byte, selected bool, expected uint64) (*ownedChild, error) {
+	if role >= roleTrainer && expected>>63 != 1 {
+		return nil, ErrInvalid
+	}
 	if role < roleRelay || role > roleFitAuditor {
 		return nil, ErrInvalid
 	}
@@ -281,7 +300,7 @@ func (f *fixture) spawn(role byte, selected bool) (*ownedChild, error) {
 	if _, e = rand.Read(token[:]); e != nil {
 		return nil, fail(ReasonChild)
 	}
-	child := &ownedChild{role: role, selected: selected, status: make(chan statusFrame, 8), viewDone: make(chan error, 1), truthDone: make(chan error, 1), exited: make(chan error, 1), viewProgress: make(chan struct{}, 1), truthProgress: make(chan struct{}, 1), truth: privateTruth{arena: f.arena}, watchDone: make(chan struct{}), statusJoined: make(chan struct{}), viewJoined: make(chan struct{}), truthJoined: make(chan struct{})}
+	child := &ownedChild{role: role, selected: selected, fitExpected: expected, status: make(chan statusFrame, 8), viewDone: make(chan error, 1), truthDone: make(chan error, 1), exited: make(chan error, 1), viewProgress: make(chan struct{}, 1), truthProgress: make(chan struct{}, 1), truth: privateTruth{arena: f.arena}, watchDone: make(chan struct{}), statusJoined: make(chan struct{}), viewJoined: make(chan struct{}), truthJoined: make(chan struct{})}
 	var parent [4]*os.File
 	var inherited [4]*os.File
 	for i := range 4 {
@@ -431,16 +450,8 @@ func (f *fixture) spawn(role byte, selected bool) (*ownedChild, error) {
 				child.dataMu.Lock()
 				e = receivePrediction(r, &child.predictions)
 				child.dataMu.Unlock()
-			case roleTrainer:
-				child.training, e = decodeTraining(r)
-			case roleFitAuditor:
-				if r.u8() != 2 {
-					return fail(ReasonIPC)
-				}
-				child.fitOK = r.bool()
-				_ = decodeReason(r)
-				_ = r.u32()
-				e = r.end()
+			case roleTrainer, roleFitAuditor:
+				e = acceptFitRoleResult(child, r, decodeTraining)
 			default:
 				return fail(ReasonIPC)
 			}
@@ -454,6 +465,9 @@ func (f *fixture) spawn(role byte, selected bool) (*ownedChild, error) {
 			}
 			return nil
 		})
+		if role >= roleTrainer && e != nil {
+			latchFitRoleError(child)
+		}
 		child.viewDone <- e
 	}()
 	go func() {
@@ -487,6 +501,9 @@ func (f *fixture) spawn(role byte, selected bool) (*ownedChild, error) {
 			}
 			return nil
 		})
+		if role >= roleTrainer && e != nil {
+			latchFitRoleError(child)
+		}
 		child.truthDone <- e
 	}()
 	return child, nil
@@ -1019,6 +1036,9 @@ func (f *fixture) releaseRetained() {
 		ch.view.wipe()
 		ch.truth.wipeMetadata()
 		ch.predictions.wipe()
+		wipeMailboxTraining(&ch.training)
+		ch.fitOK, ch.fitSeen, ch.fitCommitted = false, false, false
+		ch.fitReason, ch.fitCount, ch.fitExpected = 0, 0, 0
 		clear(ch.bundle)
 		ch.bundle = nil
 		if ch.writer != nil {

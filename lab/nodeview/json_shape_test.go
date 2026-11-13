@@ -67,6 +67,7 @@ func TestStrictJSONRequiresExplicitZeroProfileInPlan(t *testing.T) {
 }
 
 func TestStrictJSONPreservesCanonicalPublicSchemas(t *testing.T) {
+	scratch := testFitCertificate(t)
 	for _, set := range []Set{Compromise, Collude, Mailbox} {
 		input := testNodeviewPlan(set)
 		body, err := json.Marshal(input)
@@ -78,7 +79,7 @@ func TestStrictJSONPreservesCanonicalPublicSchemas(t *testing.T) {
 			t.Fatal("canonical public plan did not round trip")
 		}
 	}
-	training := trainMailbox(mailboxTrainingFixture(), featureVersion, true, true)
+	training := trainMailbox(mailboxTrainingFixture(), featureVersion, true, true, scratch)
 	if !training.Releasable {
 		t.Fatal("canonical model fixture is unavailable")
 	}

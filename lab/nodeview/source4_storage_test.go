@@ -144,17 +144,18 @@ func TestSource4ValidatorHandles8192PartialSetups(t *testing.T) {
 }
 
 func TestSource4TrainingFullUint16DomainAndPrefixFailure(t *testing.T) {
+	scratch := testFitCertificate(t)
 	rows := make([]encodedTrainingRow, 0, maxTrainingRows)
 	for id := 0; id < 1<<16; id++ {
 		rows = append(rows, encodedTrainingRow{Conversation: uint16(id)}, encodedTrainingRow{Conversation: uint16(id), Positive: true})
 	}
-	result := trainMailbox(rows, featureVersion, false, true)
+	result := trainMailbox(rows, featureVersion, false, true, scratch)
 	if result.Releasable || result.Support.Rows != [2]int{65536, 65536} || result.Support.Conversations != [2]int{65536, 65536} || result.Support.LargestConversation != [2]int{1, 1} {
 		t.Fatal("full uint16 conversation IDs were restricted or counted differently")
 	}
 	prefix := []encodedTrainingRow{{Conversation: math.MaxUint16, OriginalSeal: true}, {Conversation: 17, Positive: true, OriginalSeal: true}, {Positive: true}}
 	prefix[2].Values[17] = -1
-	failed := trainMailbox(prefix, featureVersion, true, true)
+	failed := trainMailbox(prefix, featureVersion, true, true, scratch)
 	if failed.Reason != string(ReasonContract) || failed.Support.Rows != [2]int{1, 1} || failed.Support.OriginalSeals != [2]int{1, 1} || failed.Support.Conversations != [2]int{} || failed.Support.LargestConversation != [2]int{} {
 		t.Fatal("invalid suffix changed prefix error support")
 	}

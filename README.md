@@ -275,9 +275,9 @@ docs/         documentation, en/ and ru/
 
 ## Requirements
 
-Go 1.27. Memory locking and dump prevention are Linux-only; other platforms build against stubs
+Go 1.27.4. Memory locking and dump prevention are Linux-only; other platforms build against stubs
 that report memory as unlocked, so a node refuses to start there. The cooperative `keymem` assay
-requires Linux/amd64, exactly Go 1.27.3 and working mlock; unsupported or unavailable observations
+requires Linux/amd64, exactly Go 1.27.4 and working mlock; unsupported or unavailable observations
 are explicit failures, not zero-match results ([EXPERIMENT](docs/en/EXPERIMENT.md), block 4).
 Docker and kind for the testbed; a Compose setup for development is planned
 ([#22](https://github.com/jimichi-org/jimichi/issues/22)).

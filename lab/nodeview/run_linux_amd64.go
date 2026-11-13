@@ -88,7 +88,7 @@ func run(ctx context.Context, c Config) (Report, error) {
 	if e = protectProcess(controllerArenaBytes); e != nil {
 		return Report{}, ErrUnsupported
 	}
-	if runtime.Version() != "go1.27.3" {
+	if runtime.Version() != "go1.27.4" {
 		return Report{}, ErrUnsupported
 	}
 	report := Report{Schema: reportSchema, Plan: p, Manifest: Manifest{BaseSeed: c.Seed, Revision: c.Revision, Tree: tree, BinarySHA256: binary, Runtime: runtime.Version(), Kernel: kernelRelease(), Suite: c.Suite.String(), Protection: "all", Clock: "CLOCK_MONOTONIC-same-kernel", LoadBefore: safeLoad(), LoopbackExemptions: [4]int{-1, -1, -1, -1}, ExemptionReason: p.ExemptionReason}}

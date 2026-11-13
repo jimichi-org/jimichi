@@ -82,7 +82,7 @@ func clientTruthBackingBytes() (uint64, error) {
 	var truth privateTruth
 	var capture privateCapture
 	var plan workloadPlan
-	if runtime.Version() != "go1.27.3" || runtime.GOARCH != "amd64" || unsafe.Sizeof(int(0)) != 8 || unsafe.Sizeof(ReasonNone) != 16 || unsafe.Sizeof(sync.Mutex{}) != 8 || unsafe.Sizeof(arenaRef{}) != 16 || unsafe.Sizeof(clientTruthCapacity{}) != 56 || unsafe.Sizeof(truth) != 248 || unsafe.Sizeof(capture) != 320 || unsafe.Sizeof(plan) != 112 || unsafe.Offsetof(truth.capacity) != 160 || unsafe.Offsetof(truth.client) != 216 || unsafe.Offsetof(truth.clientPacket) != 224 || unsafe.Offsetof(capture.err) != 296 || unsafe.Offsetof(capture.frozen) != 312 || unsafe.Offsetof(plan.sourceLimit) != 104 {
+	if runtime.Version() != "go1.27.4" || runtime.GOARCH != "amd64" || unsafe.Sizeof(int(0)) != 8 || unsafe.Sizeof(ReasonNone) != 16 || unsafe.Sizeof(sync.Mutex{}) != 8 || unsafe.Sizeof(arenaRef{}) != 16 || unsafe.Sizeof(clientTruthCapacity{}) != 56 || unsafe.Sizeof(truth) != 248 || unsafe.Sizeof(capture) != 320 || unsafe.Sizeof(plan) != 112 || unsafe.Offsetof(truth.capacity) != 160 || unsafe.Offsetof(truth.client) != 216 || unsafe.Offsetof(truth.clientPacket) != 224 || unsafe.Offsetof(capture.err) != 296 || unsafe.Offsetof(capture.frozen) != 312 || unsafe.Offsetof(plan.sourceLimit) != 104 {
 		return 0, fail(ReasonUnsupported)
 	}
 	caps := clientTruthArrayCaps()

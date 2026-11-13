@@ -779,11 +779,12 @@ func replayClearTraining(fit *MailboxTraining) {
 }
 
 func replayFits(t *testing.T, results [2]replayResult, release bool) [2][2]MailboxTraining {
+	scratch := testFitCertificate(t)
 	t.Helper()
 	var fits [2][2]MailboxTraining
 	for branch := range 2 {
 		for population, rows := range [][]encodedTrainingRow{results[branch].request, results[branch].record} {
-			fits[branch][population] = trainMailbox(rows, featureVersion, true, true)
+			fits[branch][population] = trainMailbox(rows, featureVersion, true, true, scratch)
 			b, p := branch, population
 			t.Cleanup(func() { replayClearTraining(&fits[b][p]) })
 			if release && (!fits[branch][population].Releasable || fits[branch][population].Model == nil || fits[branch][population].Witness == nil) {

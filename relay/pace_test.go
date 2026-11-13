@@ -141,18 +141,36 @@ func TestBurstLeavesOnePerTick(t *testing.T) {
 	}
 }
 
+const idlePaddingFrames = 31
+
 func TestIdleLinkCarriesPadding(t *testing.T) {
 	period := 10 * time.Millisecond
 	frame, _ := link.FrameSize(c25519.New())
 	p, raw, stats := pacedPipe(t, period, 4)
 
-	checkGaps(t, frameTimes(t, raw, frame, 11, 5*time.Second), period)
+	checkGaps(t, frameTimes(t, raw, frame, idlePaddingFrames, 5*time.Second), period)
 	_ = raw.Close()
 	p.close()
 	s := stats.Snapshot()
-	if s.Padding < 11 || s.Forwarded != 0 {
-		t.Fatalf("padding %d, forwarded %d; want at least 11 padding frames and nothing forwarded", s.Padding, s.Forwarded)
+	if s.Padding < idlePaddingFrames || s.Forwarded != 0 {
+		t.Fatalf("padding %d, forwarded %d; want at least %d padding frames and nothing forwarded", s.Padding, s.Forwarded, idlePaddingFrames)
 	}
+}
+
+func TestIdlePaddingSampleToleratesOneHiccup(t *testing.T) {
+	period := 10 * time.Millisecond
+	times := make([]time.Time, idlePaddingFrames)
+	times[0] = time.Unix(0, 0)
+	for i := 1; i < len(times); i++ {
+		gap := period
+		if i == 5 {
+			gap = 16 * time.Millisecond
+		} else if i == 6 {
+			gap = 4 * time.Millisecond
+		}
+		times[i] = times[i-1].Add(gap)
+	}
+	checkGaps(t, times, period)
 }
 
 func TestFullQueueRefuses(t *testing.T) {

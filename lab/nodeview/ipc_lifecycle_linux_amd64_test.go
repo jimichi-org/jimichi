@@ -274,7 +274,11 @@ func TestTerminalRecordCountCannotSubstituteForPacketCount(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var output bytes.Buffer
-			child := &ownedChild{role: roleTrainer, status: make(chan statusFrame), writer: &protocolWriter{w: &output, limit: 1 << 20}}
+			role := byte(roleRelay)
+			if stream == "truth" {
+				role = roleClient
+			}
+			child := &ownedChild{role: role, status: make(chan statusFrame), writer: &protocolWriter{w: &output, limit: 1 << 20}}
 			views, truths := uint64(0), uint64(0)
 			if stream == "view" {
 				child.viewFrames.Store(1)

@@ -22,8 +22,9 @@ func mailboxTrainingFixture() []encodedTrainingRow {
 }
 
 func TestMailboxTrainingReleaseKnownAnswer(t *testing.T) {
+	scratch := testFitCertificate(t)
 	// 64 zeros and 64 ones have mean 1/2, scatter 32, d=1, w=1/32 and normalizer=1/32
-	out := trainMailbox(mailboxTrainingFixture(), MailboxFeatureVersion, true, true)
+	out := trainMailbox(mailboxTrainingFixture(), MailboxFeatureVersion, true, true, scratch)
 	if !out.Releasable || out.Model == nil || out.Witness == nil || out.Reason != "" || !out.Support.RAMConformance || !out.Support.Stable {
 		t.Fatalf("release failed: %s", out.Reason)
 	}
@@ -45,6 +46,7 @@ func TestMailboxTrainingReleaseKnownAnswer(t *testing.T) {
 }
 
 func TestMailboxTrainingSuppressesSparseAndPartial(t *testing.T) {
+	scratch := testFitCertificate(t)
 	cases := []struct {
 		rows          []encodedTrainingRow
 		version       string
@@ -74,7 +76,7 @@ func TestMailboxTrainingSuppressesSparseAndPartial(t *testing.T) {
 		clean, joined bool
 	}{dominant, MailboxFeatureVersion, true, true})
 	for _, c := range cases {
-		out := trainMailbox(c.rows, c.version, c.clean, c.joined)
+		out := trainMailbox(c.rows, c.version, c.clean, c.joined, scratch)
 		if out.Releasable || out.Model != nil || out.Witness != nil || out.Reason == "" {
 			t.Fatal("sparse or partial model released")
 		}
@@ -115,6 +117,7 @@ func TestMailboxEncodedMomentsDoNotReplaceExtrema(t *testing.T) {
 }
 
 func TestMailboxFitMomentsIndependentReplay(t *testing.T) {
+	scratch := testFitCertificate(t)
 	rows := mailboxTrainingFixture()
 	for i := range rows {
 		rows[i].Values[17] = int16(i % 7)
@@ -122,7 +125,7 @@ func TestMailboxFitMomentsIndependentReplay(t *testing.T) {
 			rows[i].Values[17] += 2
 		}
 	}
-	out := trainMailbox(rows, MailboxFeatureVersion, true, true)
+	out := trainMailbox(rows, MailboxFeatureVersion, true, true, scratch)
 	if !out.Releasable || !out.Support.RAMConformance {
 		t.Fatalf("independent replay failed: %s", out.Reason)
 	}

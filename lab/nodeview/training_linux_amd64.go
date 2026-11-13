@@ -17,9 +17,7 @@ func trainingChild(c *childIO) error {
 	complete, joined := false, false
 	header := false
 	defer func() {
-		for i := range rows {
-			rows[i].wipe()
-		}
+		clear(rows[:cap(rows)])
 	}()
 	for {
 		r, e := c.receive(opTrain)
@@ -69,37 +67,68 @@ func trainingChild(c *childIO) error {
 			if !header || r.end() != nil {
 				return fail(ReasonIPC)
 			}
-			training := trainMailbox(rows, featureVersion, complete, joined)
-			if c.role == roleTrainer {
-				w = encodeTraining(training)
-				if e := c.view.send(opTrained, w); e != nil {
-					return e
-				}
-			} else {
-				w = encoder{}
-				w.u8(2)
-				w.bool(training.Releasable && training.Support.RAMConformance && training.Support.Stable)
-				w.u8(reasonByte(Reason(training.Reason)))
-				w.u32(uint32(len(rows)))
-				if e := c.view.send(opFitCheck, w); e != nil {
-					return e
-				}
+			scratch, err := acquireFitCertificate(func(n uint64) error { return currentHostGrowth(n, availableHostMemory) })
+			if err != nil {
+				return err
 			}
-			if e = c.terminal(Counts{}, ReasonNone); e != nil {
-				return e
-			}
-			for i := range rows {
-				rows[i].wipe()
-			}
-			return c.cleaned()
+			defer scratch.close()
+			training := trainMailbox(rows, featureVersion, complete, joined, scratch)
+			return finishTrainingCommand(c, rows, &training, scratch)
 		default:
 			return fail(ReasonIPC)
 		}
 	}
 }
 
+func finishTrainingCommand(c *childIO, rows []encodedTrainingRow, training *MailboxTraining, s *fitCertificateScratch) error {
+	w := encoder{}
+	defer func() {
+		w.wipe()
+		clear(rows[:cap(rows)])
+		wipeMailboxTraining(training)
+		s.close()
+		if c != nil && c.command != nil {
+			c.command.close()
+		}
+	}()
+	if c == nil || training == nil || !fitReady(s) {
+		return fail(ReasonContract)
+	}
+	if c.role == roleTrainer {
+		w = encodeTraining(*training)
+		if e := c.view.send(opTrained, w); e != nil {
+			return e
+		}
+	} else if c.role == roleFitAuditor {
+		w.u8(2)
+		w.bool(training.Releasable && training.Support.RAMConformance && training.Support.Stable)
+		w.u8(reasonByte(Reason(training.Reason)))
+		w.u32(uint32(len(rows)))
+		if e := c.view.send(opFitCheck, w); e != nil {
+			return e
+		}
+	} else {
+		return fail(ReasonContract)
+	}
+	w.wipe()
+	if e := c.terminal(Counts{}, ReasonNone); e != nil {
+		return e
+	}
+	s.close()
+	wipeMailboxTraining(training)
+	clear(rows[:cap(rows)])
+	w.wipe()
+	c.command.close()
+	rows, training, s = nil, nil, nil
+	return c.cleaned()
+}
+
 func encodeTraining(t MailboxTraining) encoder {
 	w := encoder{}
+	if !validateMailboxTraining(t) {
+		w.bad = true
+		return w
+	}
 	w.bool(t.Releasable)
 	w.u8(reasonByte(Reason(t.Reason)))
 	s := t.Support
@@ -241,8 +270,13 @@ func decodeTraining(r *decoder) (MailboxTraining, error) {
 	return t, nil
 }
 
-func (f *fixture) train(rows []encodedTrainingRow, complete, joined bool) (MailboxTraining, error) {
-	var trained MailboxTraining
+func (f *fixture) train(rows []encodedTrainingRow, complete, joined bool) (trained MailboxTraining, resultErr error) {
+	transferred := false
+	defer func() {
+		if !transferred {
+			wipeMailboxTraining(&trained)
+		}
+	}()
 	for _, role := range []byte{roleTrainer, roleFitAuditor} {
 		reservation := uint64(len(rows))*512 + 8<<20
 		if e := f.budget.reserve(reservation); e != nil {
@@ -253,7 +287,7 @@ func (f *fixture) train(rows []encodedTrainingRow, complete, joined bool) (Mailb
 			return trained, e
 		}
 		f.scorerReservation += reservation
-		ch, e := f.spawn(role, false)
+		ch, e := f.spawnFit(role, len(rows), trained.Releasable, Reason(trained.Reason))
 		if e != nil {
 			return trained, e
 		}
@@ -304,9 +338,11 @@ func (f *fixture) train(rows []encodedTrainingRow, complete, joined bool) (Mailb
 		f.scorerReservation -= reservation
 		if role == roleTrainer {
 			trained = ch.training
+			ch.training = MailboxTraining{}
 		} else if trained.Releasable && !ch.fitOK {
-			return MailboxTraining{}, fail(ReasonConformance)
+			return trained, fail(ReasonConformance)
 		}
 	}
+	transferred = true
 	return trained, nil
 }

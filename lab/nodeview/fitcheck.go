@@ -3,7 +3,6 @@ package nodeview
 import (
 	"encoding/json"
 	"math"
-	"math/big"
 	"slices"
 
 	"github.com/jimichi-org/jimichi/lab/metrics"
@@ -155,51 +154,112 @@ func validEncodedMailboxRow(row encodedMailboxRow) bool {
 	return row[11]+row[12]+row[13]+row[14] <= 1
 }
 
-func trainMailbox(rows []encodedTrainingRow, featureVersion string, completeClean, labelsJoined bool) MailboxTraining {
-	out := MailboxTraining{FeatureVersion: MailboxFeatureVersion, Support: MailboxTrainingSupport{CompleteClean: completeClean, LabelsJoined: labelsJoined}}
-	fail := func(reason string) MailboxTraining { out.Reason = reason; return out }
-	if featureVersion != MailboxFeatureVersion || len(rows) > 131072 {
-		return fail("training_support")
+type mailboxReplayWork struct{ y, v []float64 }
+
+func (w *mailboxReplayWork) close() {
+	clear(w.y[:cap(w.y)])
+	clear(w.v[:cap(w.v)])
+	w.y, w.v = nil, nil
+}
+
+type mailboxFitOwner struct {
+	replayWork                    mailboxReplayWork
+	histogram                     *[2][1 << 16]uint32
+	train                         [][]float64
+	truth                         []bool
+	backing                       []float64
+	model, replayed               metrics.Discriminant
+	witness                       *MailboxFitWitness
+	scores                        [2][]float64
+	output                        MailboxTraining
+	stable, replayOK, transferred bool
+}
+
+func (o *mailboxFitOwner) close() {
+	if o == nil {
+		return
 	}
-	conversations := new([2][1 << 16]uint32)
-	defer clear(conversations[0][:])
-	defer clear(conversations[1][:])
+	if o.histogram != nil {
+		clear(o.histogram[0][:])
+		clear(o.histogram[1][:])
+		o.histogram = nil
+	}
+	clear(o.backing[:cap(o.backing)])
+	clear(o.truth[:cap(o.truth)])
+	clear(o.train[:cap(o.train)])
+	for i := range o.scores {
+		clear(o.scores[i][:cap(o.scores[i])])
+		o.scores[i] = nil
+	}
+	o.replayWork.close()
+	wipeMailboxModel(&o.replayed)
+	if !o.transferred {
+		wipeMailboxModel(&o.model)
+		wipeMailboxWitness(o.witness)
+	}
+	o.train, o.truth, o.backing, o.witness = nil, nil, nil, nil
+	o.output = MailboxTraining{}
+	o.stable, o.replayOK = false, false
+}
+
+func trainMailbox(rows []encodedTrainingRow, featureVersion string, completeClean, labelsJoined bool, s *fitCertificateScratch) MailboxTraining {
+	owner := mailboxFitOwner{}
+	defer owner.close()
+	prepareMailboxTraining(&owner, rows, featureVersion, completeClean, labelsJoined, s)
+	return finalizeMailboxTraining(&owner)
+}
+
+func prepareMailboxTraining(o *mailboxFitOwner, rows []encodedTrainingRow, featureVersion string, completeClean, labelsJoined bool, s *fitCertificateScratch) {
+	o.output = MailboxTraining{FeatureVersion: MailboxFeatureVersion, Support: MailboxTrainingSupport{CompleteClean: completeClean, LabelsJoined: labelsJoined}}
+	fail := func(reason string) { o.output.Reason = reason }
+	if !s.reset() {
+		fail("fit_conformance")
+		return
+	}
+	if featureVersion != MailboxFeatureVersion || len(rows) > 131072 {
+		fail("training_support")
+		return
+	}
+	o.histogram = new([2][1 << 16]uint32)
+	conversations := o.histogram
 	for _, row := range rows {
 		if !validEncodedMailboxRow(row.Values) {
-			return fail("observation_contract")
+			fail("observation_contract")
+			return
 		}
 		class := 0
 		if row.Positive {
 			class = 1
 		}
-		out.Support.Rows[class]++
+		o.output.Support.Rows[class]++
 		conversations[class][row.Conversation]++
 		if row.OriginalSeal {
-			out.Support.OriginalSeals[class]++
+			o.output.Support.OriginalSeals[class]++
 		}
 	}
 	for c := range 2 {
 		for i := range conversations[c] {
 			n := conversations[c][i]
 			if n != 0 {
-				out.Support.Conversations[c]++
+				o.output.Support.Conversations[c]++
 			}
-			out.Support.LargestConversation[c] = max(out.Support.LargestConversation[c], int(n))
+			o.output.Support.LargestConversation[c] = max(o.output.Support.LargestConversation[c], int(n))
 		}
 	}
 	if !completeClean || !labelsJoined || len(rows) == 0 {
-		return fail("training_support")
+		fail("training_support")
+		return
 	}
 	for c := range 2 {
-		if out.Support.Rows[c] < 64 || out.Support.Conversations[c] < 4 || 2*out.Support.LargestConversation[c] > out.Support.Rows[c] {
-			return fail("training_support")
+		if o.output.Support.Rows[c] < 64 || o.output.Support.Conversations[c] < 4 || 2*o.output.Support.LargestConversation[c] > o.output.Support.Rows[c] {
+			fail("training_support")
+			return
 		}
 	}
-	train := make([][]float64, len(rows))
-	truth := make([]bool, len(rows))
-	backing := make([]float64, len(rows)*mailboxFeatureCount)
-	defer clear(backing)
-	defer clear(truth)
+	o.train = make([][]float64, len(rows))
+	o.truth = make([]bool, len(rows))
+	o.backing = make([]float64, len(rows)*mailboxFeatureCount)
+	train, truth, backing := o.train, o.truth, o.backing
 	for i, row := range rows {
 		train[i] = backing[i*mailboxFeatureCount : (i+1)*mailboxFeatureCount]
 		for j, v := range row.Values {
@@ -207,34 +267,47 @@ func trainMailbox(rows []encodedTrainingRow, featureVersion string, completeClea
 		}
 		truth[i] = row.Positive
 	}
-	model, ok := metrics.FitDiscriminant(train, truth)
+	var ok bool
+	o.model, ok = metrics.FitDiscriminant(o.train, o.truth)
 	if !ok {
-		return fail("training_degenerate")
+		o.output.Reason = "training_degenerate"
+		return
 	}
 	witness := mailboxMoments(rows)
-	replayed, stable, ok := checkMailboxFit(train, truth, &witness)
-	if !ok || !sameMailboxModel(model, replayed) {
-		return fail("fit_conformance")
+	o.witness = &witness
+	o.replayed, o.stable, o.replayOK = checkMailboxFitWork(o.train, o.truth, o.witness, s, &o.replayWork)
+	if !o.replayOK || !sameMailboxModel(o.model, o.replayed) {
+		o.output.Reason = "fit_conformance"
+		return
 	}
-	a, b := model.Scores(train), replayed.Scores(train)
-	if len(a) != len(rows) || len(b) != len(rows) {
-		return fail("fit_conformance")
+	o.scores[0] = o.model.Scores(o.train)
+	o.scores[1] = o.replayed.Scores(o.train)
+}
+
+func finalizeMailboxTraining(o *mailboxFitOwner) MailboxTraining {
+	defer o.close()
+	out := o.output
+	if out.Reason != "" {
+		return out
 	}
-	for i := range a {
-		if math.Float64bits(a[i]) != math.Float64bits(b[i]) {
-			clear(a)
-			clear(b)
-			return fail("fit_conformance")
+	if !o.replayOK || !sameMailboxModel(o.model, o.replayed) || len(o.scores[0]) != len(o.train) || len(o.scores[1]) != len(o.train) {
+		out.Reason = "fit_conformance"
+		return out
+	}
+	for i := range o.scores[0] {
+		if math.Float64bits(o.scores[0][i]) != math.Float64bits(o.scores[1][i]) {
+			out.Reason = "fit_conformance"
+			return out
 		}
 	}
-	clear(a)
-	clear(b)
 	out.Support.RAMConformance = true
-	if !stable {
-		return fail("fit_audit_sensitive")
+	if !o.stable {
+		out.Reason = "fit_audit_sensitive"
+		return out
 	}
 	out.Support.Stable, out.Releasable = true, true
-	out.Model, out.Witness = &model, &witness
+	out.Model, out.Witness = &o.model, o.witness
+	o.transferred = true
 	return out
 }
 
@@ -285,80 +358,67 @@ func sameMailboxModel(a, b metrics.Discriminant) bool {
 	return true
 }
 
-type fitInterval struct{ lo, hi float64 }
-
-func outwardFit(lo, hi float64) fitInterval {
-	return fitInterval{math.Nextafter(lo, math.Inf(-1)), math.Nextafter(hi, math.Inf(1))}
-}
-func pointFit(v float64) fitInterval      { return fitInterval{v, v} }
-func addFit(a, b fitInterval) fitInterval { return outwardFit(a.lo+b.lo, a.hi+b.hi) }
-func subFit(a, b fitInterval) fitInterval { return outwardFit(a.lo-b.hi, a.hi-b.lo) }
-func mulFit(a, b fitInterval) fitInterval {
-	p := [4]float64{a.lo * b.lo, a.lo * b.hi, a.hi * b.lo, a.hi * b.hi}
-	return outwardFit(slices.Min(p[:]), slices.Max(p[:]))
-}
-func squareFit(a fitInterval) fitInterval {
-	b := absFit(a)
-	return outwardFit(b.lo*b.lo, b.hi*b.hi)
-}
-func divFit(a, b fitInterval) fitInterval {
-	if b.lo <= 0 && b.hi >= 0 {
-		return fitInterval{math.Inf(-1), math.Inf(1)}
+func wipeMailboxModel(m *metrics.Discriminant) {
+	if m == nil {
+		return
 	}
-	return mulFit(a, outwardFit(1/b.hi, 1/b.lo))
-}
-func sqrtFit(a fitInterval) fitInterval {
-	if a.lo < 0 {
-		return fitInterval{math.NaN(), math.NaN()}
-	}
-	return outwardFit(math.Sqrt(a.lo), math.Sqrt(a.hi))
-}
-func finiteFit(a fitInterval) bool {
-	return !math.IsNaN(a.lo) && !math.IsNaN(a.hi) && !math.IsInf(a.lo, 0) && !math.IsInf(a.hi, 0)
-}
-func absFit(a fitInterval) fitInterval {
-	hi := math.Max(math.Abs(a.lo), math.Abs(a.hi))
-	lo := math.Min(math.Abs(a.lo), math.Abs(a.hi))
-	if a.lo <= 0 && a.hi >= 0 {
-		lo = 0
-	}
-	return fitInterval{lo, hi}
+	clear(m.Weights[:cap(m.Weights)])
+	clear(m.Center[:cap(m.Center)])
+	clear(m.Kept[:cap(m.Kept)])
+	clear(m.Unused[:cap(m.Unused)])
+	*m = metrics.Discriminant{}
 }
 
-func exactMailboxScatter(sumI, sumJ, cross int64, n int) float64 {
-	r := new(big.Rat).SetInt64(cross)
-	product := new(big.Int).Mul(big.NewInt(sumI), big.NewInt(sumJ))
-	r.Sub(r, new(big.Rat).SetFrac(product, big.NewInt(int64(n))))
-	v, _ := r.Float64()
-	return v
+func wipeMailboxWitness(w *MailboxFitWitness) {
+	if w == nil {
+		return
+	}
+	clear(w.Kept[:cap(w.Kept)])
+	clear(w.Unused[:cap(w.Unused)])
+	*w = MailboxFitWitness{}
 }
 
-func checkMailboxFit(train [][]float64, truth []bool, witness *MailboxFitWitness) (metrics.Discriminant, bool, bool) {
+func wipeMailboxTraining(t *MailboxTraining) {
+	if t == nil {
+		return
+	}
+	wipeMailboxModel(t.Model)
+	wipeMailboxWitness(t.Witness)
+	*t = MailboxTraining{}
+}
+
+func checkMailboxFit(train [][]float64, truth []bool, witness *MailboxFitWitness, s *fitCertificateScratch) (metrics.Discriminant, bool, bool) {
+	work := mailboxReplayWork{}
+	defer work.close()
+	return checkMailboxFitWork(train, truth, witness, s, &work)
+}
+
+func checkMailboxFitWork(train [][]float64, truth []bool, witness *MailboxFitWitness, s *fitCertificateScratch, work *mailboxReplayWork) (result metrics.Discriminant, stable, ok bool) {
 	const width = mailboxFeatureCount
-	var empty metrics.Discriminant
-	if len(train) == 0 || len(train) != len(truth) || witness == nil {
-		return empty, false, false
+	if !fitReady(s) || s.flags[2] != 1 || s.flags[3] != 0 {
+		return
 	}
-	n := len(train)
-	stable := true
-	mu, mu0, mu1 := make([]float64, width), make([]float64, width), make([]float64, width)
-	for i, row := range train {
-		if len(row) != width {
-			return empty, false, false
+	defer func() {
+		s.flags[3] = 0
+		if !ok {
+			wipeMailboxModel(&result)
 		}
-		for j, v := range row {
-			mu[j] += v
-			if truth[i] {
-				mu1[j] += v
-			} else {
-				mu0[j] += v
+	}()
+	if !prepareMailboxFacts(train, truth, witness, s) {
+		return
+	}
+	for i := range width {
+		if witness.Scale[i] != 0 {
+			return
+		}
+		for j := range width {
+			if witness.Scatter[i][j] != 0 || witness.Cholesky[i][j] != 0 {
+				return
 			}
 		}
 	}
-	for j := range width {
-		mu[j] /= float64(n)
-		mu0[j] /= float64(witness.ClassCount[0])
-		mu1[j] /= float64(witness.ClassCount[1])
+	if len(witness.Kept) != 0 || len(witness.Unused) != 0 {
+		return
 	}
 	var varying [width]bool
 	for j := range width {
@@ -369,150 +429,91 @@ func checkMailboxFit(train [][]float64, truth []bool, witness *MailboxFitWitness
 			if !varying[i] {
 				continue
 			}
-			di := row[i] - mu[i]
+			di := row[i] - s.means[0][i]
 			for j := range i + 1 {
 				if varying[j] {
-					witness.Scatter[i][j] += di * (row[j] - mu[j])
+					witness.Scatter[i][j] += di * (row[j] - s.means[0][j])
 				}
 			}
 		}
 	}
-	var scatterInterval [width][width]fitInterval
-	u := math.Ldexp(1, -53)
-	k := float64(n + 4)
-	gamma := k * u / (1 - k*u)
-	var scaleInterval [width]fitInterval
-	for i := range width {
-		if !varying[i] {
+	for j := range width {
+		if !varying[j] {
 			continue
 		}
-		di := math.Max(1, math.Max(math.Abs(float64(witness.Minimum[i])-mu[i]), math.Abs(float64(witness.Maximum[i])-mu[i])))
-		for j := range i + 1 {
-			if !varying[j] {
-				continue
-			}
-			dj := math.Max(1, math.Max(math.Abs(float64(witness.Minimum[j])-mu[j]), math.Abs(float64(witness.Maximum[j])-mu[j])))
-			exact := exactMailboxScatter(witness.Sum[i], witness.Sum[j], witness.Cross[i][j], n)
-			bound := 8 * gamma * float64(n) * di * dj
-			iv := outwardFit(exact-bound, exact+bound)
-			if witness.Scatter[i][j] < iv.lo || witness.Scatter[i][j] > iv.hi {
-				return empty, false, false
-			}
-			scatterInterval[i][j] = iv
-		}
-		witness.Scale[i] = math.Sqrt(witness.Scatter[i][i])
-		if witness.Scatter[i][i] < 0x1p-1022 || math.IsInf(witness.Scale[i], 0) {
-			return empty, false, false
-		}
-		if scatterInterval[i][i].lo < 0x1p-1022 {
-			stable = false
-		} else {
-			scaleInterval[i] = sqrtFit(scatterInterval[i][i])
+		witness.Scale[j] = math.Sqrt(witness.Scatter[j][j])
+		if !(witness.Scatter[j][j] >= 0x1p-1022) || math.IsInf(witness.Scale[j], 0) {
+			return
 		}
 	}
-	var cholInterval [width][width]fitInterval
 	var kept []int
+	defer func() {
+		if !ok {
+			clear(kept[:cap(kept)])
+		}
+	}()
 	for i := range width {
 		if !varying[i] {
 			continue
 		}
 		pivot := witness.Scatter[i][i] / witness.Scale[i] / witness.Scale[i]
-		pi := divFit(divFit(scatterInterval[i][i], scaleInterval[i]), scaleInterval[i])
 		for p, j := range kept {
 			c := witness.Scatter[i][j] / witness.Scale[i] / witness.Scale[j]
-			ci := divFit(divFit(scatterInterval[i][j], scaleInterval[i]), scaleInterval[j])
 			for r := range p {
 				c -= witness.Cholesky[i][r] * witness.Cholesky[j][r]
-				ci = subFit(ci, mulFit(cholInterval[i][r], cholInterval[j][r]))
 			}
 			witness.Cholesky[i][p] = c / witness.Cholesky[j][p]
-			cholInterval[i][p] = divFit(ci, cholInterval[j][p])
 			pivot -= witness.Cholesky[i][p] * witness.Cholesky[i][p]
-			pi = subFit(pi, mulFit(cholInterval[i][p], cholInterval[i][p]))
-		}
-		if !finiteFit(pi) || pi.lo <= 1e-9 && pi.hi >= 1e-9 {
-			stable = false
 		}
 		if pivot <= 1e-9 {
 			continue
 		}
 		witness.Cholesky[i][len(kept)] = math.Sqrt(pivot)
-		if pi.lo > 0 {
-			cholInterval[i][len(kept)] = sqrtFit(pi)
-		} else {
-			stable = false
-		}
+		previous := kept
 		kept = append(kept, i)
-	}
-	if !slices.ContainsFunc(kept, func(j int) bool { return !mailboxSame(mu1[j], mu0[j]) }) {
-		return empty, false, false
-	}
-	for _, j := range kept {
-		if witness.ClassSum[1][j]*int64(witness.ClassCount[0]) == witness.ClassSum[0][j]*int64(witness.ClassCount[1]) {
-			continue
-		}
-		a := divFit(pointFit(float64(witness.ClassSum[1][j])), pointFit(float64(witness.ClassCount[1])))
-		b := divFit(pointFit(float64(witness.ClassSum[0][j])), pointFit(float64(witness.ClassCount[0])))
-		d := absFit(subFit(a, b))
-		aa, bb := absFit(a), absFit(b)
-		tol := mulFit(pointFit(1e-9), fitInterval{math.Max(aa.lo, bb.lo), math.Max(aa.hi, bb.hi)})
-		if !(d.hi <= tol.lo || d.lo > tol.hi) {
-			stable = false
+		if cap(previous) != cap(kept) {
+			clear(previous[:cap(previous)])
 		}
 	}
-	y := make([]float64, len(kept))
-	yIntervals := make([]fitInterval, len(kept))
+	if !slices.ContainsFunc(kept, func(j int) bool { return !mailboxSame(s.means[2][j], s.means[1][j]) }) {
+		return
+	}
+	work.y = make([]float64, len(kept))
+	y := work.y
 	for p, j := range kept {
-		v := (mu1[j] - mu0[j]) / witness.Scale[j]
-		difference := subFit(divFit(pointFit(float64(witness.ClassSum[1][j])), pointFit(float64(witness.ClassCount[1]))), divFit(pointFit(float64(witness.ClassSum[0][j])), pointFit(float64(witness.ClassCount[0]))))
-		if witness.ClassSum[1][j]*int64(witness.ClassCount[0]) == witness.ClassSum[0][j]*int64(witness.ClassCount[1]) {
-			difference = pointFit(0)
-		}
-		vi := divFit(difference, scaleInterval[j])
+		v := (s.means[2][j] - s.means[1][j]) / witness.Scale[j]
 		for r := range p {
 			v -= witness.Cholesky[j][r] * y[r]
-			vi = subFit(vi, mulFit(cholInterval[j][r], yIntervals[r]))
 		}
 		y[p] = v / witness.Cholesky[j][p]
-		yIntervals[p] = divFit(vi, cholInterval[j][p])
-		if !finiteFit(yIntervals[p]) {
-			stable = false
-		}
 	}
-	weights, center := make([]float64, width), make([]float64, width)
-	v := make([]float64, len(kept))
-	vIntervals := make([]fitInterval, len(kept))
+	result.Weights, result.Center = make([]float64, width), make([]float64, width)
+	work.v = make([]float64, len(kept))
+	v := work.v
 	for p := len(kept) - 1; p >= 0; p-- {
 		j := kept[p]
 		x := y[p]
-		xi := yIntervals[p]
 		for r := p + 1; r < len(kept); r++ {
 			x -= witness.Cholesky[kept[r]][p] * v[r]
-			xi = subFit(xi, mulFit(cholInterval[kept[r]][p], vIntervals[r]))
 		}
 		v[p] = x / witness.Cholesky[j][p]
-		vIntervals[p] = divFit(xi, cholInterval[j][p])
-		weights[j] = v[p] / witness.Scale[j]
-		if !finiteFit(divFit(vIntervals[p], scaleInterval[j])) {
-			stable = false
-		}
+		result.Weights[j] = v[p] / witness.Scale[j]
 	}
 	wd := 0.0
-	wdInterval := pointFit(0)
-	for p, x := range y {
+	for _, x := range y {
 		wd += x * x
-		wdInterval = addFit(wdInterval, squareFit(yIntervals[p]))
 	}
 	if !(wd > 0) || math.IsInf(wd, 0) {
-		return empty, false, false
-	}
-	if !finiteFit(wdInterval) || wdInterval.lo <= 0 {
-		stable = false
+		return
 	}
 	for j := range width {
-		center[j] = (mu1[j] + mu0[j]) / 2
+		result.Center[j] = (s.means[2][j] + s.means[1][j]) / 2
 		if !slices.Contains(kept, j) {
+			previous := witness.Unused
 			witness.Unused = append(witness.Unused, j)
+			if cap(previous) != cap(witness.Unused) {
+				clear(previous[:cap(previous)])
+			}
 		}
 	}
 	witness.Kept = slices.Clone(kept)
@@ -521,5 +522,10 @@ func checkMailboxFit(train [][]float64, truth []bool, witness *MailboxFitWitness
 			witness.Scatter[j][i] = witness.Scatter[i][j]
 		}
 	}
-	return metrics.Discriminant{Weights: weights, Center: center, Normalizer: wd, Kept: kept, Unused: slices.Clone(witness.Unused)}, stable, true
+	result.Normalizer, result.Kept, result.Unused = wd, kept, slices.Clone(witness.Unused)
+	status := certifyMailboxFit(train, truth, witness, s)
+	if status == fitProofInvalid {
+		return result, false, false
+	}
+	return result, status == fitProofStable, true
 }

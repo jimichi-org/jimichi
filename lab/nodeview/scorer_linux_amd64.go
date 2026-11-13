@@ -425,11 +425,28 @@ func (f *fixture) finishOne(ch *ownedChild) error {
 	if r.end() != nil || statusFrames != ch.statusConsumed || status != 0 || reason != ReasonNone {
 		return fail(ReasonIPC)
 	}
-	if e = waitFrames(f.ctx, &ch.viewFrames, views, ch.viewProgress, until); e != nil {
+	if ch.role >= roleTrainer && (views != 1 || truths != 0 || ch.counts != (Counts{})) {
+		return fail(ReasonIPC)
+	}
+	if ch.role >= roleTrainer {
+		e = f.waitFitResult(ch, until)
+	} else {
+		e = waitFrames(f.ctx, &ch.viewFrames, views, ch.viewProgress, until)
+	}
+	if e != nil {
 		return e
 	}
 	if e = waitFrames(f.ctx, &ch.truthFrames, truths, ch.truthProgress, until); e != nil {
 		return e
+	}
+	if ch.role >= roleTrainer {
+		ch.dataMu.Lock()
+		valid := validCommittedFitResult(ch)
+		readerErr := observedFitReaderError(ch)
+		ch.dataMu.Unlock()
+		if !valid || readerErr != nil {
+			return fail(ReasonIPC)
+		}
 	}
 	if ch.role == roleScorer {
 		if e = completePredictionMethods(&ch.predictions); e != nil {

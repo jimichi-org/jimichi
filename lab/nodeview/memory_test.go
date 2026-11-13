@@ -56,6 +56,10 @@ func TestMailboxControlErrorCachesPreserveFailureTypeAndOwnership(t *testing.T) 
 	if 1853247+owner != 1853343 || 2097152-(1853247+owner) != 243809 || 1615075+owner != 1615171 || 8388608-(1615075+owner) != 6773437 {
 		t.Fatal("scorer or fitter static owner lost its distinct fixed scope")
 	}
+	certificate, err := fitCertificateBytes()
+	if err != nil || certificate != 81920 || 1615075+uint64(owner)+certificate != 1697091 || 8388608-(1615075+uint64(owner)+certificate) != 6691517 {
+		t.Fatal("certificate omitted the current fitter baseline or its new fixed owner")
+	}
 	if 38*owner != 3648 || 22*owner != 2112 || 2*owner != 192 || 5*owner != 480 {
 		t.Fatal("simultaneous process-static owners were omitted or duplicated")
 	}

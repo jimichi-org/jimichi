@@ -35,7 +35,7 @@ func sourceAttemptCeiling() (uint32, error) {
 }
 
 func sourceReplayBackingBytes() (uint64, error) {
-	if runtime.Version() != "go1.27.3" || runtime.GOARCH != "amd64" || unsafe.Sizeof(int(0)) != 8 || unsafe.Sizeof(rand.Rand{}) != 48 || unsafe.Sizeof(sourceReplayStateLayout{}) != 4872 || unsafe.Sizeof(sourceReplayScratch{}) != 16 {
+	if runtime.Version() != "go1.27.4" || runtime.GOARCH != "amd64" || unsafe.Sizeof(int(0)) != 8 || unsafe.Sizeof(rand.Rand{}) != 48 || unsafe.Sizeof(sourceReplayStateLayout{}) != 4872 || unsafe.Sizeof(sourceReplayScratch{}) != 16 {
 		return 0, fail(ReasonUnsupported)
 	}
 	// rngSource is noscan class 5376; Rand and the owner fit their scan classes without a malloc header

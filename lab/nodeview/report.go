@@ -385,40 +385,76 @@ func loadFrozen(path string, p Plan) ([]FrozenModel, error) {
 	defer f.Close()
 	var models []FrozenModel
 	if strictJSON(f, &models) != nil {
+		for i := range models {
+			wipeMailboxTraining(&models[i].Training)
+		}
 		return nil, ErrInvalid
 	}
-	seen := map[string]bool{}
-	for _, m := range models {
-		key := m.Configuration + "/" + m.Population
-		if seen[key] || m.Schema != "jimichi-nodeview-model-v1" || !validateMailboxTraining(m.Training) || !m.Training.Releasable || m.TrainRevision != p.Revision || m.Suite != p.Suite || m.Features != featureVersion || m.TransformDigest != p.TransformDigest || !digestPattern.MatchString(m.Digest) {
-			return nil, ErrInvalid
+	if validateFrozenModels(models, &p) != nil {
+		for i := range models {
+			wipeMailboxTraining(&models[i].Training)
 		}
-		copyModel := m
-		copyModel.Digest = ""
-		b, e := json.Marshal(copyModel)
-		if e != nil || publicHash(b) != m.Digest {
-			return nil, ErrInvalid
-		}
-		found := false
-		for _, ref := range p.FrozenModels {
-			if ref.Configuration == m.Configuration && ref.Population == m.Population && ref.Digest == m.Digest {
-				found = true
-			}
-		}
-		if !found {
-			return nil, ErrInvalid
-		}
-		seen[key] = true
-	}
-	if len(models) != 8 {
 		return nil, ErrInvalid
-	}
-	for _, ref := range p.FrozenModels {
-		if !seen[ref.Configuration+"/"+ref.Population] {
-			return nil, ErrInvalid
-		}
 	}
 	return models, nil
+}
+
+func frozenModelMetadataValid(m *FrozenModel, p *Plan) bool {
+	if m == nil || p == nil || m.Schema != "jimichi-nodeview-model-v1" || !m.Training.Releasable || m.TrainRevision != p.Revision || m.Suite != p.Suite || m.Features != featureVersion || m.TransformDigest != p.TransformDigest || !digestPattern.MatchString(m.Digest) || m.Population != "request" && m.Population != "record" {
+		return false
+	}
+	known := false
+	for _, coordinate := range p.Configurations {
+		if coordinate.Population == "classifier" && coordinate.ID == m.Configuration {
+			known = true
+		}
+	}
+	if !known {
+		return false
+	}
+	matched := 0
+	for _, ref := range p.FrozenModels {
+		if ref.Configuration == m.Configuration && ref.Population == m.Population && ref.Digest == m.Digest {
+			matched++
+		}
+	}
+	return matched == 1
+}
+
+func validateFrozenModel(m *FrozenModel, p *Plan) error {
+	if !frozenModelMetadataValid(m, p) || !validateMailboxTraining(m.Training) {
+		return ErrInvalid
+	}
+	preimage := *m
+	preimage.Digest = ""
+	b, err := json.Marshal(preimage)
+	defer clear(b[:cap(b)])
+	if err != nil || publicHash(b) != m.Digest {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func validateFrozenModels(models []FrozenModel, p *Plan) error {
+	if p == nil || ValidatePlan(*p) != nil || !p.TrainingReady || len(p.FrozenModels) != 8 || len(models) != 8 {
+		return ErrInvalid
+	}
+	for i := range models {
+		for j := 0; j < i; j++ {
+			if models[i].Configuration == models[j].Configuration && models[i].Population == models[j].Population {
+				return ErrInvalid
+			}
+		}
+		if !frozenModelMetadataValid(&models[i], p) {
+			return ErrInvalid
+		}
+	}
+	for i := range models {
+		if validateFrozenModel(&models[i], p) != nil {
+			return ErrInvalid
+		}
+	}
+	return nil
 }
 
 func safeLoad() string {

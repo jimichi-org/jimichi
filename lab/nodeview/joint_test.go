@@ -67,11 +67,20 @@ func serializeJointTestReports(reports [2]Report) ([2]string, error) {
 }
 
 func makeJointTestReports() ([2]Report, error) {
+	scratchBudget := memoryBudget{limit: 81920}
+	scratch, err := acquireFitCertificate(scratchBudget.reserve)
+	if err != nil {
+		return [2]Report{}, err
+	}
+	defer func() {
+		scratch.close()
+		scratchBudget.release(81920)
+	}()
 	left, right, err := makePlanningTestPilots()
 	if err != nil {
 		return [2]Report{}, err
 	}
-	training := trainMailbox(mailboxTrainingFixture(), featureVersion, true, true)
+	training := trainMailbox(mailboxTrainingFixture(), featureVersion, true, true, scratch)
 	if !training.Releasable {
 		return [2]Report{}, fmt.Errorf("test model unavailable")
 	}
@@ -269,6 +278,7 @@ func TestJointTestReportsAreIndependent(t *testing.T) {
 }
 
 func TestJointReportClonePublicGraphKnownAnswer(t *testing.T) {
+	scratch := testFitCertificate(t)
 	plan := testNodeviewPlan(Collude)
 	plan.Configurations[0].ForeignPositions = []int{2}
 	plan.FrozenModels = []ModelReference{{"clone", "record", "digest"}}
@@ -279,7 +289,7 @@ func TestJointReportClonePublicGraphKnownAnswer(t *testing.T) {
 	input := Report{
 		Schema: reportSchema, Plan: plan,
 		Manifest: Manifest{BaseSeed: 1<<63 - 5, Resources: ResourcePoint{Scope: resourceScope, MaxRSS: &peak}},
-		Models:   []FrozenModel{{Digest: "clone-digest", Training: trainMailbox(mailboxTrainingFixture(), featureVersion, true, true)}},
+		Models:   []FrozenModel{{Digest: "clone-digest", Training: trainMailbox(mailboxTrainingFixture(), featureVersion, true, true, scratch)}},
 		Runs: []RunResult{{
 			Flags: []Reason{ReasonIncomplete}, RouteHistogram: []uint64{1, 2},
 			LinkingTimes: []LinkingTime{{Seconds: number(.125, ReasonNone)}, {Seconds: Number{Reason: ReasonIncomplete}, Censored: true}},
