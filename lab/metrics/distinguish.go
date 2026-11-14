@@ -6,16 +6,24 @@ import (
 	"sort"
 )
 
+type Discriminant struct {
+	Weights    []float64
+	Center     []float64
+	Normalizer float64
+	Kept       []int
+	Unused     []int
+}
+
 // total scatter, not within-class: the same direction as Fisher's when S_w is
 // invertible, and still defined when a combination of features is constant
 // within each training class and differs between them
-func DiscriminantScores(train [][]float64, truth []bool, test [][]float64) []float64 {
-	if len(train) == 0 || len(truth) != len(train) || len(test) == 0 {
-		return nil
+func FitDiscriminant(train [][]float64, truth []bool) (Discriminant, bool) {
+	if len(train) == 0 || len(truth) != len(train) {
+		return Discriminant{}, false
 	}
 	width := len(train[0])
-	if width == 0 || !finiteRows(train, width) || !finiteRows(test, width) {
-		return nil
+	if width == 0 || !finiteRows(train, width) {
+		return Discriminant{}, false
 	}
 	n1 := 0
 	for _, t := range truth {
@@ -25,7 +33,7 @@ func DiscriminantScores(train [][]float64, truth []bool, test [][]float64) []flo
 	}
 	n0 := len(train) - n1
 	if n1 == 0 || n0 == 0 {
-		return nil
+		return Discriminant{}, false
 	}
 
 	mu1, mu0 := make([]float64, width), make([]float64, width)
@@ -44,11 +52,11 @@ func DiscriminantScores(train [][]float64, truth []bool, test [][]float64) []flo
 	}
 	fit, ok := fitColumns(train)
 	if !ok {
-		return nil
+		return Discriminant{}, false
 	}
 	scale, chol, kept := fit.scale, fit.chol, fit.kept
 	if !slices.ContainsFunc(kept, func(j int) bool { return !same(mu1[j], mu0[j]) }) {
-		return nil
+		return Discriminant{}, false
 	}
 
 	y := make([]float64, len(kept))
@@ -75,6 +83,52 @@ func DiscriminantScores(train [][]float64, truth []bool, test [][]float64) []flo
 		wd += x * x
 	}
 	if !(wd > 0) || math.IsInf(wd, 0) {
+		return Discriminant{}, false
+	}
+	center := make([]float64, width)
+	unused := []int{}
+	for j := range width {
+		center[j] = (mu1[j] + mu0[j]) / 2
+		if !slices.Contains(kept, j) {
+			unused = append(unused, j)
+			// unused columns never entered the legacy score, even if their midpoint overflowed
+			if math.IsNaN(center[j]) || math.IsInf(center[j], 0) {
+				center[j] = 0
+			}
+		}
+	}
+	model := Discriminant{Weights: w, Center: center, Normalizer: wd, Kept: kept, Unused: unused}
+	if !model.valid() {
+		return Discriminant{}, false
+	}
+	return model, true
+}
+
+func (d Discriminant) valid() bool {
+	width := len(d.Weights)
+	if width == 0 || len(d.Center) != width || !finite(d.Weights) || !finite(d.Center) || !(d.Normalizer > 0) || math.IsInf(d.Normalizer, 0) || len(d.Kept) == 0 || len(d.Kept)+len(d.Unused) != width {
+		return false
+	}
+	seen := make([]bool, width)
+	for _, columns := range [][]int{d.Kept, d.Unused} {
+		previous := -1
+		for _, j := range columns {
+			if j < 0 || j >= width || j <= previous || seen[j] {
+				return false
+			}
+			seen[j], previous = true, j
+		}
+	}
+	for _, j := range d.Unused {
+		if d.Weights[j] != 0 {
+			return false
+		}
+	}
+	return slices.ContainsFunc(d.Kept, func(j int) bool { return d.Weights[j] != 0 })
+}
+
+func (d Discriminant) Scores(test [][]float64) []float64 {
+	if !d.valid() || len(test) == 0 || !finiteRows(test, len(d.Weights)) {
 		return nil
 	}
 
@@ -83,16 +137,25 @@ func DiscriminantScores(train [][]float64, truth []bool, test [][]float64) []flo
 	scores := make([]float64, len(test))
 	for t, row := range test {
 		s := 0.0
-		for _, j := range kept {
-			s += w[j] * (row[j] - (mu1[j]+mu0[j])/2)
+		for _, j := range d.Kept {
+			s += d.Weights[j] * (row[j] - d.Center[j])
 		}
-		s /= wd
+		s /= d.Normalizer
 		if math.IsNaN(s) || math.IsInf(s, 0) {
+			clear(scores)
 			return nil
 		}
 		scores[t] = s
 	}
 	return scores
+}
+
+func DiscriminantScores(train [][]float64, truth []bool, test [][]float64) []float64 {
+	fit, ok := FitDiscriminant(train, truth)
+	if !ok {
+		return nil
+	}
+	return fit.Scores(test)
 }
 
 // the column rule of DiscriminantScores, which depends on the training rows

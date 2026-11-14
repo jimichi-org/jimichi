@@ -51,7 +51,7 @@ func syntheticChild(args []string) (bool, int) {
 		protection.Zero = true
 		protection.ProtectedAllocationsLocked = pointer(true)
 	}
-	if w.send("configured", configuredData{GOOS: "linux", GOARCH: "amd64", Runtime: "go1.27.3", BinaryDigest: "synthetic-digest", BinaryDigestSuite: cfg.Suite, Protection: protection}) != nil {
+	if w.send("configured", configuredData{GOOS: "linux", GOARCH: "amd64", Runtime: "go1.27.4", BinaryDigest: "synthetic-digest", BinaryDigestSuite: cfg.Suite, Protection: protection}) != nil {
 		return true, 7
 	}
 	fail := func(class string, cleanup bool) int {

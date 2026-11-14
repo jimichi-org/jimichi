@@ -39,7 +39,9 @@ jobs:
       # linux is the target platform: this is where mlock and dump prevention
       # actually run, so the race detector and the real secmem path go together
       - name: unit and integration tests
-        run: go test -race -count=1 ./...
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          go test -race -count=1 ./...
       - name: optimized six-flow GOST timing-mark integration
         run: |
           log="$RUNNER_TEMP/mark-gost-optimized.log"
@@ -50,6 +52,125 @@ jobs:
           grep -Fq -- '--- PASS: TestMarkLiveGOSTSixFlowsOptimized/gost-sham (' "$log"
       - name: standard handshake vectors
         run: go test -race -count=1 -tags noisevectors ./noise ./crypto/noisevector
+      - name: optimized controlled-node observation integration
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          log="$RUNNER_TEMP/nodeview-optimized.log"
+          go test -count=1 -timeout 20m -v -run '^TestNodeViewLiveOptimized$' ./lab/nodeview > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          ! grep -Eq -- '--- SKIP: TestNodeViewLiveOptimized|warning: no tests to run' "$log"
+          test "$(grep -c -- '--- PASS: TestNodeViewLiveOptimized' "$log")" -eq 19
+          grep -Fq -- '--- PASS: TestNodeViewLiveOptimized (' "$log"
+          for suite in c25519 gost; do
+            grep -Fq -- "--- PASS: TestNodeViewLiveOptimized/$suite (" "$log"
+            for case in one-role two-edge two-adjacent-first two-adjacent-last trusted-admission foreign-peer foreign-mailbox mailbox-records; do
+              grep -Fq -- "--- PASS: TestNodeViewLiveOptimized/$suite/$case (" "$log"
+            done
+          done
+      - name: optimized mailbox defaults controls
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          log="$RUNNER_TEMP/nodeview-defaults-optimized.log"
+          expected="$RUNNER_TEMP/nodeview-defaults-expected.txt"
+          go test -count=1 -timeout 20m -v -run '^TestNodeViewMailboxControlsOptimized$/(c25519|gost)/(defaults-P0|defaults-P33250000)$' ./lab/nodeview > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          ! grep -Eq -- '--- (FAIL|SKIP):|warning: no tests to run' "$log"
+          {
+            printf '%s\n' TestNodeViewMailboxControlsOptimized
+            for suite in c25519 gost; do
+              printf '%s\n' "TestNodeViewMailboxControlsOptimized/$suite"
+              for case in defaults-P0 defaults-P33250000; do
+                printf '%s\n' "TestNodeViewMailboxControlsOptimized/$suite/$case"
+              done
+            done
+          } | sort > "$expected"
+          test "$(wc -l < "$expected")" -eq 7
+          for event in RUN PASS; do
+            awk -v event="$event" '($1 == "===" && $2 == "RUN" && event == "RUN") || ($1 == "---" && $2 == "PASS:" && event == "PASS") { print $3 }' "$log" | sort > "$expected.actual"
+            cmp "$expected" "$expected.actual"
+          done
+      - name: optimized mailbox boundary controls
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          log="$RUNNER_TEMP/nodeview-boundaries-optimized.log"
+          expected="$RUNNER_TEMP/nodeview-boundaries-expected.txt"
+          go test -count=1 -timeout 20m -v -run '^TestNodeViewMailboxControlsOptimized$/(c25519|gost)/(boundary-rebuild|boundary-pre-session)$' ./lab/nodeview > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          ! grep -Eq -- '--- (FAIL|SKIP):|warning: no tests to run' "$log"
+          {
+            printf '%s\n' TestNodeViewMailboxControlsOptimized
+            for suite in c25519 gost; do
+              printf '%s\n' "TestNodeViewMailboxControlsOptimized/$suite"
+              for case in boundary-rebuild boundary-pre-session; do
+                printf '%s\n' "TestNodeViewMailboxControlsOptimized/$suite/$case"
+              done
+            done
+          } | sort > "$expected"
+          test "$(wc -l < "$expected")" -eq 7
+          for event in RUN PASS; do
+            awk -v event="$event" '($1 == "===" && $2 == "RUN" && event == "RUN") || ($1 == "---" && $2 == "PASS:" && event == "PASS") { print $3 }' "$log" | sort > "$expected.actual"
+            cmp "$expected" "$expected.actual"
+          done
+      - name: mailbox fit certificate known answers
+        run: |
+          log="$RUNNER_TEMP/fit-certificate-known.log"
+          expected="$RUNNER_TEMP/fit-certificate-known-expected.txt"
+          root=TestMailboxFitCertificateKnownAnswers
+          go test -count=1 -timeout 20m -v -run "^${root}$" ./lab/nodeview > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          ! grep -Eq -- '--- (FAIL|SKIP):|warning: no tests to run' "$log"
+          {
+            printf '%s\n' "$root"
+            for case in small-dependent large-dependent general-68572 general-68574 cutoff-full-row independent-columns fallback cleanup-suppression; do
+              printf '%s\n' "$root/$case"
+            done
+          } | sort > "$expected"
+          test "$(wc -l < "$expected")" -eq 9
+          for event in RUN PASS; do
+            awk -v event="$event" '($1 == "===" && $2 == "RUN" && event == "RUN") || ($1 == "---" && $2 == "PASS:" && event == "PASS") { print $3 }' "$log" | sort > "$expected.actual"
+            cmp "$expected" "$expected.actual"
+          done
+      - name: optimized extracted mailbox fit certification
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          log="$RUNNER_TEMP/fit-certificate-optimized.log"
+          expected="$RUNNER_TEMP/fit-certificate-optimized-expected.txt"
+          root=TestMailboxFitCertificateOptimized
+          go test -count=1 -timeout 20m -v -run "^${root}$" ./lab/nodeview > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          ! grep -Eq -- '--- (FAIL|SKIP):|warning: no tests to run' "$log"
+          {
+            printf '%s\n' "$root"
+            for suite in c25519 gost; do
+              printf '%s\n' "$root/$suite"
+              for coordinate in mail-P0-C0 mail-P0-C1 mail-P33250000-C0 mail-P33250000-C1; do
+                printf '%s\n' "$root/$suite/$coordinate"
+                for population in request record; do
+                  printf '%s\n' "$root/$suite/$coordinate/$population"
+                done
+              done
+            done
+          } | sort > "$expected"
+          test "$(wc -l < "$expected")" -eq 27
+          for event in RUN PASS; do
+            awk -v event="$event" '($1 == "===" && $2 == "RUN" && event == "RUN") || ($1 == "---" && $2 == "PASS:" && event == "PASS") { print $3 }' "$log" | sort > "$expected.actual"
+            cmp "$expected" "$expected.actual"
+          done
+      - name: optimized maximum-row mailbox fit certification
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          log="$RUNNER_TEMP/fit-certificate-maxrows.log"
+          expected="$RUNNER_TEMP/fit-certificate-maxrows-expected.txt"
+          root=TestMailboxFitCertificateMaxRowsOptimized
+          go test -count=1 -timeout 20m -v -run "^${root}$" ./lab/nodeview > "$log" || { cat "$log"; exit 1; }
+          cat "$log"
+          ! grep -Eq -- '--- (FAIL|SKIP):|warning: no tests to run' "$log"
+          printf '%s\n' "$root" "$root/c25519" "$root/gost" | sort > "$expected"
+          test "$(wc -l < "$expected")" -eq 3
+          for event in RUN PASS; do
+            awk -v event="$event" '($1 == "===" && $2 == "RUN" && event == "RUN") || ($1 == "---" && $2 == "PASS:" && event == "PASS") { print $3 }' "$log" | sort > "$expected.actual"
+            cmp "$expected" "$expected.actual"
+          done
       - name: optimized cooperative key memory integration
         run: |
           log="$RUNNER_TEMP/keymem-optimized.log"

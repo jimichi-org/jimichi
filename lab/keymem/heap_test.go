@@ -46,7 +46,7 @@ func heapStart() heapFixture {
 	f := heapFixture(heapHeader)
 	f.u(6, 0, 8, 0, math.MaxUint64)
 	f.text("amd64")
-	f.text("go1.27.3")
+	f.text("go1.27.4")
 	f.u(1)
 	return f
 }
@@ -73,7 +73,7 @@ func TestHeapMinimalKnownAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// one 32-byte marker object, no key occurrences; amd64 and go1.27.3 contribute 5+8 unscored bytes
+	// one 32-byte marker object, no key occurrences; amd64 and go1.27.4 contribute 5+8 unscored bytes
 	if !r.Complete || !r.PositiveOK || !r.NegativeOK || r.Matches != [3]uint64{} || r.ObjectRecords != 1 || r.ObjectBytes != 32 || r.UnscoredBlobBytes != 13 || r.StreamBytes != uint64(len(f)) {
 		t.Fatalf("incorrect minimal-stream aggregate: %+v", r)
 	}
@@ -257,7 +257,7 @@ func TestHeapInvalidGrammar(t *testing.T) {
 		cases[tt.name] = f
 	}
 	cases["wrong-architecture"] = heapFixture(bytes.Replace(validHeap(), []byte("amd64"), []byte("arm64"), 1))
-	cases["wrong-runtime"] = heapFixture(bytes.Replace(validHeap(), []byte("go1.27.3"), []byte("go1.27.4"), 1))
+	cases["wrong-runtime"] = heapFixture(bytes.Replace(validHeap(), []byte("go1.27.4"), []byte("go1.27.3"), 1))
 	f := heapStart()
 	f.u(1, math.MaxUint64, 1, 0)
 	cases["object-range-overflow"] = f
