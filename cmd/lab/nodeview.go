@@ -132,6 +132,9 @@ func nodeviewPlanningEstimate(w io.Writer, c nodeview.Config) error {
 	if c.Suite.String() != "c25519" || c.Phase != nodeview.Pilot && c.Phase != nodeview.Primary {
 		return nil
 	}
+	if err := nodeview.CheckPlanningEstimateResources(); err != nil {
+		return err
+	}
 	record := struct {
 		Schema   string                 `json:"schema"`
 		Set      nodeview.Set           `json:"set"`

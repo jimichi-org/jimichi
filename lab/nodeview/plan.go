@@ -365,17 +365,24 @@ func strictJSON(r io.Reader, v any) error {
 	return nil
 }
 func loadPlan(path string, c Config, tree, binary string) (Plan, error) {
-	f, e := os.Open(path)
-	if e != nil {
-		return Plan{}, ErrInvalid
+	if e := outputEarlyEntry(); e != nil {
+		return Plan{}, e
 	}
-	defer f.Close()
-	st, e := f.Stat()
-	if e != nil || !st.Mode().IsRegular() {
-		return Plan{}, ErrInvalid
-	}
+	return loadPlanPrepared(path, c, tree, binary)
+}
+
+func loadPlanPrepared(path string, c Config, tree, binary string) (Plan, error) {
 	var p Plan
-	if strictJSON(f, &p) != nil || p.Digest == "" || ValidatePlan(p) != nil {
+	if e := outputLoadInput(path, &p, true); e != nil {
+		return Plan{}, e
+	}
+	if p.Digest == "" {
+		return Plan{}, ErrInvalid
+	}
+	if e := outputPlanPreparation(&p); e != nil {
+		return Plan{}, e
+	}
+	if ValidatePlan(p) != nil {
 		return Plan{}, ErrInvalid
 	}
 	if p.Revision != c.Revision || p.Tree != tree || p.BinarySHA256 != binary || p.Suite != c.Suite.String() || p.Set != c.Set {
@@ -395,6 +402,9 @@ func loadPlan(path string, c Config, tree, binary string) (Plan, error) {
 var buildRevision, buildTree string
 
 func sourceIdentity(c Config) (string, string, error) {
+	if e := outputEarlyEntry(); e != nil {
+		return "", "", e
+	}
 	rev := buildRevision
 	tree := buildTree
 	if b, ok := debug.ReadBuildInfo(); ok {
@@ -420,8 +430,11 @@ func sourceIdentity(c Config) (string, string, error) {
 	if e != nil {
 		return "", "", ErrInvalid
 	}
-	b, e := os.ReadFile(exe)
+	b, e := outputExecutableBytes(exe)
 	if e != nil {
+		if outputSelectedBackend() {
+			return "", "", e
+		}
 		return "", "", ErrInvalid
 	}
 	return tree, publicHash(b), nil
@@ -460,6 +473,16 @@ func compactStrings(a []string) []string {
 }
 
 func validatePlanning(ctx context.Context, p Plan) error {
+	if e := outputEarlyEntry(); e != nil {
+		return e
+	}
+	return validatePlanningPrepared(ctx, p)
+}
+
+func validatePlanningPrepared(ctx context.Context, p Plan) error {
+	if e := outputPlanPreparation(&p); e != nil {
+		return e
+	}
 	if e := ValidatePlan(p); e != nil {
 		return e
 	}

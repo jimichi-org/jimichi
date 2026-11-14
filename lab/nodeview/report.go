@@ -40,6 +40,24 @@ type Inference struct {
 }
 
 func (r Report) validate() error {
+	if e := outputEarlyEntry(); e != nil {
+		return e
+	}
+	return r.validateEntry()
+}
+
+func (r Report) validateEntry() error {
+	if !outputSelectedBackend() {
+		return r.validatePrepared(nil)
+	}
+	prepared, e := prepareReportEmission(&r, false, false)
+	if e != nil {
+		return e
+	}
+	return r.validatePrepared(&prepared)
+}
+
+func (r Report) validatePrepared(prepared *outputEmission) error {
 	if r.Schema != reportSchema || ValidatePlan(r.Plan) != nil || r.Manifest.Revision != r.Plan.Revision || r.Manifest.Tree != r.Plan.Tree || r.Manifest.BinarySHA256 != r.Plan.BinarySHA256 || r.Manifest.Suite != r.Plan.Suite {
 		return ErrInvalid
 	}
@@ -190,8 +208,17 @@ func (r Report) validate() error {
 			}
 		}
 	}
-	if err := guardReportEmission(r); err != nil {
-		return err
+	var emissionErr error
+	if outputSelectedBackend() {
+		emissionErr = guardPreparedEmission(prepared)
+	} else {
+		emissionErr = guardReportEmission(r)
+	}
+	if emissionErr != nil {
+		return emissionErr
+	}
+	if outputSelectedBackend() {
+		return outputStream(io.Discard, &r, false)
 	}
 	if _, e := json.Marshal(r); e != nil {
 		return ErrInvalid
@@ -220,8 +247,27 @@ func validReason(r Reason) bool {
 }
 
 func WriteReport(w io.Writer, r Report) error {
-	if e := r.validate(); e != nil {
+	if e := outputEarlyEntry(); e != nil {
 		return e
+	}
+	return writeReport(w, r)
+}
+
+func writeReport(w io.Writer, r Report) error {
+	var prepared outputEmission
+	if outputSelectedBackend() {
+		file, ok := w.(*os.File)
+		var e error
+		prepared, e = prepareReportEmission(&r, !ok || file == nil, true)
+		if e != nil {
+			return e
+		}
+	}
+	if e := r.validatePrepared(&prepared); e != nil {
+		return e
+	}
+	if file, ok := w.(*os.File); outputSelectedBackend() && ok && file != nil {
+		return outputStream(file, &r, false)
 	}
 	b, e := json.Marshal(r)
 	if e != nil {
@@ -232,7 +278,22 @@ func WriteReport(w io.Writer, r Report) error {
 }
 
 func PublishReport(root string, r Report) (string, error) {
-	if e := r.validate(); e != nil {
+	if e := outputEarlyEntry(); e != nil {
+		return "", e
+	}
+	return publishReport(root, r)
+}
+
+func publishReport(root string, r Report) (string, error) {
+	var prepared outputEmission
+	if outputSelectedBackend() {
+		var e error
+		prepared, e = prepareReportEmission(&r, false, true)
+		if e != nil {
+			return "", e
+		}
+	}
+	if e := r.validatePrepared(&prepared); e != nil {
 		return "", e
 	}
 	base, e := filepath.Abs(root)
@@ -254,65 +315,7 @@ func PublishReport(root string, r Report) (string, error) {
 		return "", fail(ReasonIncomplete)
 	}
 	write := func(name string, value any, jsonl bool) error {
-		var body []byte
-		if jsonl {
-			switch rows := value.(type) {
-			case []RunResult:
-				for _, row := range rows {
-					b, e := json.Marshal(row)
-					if e != nil {
-						return ErrInvalid
-					}
-					body = append(body, b...)
-					body = append(body, '\n')
-				}
-			case []RankAudit:
-				for _, row := range rows {
-					b, e := json.Marshal(row)
-					if e != nil {
-						return ErrInvalid
-					}
-					body = append(body, b...)
-					body = append(body, '\n')
-				}
-			default:
-				return ErrInvalid
-			}
-		} else {
-			var e error
-			body, e = json.Marshal(value)
-			if e != nil {
-				return ErrInvalid
-			}
-			body = append(body, '\n')
-		}
-		temp := filepath.Join(dir, "."+name+"."+suffix)
-		file, e := os.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if e != nil {
-			return fail(ReasonIncomplete)
-		}
-		ok := false
-		defer func() {
-			file.Close()
-			if !ok {
-				os.Remove(temp)
-			}
-		}()
-		if e = writePublic(file, body); e != nil {
-			return e
-		}
-		if file.Sync() != nil || file.Close() != nil {
-			return fail(ReasonIncomplete)
-		}
-		target := filepath.Join(dir, name)
-		if _, e = os.Lstat(target); !os.IsNotExist(e) {
-			return fail(ReasonIncomplete)
-		}
-		if os.Rename(temp, target) != nil {
-			return fail(ReasonIncomplete)
-		}
-		ok = true
-		return nil
+		return writeReportFile(dir, suffix, name, value, jsonl)
 	}
 	if e = write("plan.json", r.Plan, false); e != nil {
 		return dir, e
@@ -341,6 +344,77 @@ func PublishReport(root string, r Report) (string, error) {
 		return dir, e
 	}
 	return dir, nil
+}
+
+func writeReportFile(dir, suffix, name string, value any, jsonl bool) error {
+	var body []byte
+	if outputSelectedBackend() {
+		if e := outputStream(io.Discard, value, jsonl); e != nil {
+			return e
+		}
+	} else if jsonl {
+		switch rows := value.(type) {
+		case []RunResult:
+			for _, row := range rows {
+				b, e := json.Marshal(row)
+				if e != nil {
+					return ErrInvalid
+				}
+				body = append(body, b...)
+				body = append(body, '\n')
+			}
+		case []RankAudit:
+			for _, row := range rows {
+				b, e := json.Marshal(row)
+				if e != nil {
+					return ErrInvalid
+				}
+				body = append(body, b...)
+				body = append(body, '\n')
+			}
+		default:
+			return ErrInvalid
+		}
+	} else {
+		var e error
+		body, e = json.Marshal(value)
+		if e != nil {
+			return ErrInvalid
+		}
+		body = append(body, '\n')
+	}
+	temp := filepath.Join(dir, "."+name+"."+suffix)
+	file, e := os.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if e != nil {
+		return fail(ReasonIncomplete)
+	}
+	ok := false
+	defer func() {
+		file.Close()
+		if !ok {
+			os.Remove(temp)
+		}
+	}()
+	if outputSelectedBackend() {
+		e = outputStream(file, value, jsonl)
+	} else {
+		e = writePublic(file, body)
+	}
+	if e != nil {
+		return e
+	}
+	if file.Sync() != nil || file.Close() != nil {
+		return fail(ReasonIncomplete)
+	}
+	target := filepath.Join(dir, name)
+	if _, e = os.Lstat(target); !os.IsNotExist(e) {
+		return fail(ReasonIncomplete)
+	}
+	if os.Rename(temp, target) != nil {
+		return fail(ReasonIncomplete)
+	}
+	ok = true
+	return nil
 }
 
 func writePublic(w io.Writer, b []byte) error {
@@ -374,6 +448,16 @@ func rejectSymlinks(path string) error {
 }
 
 func loadFrozen(path string, p Plan) ([]FrozenModel, error) {
+	if e := outputEarlyEntry(); e != nil {
+		return nil, e
+	}
+	return loadFrozenPrepared(path, p)
+}
+
+func loadFrozenPrepared(path string, p Plan) ([]FrozenModel, error) {
+	if e := outputPlanPreparation(&p); e != nil {
+		return nil, e
+	}
 	if ValidatePlan(p) != nil || !p.TrainingReady || len(p.FrozenModels) != 8 {
 		return nil, ErrInvalid
 	}
@@ -381,23 +465,24 @@ func loadFrozen(path string, p Plan) ([]FrozenModel, error) {
 	if e != nil {
 		return nil, e
 	}
-	f, e := os.Open(file)
-	if e != nil {
-		return nil, ErrInvalid
-	}
-	defer f.Close()
 	var models []FrozenModel
-	if strictJSON(f, &models) != nil {
+	if e = outputLoadInput(file, &models, false); e != nil {
 		for i := range models {
 			wipeMailboxTraining(&models[i].Training)
 		}
-		return nil, ErrInvalid
+		return nil, e
 	}
-	if validateFrozenModels(models, &p) != nil {
+	if e = outputFrozenPreparation(&p, models); e != nil {
 		for i := range models {
 			wipeMailboxTraining(&models[i].Training)
 		}
-		return nil, ErrInvalid
+		return nil, e
+	}
+	if e = validateFrozenModels(models, &p); e != nil {
+		for i := range models {
+			wipeMailboxTraining(&models[i].Training)
+		}
+		return nil, e
 	}
 	return models, nil
 }
@@ -463,6 +548,11 @@ func validateFrozenModel(m *FrozenModel, p *Plan) error {
 }
 
 func validateFrozenModels(models []FrozenModel, p *Plan) error {
+	if p != nil {
+		if e := outputPlanPreparation(p); e != nil {
+			return e
+		}
+	}
 	if p == nil || ValidatePlan(*p) != nil || !p.TrainingReady || len(p.FrozenModels) != 8 || len(models) != 8 {
 		return ErrInvalid
 	}

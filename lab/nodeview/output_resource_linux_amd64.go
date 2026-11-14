@@ -24,6 +24,19 @@ func taskOutputBound(task executionTask, models bool) outputTaskBound {
 }
 
 func prepareOutputResources(c Config, p Plan, tasks []executionTask) (Config, error) {
+	if outputSelectedBackend() {
+		if e := outputAdmit(65536); e != nil {
+			return c, e
+		}
+		a := &outputArithmetic{}
+		before := a.add(65536, outputRoundBytes(a.mul(uint64(len(tasks)), uint64(unsafe.Sizeof(outputTaskBound{}))), a), a.mul(24, outputPlanHeaders(&p, a)))
+		if a.err != nil {
+			return c, a.err
+		}
+		if e := outputAdmit(before); e != nil {
+			return c, e
+		}
+	}
 	bounds := make([]outputTaskBound, len(tasks))
 	for i, task := range tasks {
 		bounds[i] = taskOutputBound(task, p.TrainingReady)

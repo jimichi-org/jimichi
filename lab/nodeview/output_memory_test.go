@@ -192,7 +192,7 @@ func TestOutputMemoryEmitterWorstStringsAndNumbers(t *testing.T) {
 		t.Fatalf("escaped string/integer/float JSON exceeds bound: encoded %d, bound %d, err %v/%v", len(encoded), size.json, err, a.err)
 	}
 	p, err := actualOutputMemory(r)
-	if err != nil || p.EmitterBytes < 3*outputMarshalAllocation(size, uint64(unsafe.Sizeof(Report{})), a) {
+	if err != nil || p.ReportLimitBytes < 3*outputMarshalAllocation(size, uint64(unsafe.Sizeof(Report{})), a) || p.LegacyTotalBytes != p.RetainedBytes+p.ReportLimitBytes {
 		t.Fatal("whole-report marshal growth/copies omitted")
 	}
 	bad := math.Inf(1)
