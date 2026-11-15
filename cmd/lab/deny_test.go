@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -445,16 +446,16 @@ func TestDenyVerdictFollowsTheRun(t *testing.T) {
 	}
 	for _, c := range []struct {
 		name  string
-		steps func() denySteps
+		steps func(denySteps) denySteps
 		field string
 		want  any
 	}{
-		{"a forgery with the sender's key", func() denySteps {
+		{"a forgery with the sender's key", func(s denySteps) denySteps {
 			var mu sync.Mutex
 			var sender *e2e.Identity
-			s := scenarioSteps
+			identities := s.identities
 			s.identities = func(p jcrypto.CryptoProvider, role e2e.Role) (*e2e.Identity, *e2e.Identity, error) {
-				snd, rc, err := scenario.Identities(p, role)
+				snd, rc, err := identities(p, role)
 				mu.Lock()
 				sender = snd
 				mu.Unlock()
@@ -467,15 +468,14 @@ func TestDenyVerdictFollowsTheRun(t *testing.T) {
 			}
 			return s
 		}, "sender_private_key_used", true},
-		{"identities the spy never drew", func() denySteps {
-			s := scenarioSteps
+		{"identities the spy never drew", func(s denySteps) denySteps {
+			identities := s.identities
 			s.identities = func(p jcrypto.CryptoProvider, role e2e.Role) (*e2e.Identity, *e2e.Identity, error) {
-				return scenario.Identities(p.(*scenario.Spy).CryptoProvider, role)
+				return identities(p.(*scenario.Spy).CryptoProvider, role)
 			}
 			return s
 		}, "recipient_private_key_seen_in_forgery", false},
-		{"a genuine record changed", func() denySteps {
-			s := scenarioSteps
+		{"a genuine record changed", func(s denySteps) denySteps {
 			s.genuine = func(p jcrypto.CryptoProvider, snd, rc *e2e.Identity, lines []scenario.Line) (*scenario.Transcript, *scenario.Evidence, error) {
 				tr, ev, err := scenario.Genuine(p, snd, rc, lines)
 				if err == nil {
@@ -485,8 +485,7 @@ func TestDenyVerdictFollowsTheRun(t *testing.T) {
 			}
 			return s
 		}, "genuine_verified", false},
-		{"a forged record changed", func() denySteps {
-			s := scenarioSteps
+		{"a forged record changed", func(s denySteps) denySteps {
 			s.forge = func(p jcrypto.CryptoProvider, rc *e2e.Identity, snd e2e.Card, lines []scenario.Line) (*scenario.Transcript, *scenario.Evidence, error) {
 				tr, ev, err := scenario.Forge(p, rc, snd, lines)
 				if err == nil {
@@ -496,8 +495,7 @@ func TestDenyVerdictFollowsTheRun(t *testing.T) {
 			}
 			return s
 		}, "forged_verified", false},
-		{"a forgery of other lines", func() denySteps {
-			s := scenarioSteps
+		{"a forgery of other lines", func(s denySteps) denySteps {
 			s.forge = func(p jcrypto.CryptoProvider, rc *e2e.Identity, snd e2e.Card, lines []scenario.Line) (*scenario.Transcript, *scenario.Evidence, error) {
 				other := slices.Clone(lines)
 				other[0].Body = []byte("the meeting is off")
@@ -505,8 +503,7 @@ func TestDenyVerdictFollowsTheRun(t *testing.T) {
 			}
 			return s
 		}, "structure_equal", false},
-		{"a control with the recipient's own key", func() denySteps {
-			s := scenarioSteps
+		{"a control with the recipient's own key", func(s denySteps) denySteps {
 			s.control = func(p jcrypto.CryptoProvider, rc *e2e.Identity, snd e2e.Card, lines []scenario.Line) (*scenario.ControlRun, error) {
 				tr, ev, err := scenario.Forge(p, rc, snd, lines)
 				if err != nil {
@@ -517,10 +514,10 @@ func TestDenyVerdictFollowsTheRun(t *testing.T) {
 			}
 			return s
 		}, "control_rejected", false},
-		{"a control refused by its name", func() denySteps {
-			s := scenarioSteps
+		{"a control refused by its name", func(s denySteps) denySteps {
+			control := s.control
 			s.control = func(p jcrypto.CryptoProvider, rc *e2e.Identity, snd e2e.Card, lines []scenario.Line) (*scenario.ControlRun, error) {
-				run, err := scenario.Control(p, rc, snd, lines)
+				run, err := control(p, rc, snd, lines)
 				if err != nil {
 					return nil, err
 				}
@@ -531,9 +528,12 @@ func TestDenyVerdictFollowsTheRun(t *testing.T) {
 		}, "control_refused_at_record", json.Number("-1")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			fixture := newDenyVerdictFixture(t)
 			dir := t.TempDir()
 			var out, errOut bytes.Buffer
-			if status := deny(c.steps(), "c25519", "abc", dir, &out, &errOut); status != 1 {
+			status := deny(c.steps(fixture.steps()), "c25519", "abc", dir, &out, &errOut)
+			fixture.close()
+			if status != 1 {
 				t.Fatalf("status %d, stderr %q", status, errOut.String())
 			}
 			if strings.Count(errOut.String(), "deny: recipient ") != 2 {
@@ -564,6 +564,409 @@ func TestDenyVerdictFollowsTheRun(t *testing.T) {
 				}
 			}
 		})
+	}
+	exercisePreparedDenyControls(t)
+}
+
+type denyFixturePair struct {
+	private *secmem.Buffer
+	public  []byte
+}
+
+type denyFixtureDraws struct {
+	jcrypto.CryptoProvider
+	pairs                     []*denyFixturePair
+	next, requests            int
+	issued                    []*secmem.Buffer
+	fallback                  bool
+	failure                   error
+	failureAt                 int
+	agreements, noiseDH, aead int
+}
+
+func (d *denyFixtureDraws) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
+	d.requests++
+	if d.failure != nil && d.next == d.failureAt {
+		return nil, nil, d.failure
+	}
+	if d.next < len(d.pairs) {
+		pair := d.pairs[d.next]
+		if pair.private == nil {
+			return nil, nil, errors.New("deny fixture: pair already transferred")
+		}
+		private := pair.private
+		pair.private = nil
+		d.next++
+		d.issued = append(d.issued, private)
+		return private, bytes.Clone(pair.public), nil
+	}
+	if !d.fallback {
+		return nil, nil, errors.New("deny fixture: unexpected candidate draw")
+	}
+	if len(d.issued) != 1 || d.issued[0].Bytes() == nil {
+		return nil, nil, errors.New("deny fixture: reserved control candidate was rejected")
+	}
+	return d.CryptoProvider.GenerateEphemeral()
+}
+
+func (d *denyFixtureDraws) Agree(private *secmem.Buffer, public []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	d.agreements++
+	return d.CryptoProvider.Agree(private, public, ctx)
+}
+
+func (d *denyFixtureDraws) NoiseDH(private *secmem.Buffer, public []byte) (*secmem.Buffer, error) {
+	d.noiseDH++
+	return d.CryptoProvider.NoiseDH(private, public)
+}
+
+func (d *denyFixtureDraws) NewAEAD(key *secmem.Buffer) (jcrypto.AEAD, error) {
+	d.aead++
+	return d.CryptoProvider.NewAEAD(key)
+}
+
+type denyFixtureRole struct {
+	role              e2e.Role
+	sender, recipient e2e.Card
+	candidates        []*denyFixturePair
+	controlCalled     bool
+	controlDraws      *denyFixtureDraws
+	controlError      error
+}
+
+type denyVerdictFixture struct {
+	t              *testing.T
+	pairs          []*denyFixturePair
+	observed       []*secmem.Buffer
+	roles          map[*e2e.Identity]*denyFixtureRole
+	failingRole    e2e.Role
+	candidateError error
+	closed         sync.Once
+	done           bool
+}
+
+func newDenyVerdictFixture(t *testing.T) *denyVerdictFixture {
+	t.Helper()
+	f := &denyVerdictFixture{t: t, roles: make(map[*e2e.Identity]*denyFixtureRole)}
+	t.Cleanup(f.close)
+	return f
+}
+
+func (f *denyVerdictFixture) releaseOwned() {
+	for _, pair := range f.pairs {
+		if pair.private != nil {
+			pair.private.Release()
+			pair.private = nil
+		}
+	}
+}
+
+func (f *denyVerdictFixture) close() {
+	f.closed.Do(func() {
+		f.done = true
+		f.releaseOwned()
+		for _, buffer := range f.observed {
+			if buffer.Bytes() != nil {
+				f.t.Error("deny fixture: transferred key survived its production owner")
+			}
+		}
+	})
+}
+
+func (f *denyVerdictFixture) steps() denySteps {
+	steps := scenarioSteps
+	steps.identities, steps.control = f.identities, f.control
+	return steps
+}
+
+func (f *denyVerdictFixture) drawPairs(p jcrypto.CryptoProvider, count int) ([]*denyFixturePair, error) {
+	pairs := make([]*denyFixturePair, 0, count)
+	for range count {
+		private, public, err := p.GenerateEphemeral()
+		if private != nil {
+			pair := &denyFixturePair{private: private, public: bytes.Clone(public)}
+			f.pairs = append(f.pairs, pair)
+			f.observed = append(f.observed, private)
+			pairs = append(pairs, pair)
+		}
+		if err != nil {
+			f.releaseOwned()
+			return nil, err
+		}
+		if private == nil || private.Len() == 0 || len(public) != p.HandshakeInfo().PublicKeySize {
+			f.releaseOwned()
+			return nil, errors.New("deny fixture: invalid generated pair")
+		}
+	}
+	slices.SortFunc(pairs, func(a, b *denyFixturePair) int { return bytes.Compare(a.public, b.public) })
+	for i := 1; i < len(pairs); i++ {
+		if bytes.Equal(pairs[i-1].public, pairs[i].public) {
+			f.releaseOwned()
+			return nil, errors.New("deny fixture: duplicate generated public key")
+		}
+	}
+	return pairs, nil
+}
+
+func (f *denyVerdictFixture) identities(p jcrypto.CryptoProvider, role e2e.Role) (*e2e.Identity, *e2e.Identity, error) {
+	if f.done || p == nil || p.Suite() != jcrypto.SuiteC25519 && p.Suite() != jcrypto.SuiteGOST || role != e2e.RoleInitiator && role != e2e.RoleResponder {
+		return nil, nil, errors.New("deny fixture: unsupported identity request")
+	}
+	for _, previous := range f.roles {
+		if previous.role == role {
+			return nil, nil, errors.New("deny fixture: duplicate role request")
+		}
+	}
+	count := 3
+	if role == f.failingRole {
+		count = 66
+		if f.candidateError != nil {
+			count = 4
+		}
+	}
+	pairs, err := f.drawPairs(p, count)
+	if err != nil {
+		return nil, nil, err
+	}
+	var sender, recipient *denyFixturePair
+	var candidates []*denyFixturePair
+	if role == f.failingRole {
+		if role == e2e.RoleInitiator {
+			recipient, sender, candidates = pairs[0], pairs[1], pairs[2:]
+		} else {
+			recipient, sender, candidates = pairs[count-1], pairs[count-2], pairs[:count-2]
+		}
+	} else {
+		sender, recipient, candidates = pairs[2], pairs[0], pairs[1:2]
+		if role == e2e.RoleResponder {
+			sender, recipient = pairs[0], pairs[2]
+		}
+	}
+	draws := &denyFixtureDraws{CryptoProvider: p, pairs: []*denyFixturePair{sender, recipient}}
+	s, r, err := scenario.Identities(draws, role)
+	if err != nil {
+		if s != nil {
+			s.Close()
+		}
+		if r != nil {
+			r.Close()
+		}
+		f.releaseOwned()
+		return nil, nil, err
+	}
+	if s == nil || r == nil || draws.requests != 2 || draws.next != 2 {
+		if s != nil {
+			s.Close()
+		}
+		if r != nil {
+			r.Close()
+		}
+		f.releaseOwned()
+		return nil, nil, errors.New("deny fixture: identities did not consume one actual pair")
+	}
+	senderCard, recipientCard := s.Card(), r.Card()
+	if !bytes.Equal(senderCard.Static, sender.public) || !bytes.Equal(recipientCard.Static, recipient.public) || senderCard.Suite != p.Suite() || recipientCard.Suite != p.Suite() || senderCard.Mailbox != scenario.Mailbox || recipientCard.Mailbox != scenario.Mailbox || senderCard.Queue != [e2e.QueueSize]byte{1} || recipientCard.Queue != [e2e.QueueSize]byte{2} || (bytes.Compare(recipientCard.Static, senderCard.Static) < 0) != (role == e2e.RoleInitiator) {
+		s.Close()
+		r.Close()
+		f.releaseOwned()
+		return nil, nil, errors.New("deny fixture: identities changed their actual role or cards")
+	}
+	f.roles[r] = &denyFixtureRole{role: role, sender: senderCard, recipient: recipientCard, candidates: candidates}
+	return s, r, nil
+}
+
+func (f *denyVerdictFixture) control(p jcrypto.CryptoProvider, recipient *e2e.Identity, sender e2e.Card, lines []scenario.Line) (*scenario.ControlRun, error) {
+	record := f.roles[recipient]
+	if f.done || p == nil || record == nil || record.controlCalled || !bytes.Equal(record.sender.Bytes(), sender.Bytes()) || !bytes.Equal(record.recipient.Bytes(), recipient.Card().Bytes()) {
+		return nil, errors.New("deny fixture: unexpected control request")
+	}
+	record.controlCalled = true
+	failing := record.role == f.failingRole
+	for _, candidate := range record.candidates {
+		initiates := bytes.Compare(candidate.public, sender.Static) < 0
+		if bytes.Equal(candidate.public, recipient.Card().Static) || bytes.Equal(candidate.public, sender.Static) || (initiates == (record.role == e2e.RoleInitiator)) == failing {
+			return nil, errors.New("deny fixture: candidate has the wrong prepared role")
+		}
+	}
+	draws := &denyFixtureDraws{CryptoProvider: p, pairs: record.candidates, fallback: !failing}
+	if failing && f.candidateError != nil {
+		draws.failure, draws.failureAt = f.candidateError, 2
+	}
+	record.controlDraws = draws
+	run, err := scenario.Control(draws, recipient, sender, lines)
+	record.controlError = err
+	if failing {
+		validError := err != nil && err.Error() == "scenario: no fresh key took the recipient's role"
+		want := 64
+		if f.candidateError != nil {
+			validError, want = errors.Is(err, f.candidateError), 2
+		}
+		requests := want
+		if f.candidateError != nil {
+			requests++
+		}
+		valid := run == nil && validError && !errors.Is(err, scenario.ErrMismatch) && scenario.RefusedAt(err) == -1 && draws.requests == requests && draws.next == want && len(draws.issued) == want && draws.agreements == 0 && draws.noiseDH == 0 && draws.aead == 0
+		for _, buffer := range draws.issued {
+			valid = valid && buffer.Bytes() == nil
+		}
+		if run != nil {
+			run.Close()
+		}
+		if !valid {
+			return nil, errors.New("deny fixture: bounded control failure did not follow its real path")
+		}
+		return nil, err
+	}
+	if err != nil {
+		if run != nil {
+			run.Close()
+		}
+		return nil, err
+	}
+	if run == nil || run.Stand == nil || run.Transcript == nil || run.Evidence == nil || draws.next != 1 || len(draws.issued) != 1 {
+		if run != nil {
+			run.Close()
+		}
+		return nil, errors.New("deny fixture: control did not use its single reserved pair")
+	}
+	stand, own := run.Stand.Card(), recipient.Card()
+	if !bytes.Equal(stand.Static, record.candidates[0].public) || stand.Suite != own.Suite || stand.Mailbox != own.Mailbox || stand.Queue != own.Queue || (bytes.Compare(stand.Static, sender.Static) < 0) != (record.role == e2e.RoleInitiator) || !bytes.Equal(run.Transcript.Sender.Bytes(), sender.Bytes()) || !bytes.Equal(run.Transcript.Recipient.Bytes(), stand.Bytes()) {
+		run.Close()
+		return nil, errors.New("deny fixture: actual control stand or transcript changed")
+	}
+	if _, err := scenario.Verify(p, run.Stand, run.Evidence, run.Transcript); err != nil {
+		run.Close()
+		return nil, err
+	}
+	named := *run.Transcript
+	named.Recipient = own
+	_, refusal := scenario.Verify(p, recipient, run.Evidence, &named)
+	if !errors.Is(refusal, scenario.ErrMismatch) || scenario.RefusedAt(refusal) != 0 || !run.Rejected() || run.RefusedAt() != 0 {
+		run.Close()
+		return nil, errors.New("deny fixture: control did not fail at the actual recipient record")
+	}
+	return run, nil
+}
+
+type denyFixtureGenerationFailure struct {
+	jcrypto.CryptoProvider
+	calls int
+	cause error
+}
+
+func (p *denyFixtureGenerationFailure) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
+	p.calls++
+	if p.calls == 2 {
+		return nil, nil, p.cause
+	}
+	return p.CryptoProvider.GenerateEphemeral()
+}
+
+func exercisePreparedDenyControls(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"c25519", "gost"} {
+		fixture := newDenyVerdictFixture(t)
+		dir := t.TempDir()
+		var out, errOut bytes.Buffer
+		status := deny(fixture.steps(), name, "abc", dir, &out, &errOut)
+		fixture.close()
+		if status != 0 || errOut.Len() != 0 || len(fixture.roles) != 2 {
+			t.Fatalf("prepared %s deny: status %d, stderr %q", name, status, errOut.String())
+		}
+		names := reports(t, dir)
+		if len(names) != 1 {
+			t.Fatalf("prepared %s reports %v", name, names)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, names[0]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var report denyReport
+		if err := json.Unmarshal(raw, &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Set != "deny" || report.Suite != name || report.Rev != "abc" || report.Claim != denyClaim || report.Assumption != denyAssumption || len(report.Roles) != 2 || report.Roles[0].RecipientRole != "initiator" || report.Roles[1].RecipientRole != "responder" {
+			t.Fatal("prepared deny report lost its actual head or roles")
+		}
+		for _, row := range report.Roles {
+			if err := row.holds(); err != nil || row.ControlRefusedAt != 0 || row.SenderMessagesInGenuine != 2 || row.SenderMessagesInForged != 2 {
+				t.Fatalf("prepared %s/%s verdict: %v", name, row.RecipientRole, err)
+			}
+			checkDenyRecords(t, row)
+		}
+		for _, role := range []e2e.Role{e2e.RoleInitiator, e2e.RoleResponder} {
+			exerciseDenyControlFailure(t, name, role, nil)
+		}
+		exerciseDenyControlFailure(t, name, e2e.RoleResponder, errors.New("deny fixture: candidate generation failed"))
+		chosen, err := suite.Parse(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base, err := suite.New(chosen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bootstrap := newDenyVerdictFixture(t)
+		cause := errors.New("deny fixture: bootstrap generation failed")
+		failed := &denyFixtureGenerationFailure{CryptoProvider: base, cause: cause}
+		sender, recipient, err := bootstrap.identities(failed, e2e.RoleInitiator)
+		if sender != nil || recipient != nil || !errors.Is(err, cause) || failed.calls != 2 || len(bootstrap.observed) != 1 || bootstrap.observed[0].Bytes() != nil {
+			if sender != nil {
+				sender.Close()
+			}
+			if recipient != nil {
+				recipient.Close()
+			}
+			t.Fatal("bootstrap failure did not release its partial real draw")
+		}
+		bootstrap.close()
+		unused := newDenyVerdictFixture(t)
+		sender, recipient, err = unused.identities(base, e2e.RoleInitiator)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reserved := unused.roles[recipient].candidates[0].private
+		if reserved == nil || reserved.Bytes() == nil {
+			t.Fatal("unused real control reserve was not fixture-owned")
+		}
+		sender.Close()
+		recipient.Close()
+		unused.close()
+		if reserved.Bytes() != nil {
+			t.Fatal("unused real control reserve survived fixture cleanup")
+		}
+	}
+}
+
+func exerciseDenyControlFailure(t *testing.T, name string, role e2e.Role, cause error) {
+	t.Helper()
+	fixture := newDenyVerdictFixture(t)
+	fixture.failingRole, fixture.candidateError = role, cause
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	status := deny(fixture.steps(), name, "abc", dir, &out, &errOut)
+	fixture.close()
+	wantError := "scenario: no fresh key took the recipient's role"
+	if cause != nil {
+		wantError = cause.Error()
+	}
+	wantRoles := 1
+	if role == e2e.RoleResponder {
+		wantRoles = 2
+	}
+	if status != 1 || out.Len() != 0 || errOut.String() != fmt.Sprintf("deny: recipient %s: %s\n", role.String(), wantError) || len(reports(t, dir)) != 0 || len(fixture.roles) != wantRoles {
+		t.Fatalf("prepared %s/%s setup failure: status %d, stdout %q, stderr %q", name, role, status, out.String(), errOut.String())
+	}
+	for _, record := range fixture.roles {
+		if !record.controlCalled || record.controlDraws == nil {
+			t.Fatal("prepared failure skipped its actual control")
+		}
+		if record.role == role {
+			if record.controlError == nil || record.controlError.Error() != wantError {
+				t.Fatal("prepared failure replaced its actual control error")
+			}
+		} else if record.controlError != nil {
+			t.Fatal("an earlier genuine control failed before the intended role")
+		}
 	}
 }
 

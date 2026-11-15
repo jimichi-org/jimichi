@@ -178,14 +178,7 @@ func TestRegistrationModelRequiresFrozenStructuralPredecessor(t *testing.T) {
 func TestRegistrationCombinesAllPairedPositions(t *testing.T) {
 	t.Parallel()
 	left, right := planningTestPilots(t)
-	leftBefore, rightBefore := clonePlanningPlan(left), clonePlanningPlan(right)
-	a, b, err := CombinePilotPlans(context.Background(), left, right)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(left, leftBefore) || !reflect.DeepEqual(right, rightBefore) {
-		t.Fatal("combination mutated a pilot input")
-	}
+	a, b := seedRegistrationTestReadyPilots(t)
 	// all five paired differences are zero; centering and the registered shift
 	// make every synthetic difference +.05, so p=2/2^30 and all 10000 pass
 	z := math.Sqrt2 * math.Erfinv(.95)
@@ -233,11 +226,8 @@ func TestRegistrationCombinesAllPairedPositions(t *testing.T) {
 
 func TestRegistrationKeepsBoundaryCoordinatesStructuralOnly(t *testing.T) {
 	t.Parallel()
-	left, right := planningTestPilots(t)
-	_, combined, err := CombinePilotPlans(context.Background(), left, right)
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, right := planningTestPilots(t)
+	_, combined := seedRegistrationTestReadyPilots(t)
 	seen := 0
 	first := -1
 	for i, row := range combined.Configurations {

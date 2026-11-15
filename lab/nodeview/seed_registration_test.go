@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -21,28 +22,78 @@ var seedRegistrationTestFixture = sync.OnceValues(func() ([2]string, error) {
 	if err != nil {
 		return [2]string{}, err
 	}
-	left, right, err = CombinePilotPlans(context.Background(), left, right)
+	inputs, err := serializeJointTestReports([2]Report{{Plan: left}, {Plan: right}})
 	if err != nil {
 		return [2]string{}, err
 	}
-	return serializeJointTestReports([2]Report{{Plan: left}, {Plan: right}})
+	var before [2]Plan
+	for i := range before {
+		report, err := decodeJointTestReport(inputs[i])
+		if err != nil {
+			return [2]string{}, err
+		}
+		before[i] = report.Plan
+	}
+	a, b, err := CombinePilotPlans(context.Background(), left, right)
+	if err != nil {
+		return [2]string{}, err
+	}
+	if !reflect.DeepEqual(left, before[0]) || !reflect.DeepEqual(right, before[1]) {
+		return [2]string{}, fmt.Errorf("plain combination changed an actual pilot input")
+	}
+	if len(a.Powers) == 0 || len(a.Powers[0].PilotX) == 0 || len(b.Powers) == 0 || len(b.Powers[0].PilotX) == 0 || len(a.PowerSearch) == 0 || len(a.PowerSearch[0].Search) == 0 || len(b.PowerSearch) == 0 || len(b.PowerSearch[0].Search) == 0 || len(a.FrozenModels) == 0 || len(b.FrozenModels) == 0 || len(a.Configurations) == 0 || len(a.Configurations[0].Controlled) == 0 || len(left.Configurations) == 0 || len(left.Configurations[0].Controlled) == 0 {
+		return [2]string{}, fmt.Errorf("plain combination lacks its actual backing probes")
+	}
+	bBefore, err := json.Marshal(Report{Plan: b})
+	if err != nil {
+		return [2]string{}, err
+	}
+	pilot, search, model, controlled := a.Powers[0].PilotX[0], a.PowerSearch[0].Search[0].N, a.FrozenModels[0].Digest, a.Configurations[0].Controlled[0]
+	changedModel := strings.Repeat("f", 64)
+	if pilot == 1 || search == 512 || model == changedModel || controlled == 4 {
+		return [2]string{}, fmt.Errorf("plain combination backing probes are ineffective")
+	}
+	a.Powers[0].PilotX[0] = 1
+	a.PowerSearch[0].Search[0].N = 512
+	a.FrozenModels[0].Digest = changedModel
+	a.Configurations[0].Controlled[0] = 4
+	bAfter, err := json.Marshal(Report{Plan: b})
+	if err != nil {
+		return [2]string{}, err
+	}
+	if b.Powers[0].PilotX[0] != 0 || b.PowerSearch[0].Search[0].N != 30 || reflect.DeepEqual(a.FrozenModels, b.FrozenModels) || left.Configurations[0].Controlled[0] != 0 || !bytes.Equal(bBefore, bAfter) || !reflect.DeepEqual(left, before[0]) || !reflect.DeepEqual(right, before[1]) {
+		return [2]string{}, fmt.Errorf("actual plain successors or inputs share mutable backing")
+	}
+	a.Powers[0].PilotX[0] = pilot
+	a.PowerSearch[0].Search[0].N = search
+	a.FrozenModels[0].Digest = model
+	a.Configurations[0].Controlled[0] = controlled
+	return serializeJointTestReports([2]Report{{Plan: a}, {Plan: b}})
 })
 
 func seedRegistrationTestReadyPilots(t *testing.T) (Plan, Plan) {
 	t.Helper()
-	fixture, err := seedRegistrationTestFixture()
+	left, right, err := decodeSeedRegistrationTestReadyPilots()
 	if err != nil {
 		t.Fatal(err)
+	}
+	return left, right
+}
+
+func decodeSeedRegistrationTestReadyPilots() (Plan, Plan, error) {
+	fixture, err := seedRegistrationTestFixture()
+	if err != nil {
+		return Plan{}, Plan{}, err
 	}
 	var plans [2]Plan
 	for i := range plans {
 		report, err := decodeJointTestReport(fixture[i])
 		if err != nil {
-			t.Fatal(err)
+			return Plan{}, Plan{}, err
 		}
 		plans[i] = report.Plan
 	}
-	return plans[0], plans[1]
+	return plans[0], plans[1], nil
 }
 
 func TestSeedRegistrationTestReadyPilotsAreIndependent(t *testing.T) {
@@ -105,6 +156,57 @@ func TestSeedRegistrationTestReadyPilotsAreIndependent(t *testing.T) {
 	freshA, freshB := seedRegistrationTestReadyPilots(t)
 	jointTestCheckSnapshot(t, Report{Plan: freshA}, fixture[0])
 	jointTestCheckSnapshot(t, Report{Plan: freshB}, fixture[1])
+	type decoded struct {
+		plans [2]Plan
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan decoded, 2)
+	var readers sync.WaitGroup
+	readers.Add(2)
+	for range 2 {
+		go func() {
+			defer readers.Done()
+			<-start
+			left, right, err := decodeSeedRegistrationTestReadyPilots()
+			results <- decoded{[2]Plan{left, right}, err}
+		}()
+	}
+	close(start)
+	readers.Wait()
+	close(results)
+	var copies [][2]Plan
+	for result := range results {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		copies = append(copies, result.plans)
+	}
+	if len(copies) != 2 {
+		t.Fatal("concurrent fixture readers did not both finish")
+	}
+	for _, pair := range copies {
+		for i, plan := range pair {
+			jointTestCheckSnapshot(t, Report{Plan: plan}, fixture[i])
+		}
+	}
+	mutate(&copies[0][0])
+	jointTestCheckSnapshot(t, Report{Plan: copies[0][1]}, fixture[1])
+	for i, plan := range copies[1] {
+		jointTestCheckSnapshot(t, Report{Plan: plan}, fixture[i])
+	}
+	mutate(&copies[0][1])
+	for i, plan := range copies[1] {
+		jointTestCheckSnapshot(t, Report{Plan: plan}, fixture[i])
+	}
+	mutate(&copies[1][0])
+	jointTestCheckSnapshot(t, Report{Plan: copies[1][1]}, fixture[1])
+	mutate(&copies[1][1])
+	jointTestCheckSnapshot(t, Report{Plan: freshA}, fixture[0])
+	jointTestCheckSnapshot(t, Report{Plan: freshB}, fixture[1])
+	lastA, lastB := seedRegistrationTestReadyPilots(t)
+	jointTestCheckSnapshot(t, Report{Plan: lastA}, fixture[0])
+	jointTestCheckSnapshot(t, Report{Plan: lastB}, fixture[1])
 }
 
 func TestMainSeedCommitmentKnownInputAndHash(t *testing.T) {
