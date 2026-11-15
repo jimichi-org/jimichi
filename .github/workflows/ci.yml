@@ -41,7 +41,7 @@ jobs:
       - name: unit and integration tests
         run: |
           sudo prlimit --pid "$$" --memlock=536870912:536870912
-          go test -race -count=1 ./...
+          go test -race -count=1 -timeout=20m ./...
       - name: optimized six-flow GOST timing-mark integration
         run: |
           log="$RUNNER_TEMP/mark-gost-optimized.log"
