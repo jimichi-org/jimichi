@@ -29,6 +29,7 @@ func TestNodeViewLiveOptimized(t *testing.T) {
 					c := Config{Set: Collude, Phase: Structural, Suite: suite, Seed: 117, Revision: strings.Repeat("1", 40)}
 					row := Coordinate{ID: "node-F5-L0", Topology: "echo", Trust: "trusted", Population: "link", Controlled: []int{0, 1}, Placement: "edges", Setup: "concurrent", Mode: "immediate", N: 5, H: 3, Flows: 5, Settings: echoSettings(0)}
 					task := executionTask{coordinate: row, missing: 2}
+					var primaryTrustTasks []executionTask
 					switch name {
 					case "one-role":
 						task.coordinate.Controlled = []int{0}
@@ -48,6 +49,7 @@ func TestNodeViewLiveOptimized(t *testing.T) {
 						task.routes = drawRoutes(c, task.coordinate, 32, 0)
 						task.structural = true
 					case "foreign-peer":
+						primaryTrustTasks = assertPrimaryTrustTaskSelection(t, suite)
 						c.Set = Compromise
 						for _, registered := range canonicalCoordinates(Compromise) {
 							if registered.ID == "trust-peer-honest-k1-m2" {
@@ -149,9 +151,119 @@ func TestNodeViewLiveOptimized(t *testing.T) {
 							t.Fatal("evaluation retained training rows or unjoined fixture ownership")
 						}
 					}
+					if name == "foreign-peer" && suite == jcrypto.SuiteGOST {
+						for i := range audit {
+							wipeRankAudit(&audit[i])
+						}
+						audit = nil
+						for i := range training {
+							training[i].wipe()
+						}
+						training = nil
+						cancel()
+						for _, primaryTask := range primaryTrustTasks {
+							exerciseGOSTPrimaryOrphan(t, primaryTask)
+						}
+					}
 				})
 			}
 		})
+	}
+}
+
+func assertPrimaryTrustTaskSelection(t *testing.T, suite jcrypto.Suite) []executionTask {
+	t.Helper()
+	c := Config{Set: Compromise, Phase: Primary, Suite: suite, Seed: 117, Revision: strings.Repeat("1", 40)}
+	p := defaultPlan(c, c.Revision, strings.Repeat("0", 64))
+	tasks := registeredTasks(c, p)
+	if c.Phase != Primary || p.Phase != Primary {
+		t.Fatal("task enumeration changed the actual Primary phase")
+	}
+	if suite == jcrypto.SuiteC25519 {
+		var counts [6]int
+		for _, task := range tasks {
+			if !task.structural || task.membership || len(task.routes) != 0 || len(task.foreign) != 0 || task.plannedSides != 32 {
+				t.Fatal("ordinary c255 Primary task recipe changed")
+			}
+			switch task.coordinate.ID {
+			case "E1":
+				counts[0]++
+			case "E2":
+				counts[1]++
+			case "H1":
+				counts[2]++
+			case "H2":
+				counts[3]++
+			case "M1":
+				counts[4]++
+			case "M2":
+				counts[5]++
+			default:
+				t.Fatal("finite trust task entered c255 Primary")
+			}
+		}
+		if counts != [6]int{64, 64, 64, 64, 1, 64} {
+			t.Fatal("ordinary c255 Primary tasks were dropped or replaced")
+		}
+		return nil
+	}
+	if suite != jcrypto.SuiteGOST || len(tasks) != 33 {
+		t.Fatal("GOST descriptive Primary task inventory changed")
+	}
+	wantRoutes := registeredOrphanRoutesKnownAnswer()
+	var selected []executionTask
+	opportunities := 0
+	for _, task := range tasks {
+		if task.membership {
+			opportunities++
+		} else {
+			opportunities += len(task.routes)
+		}
+		if task.coordinate.ID != "trust-peer-honest-k1-m1" && task.coordinate.ID != "trust-peer-honest-k1-m2" {
+			continue
+		}
+		missing := uint8(1)
+		if task.coordinate.ID == "trust-peer-honest-k1-m2" {
+			missing = 2
+		}
+		if !task.structural || task.membership || task.repeat != 0 || task.plannedSides != 0 || task.missing != missing || task.coordinate.Missing != missing || len(task.foreign) != 1 || task.foreign[0] != 0 || len(task.routes) != len(wantRoutes) || !registeredOrphan(c, task.coordinate) {
+			t.Fatal("GOST Primary orphan task lost its registered finite recipe")
+		}
+		for i, route := range task.routes {
+			if route != wantRoutes[i] {
+				t.Fatal("GOST Primary orphan target order changed")
+			}
+		}
+		selected = append(selected, task)
+	}
+	if opportunities != 673 || len(selected) != 2 || selected[0].coordinate.ID != "trust-peer-honest-k1-m1" || selected[1].coordinate.ID != "trust-peer-honest-k1-m2" {
+		t.Fatal("GOST Primary orphan tasks are missing, duplicated or reordered")
+	}
+	return selected
+}
+
+func exerciseGOSTPrimaryOrphan(t *testing.T, task executionTask) {
+	t.Helper()
+	c := Config{Set: Compromise, Phase: Primary, Suite: jcrypto.SuiteGOST, Seed: 117, Revision: strings.Repeat("1", 40)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	result, audit, training, err := executeTask(ctx, c, task, nil)
+	defer func() {
+		for i := range audit {
+			wipeRankAudit(&audit[i])
+		}
+		for i := range training {
+			training[i].wipe()
+		}
+	}()
+	if err != nil {
+		t.Fatalf("GOST Primary %s execution: %v", task.coordinate.ID, err)
+	}
+	if result.Configuration != task.coordinate.ID || result.Phase != Primary || len(result.Flags) != 0 || result.Counts.Planned != 12 || result.Counts.Attempted != 12 || result.Counts.Refused != 3 || result.Counts.SetupFailed != 0 || result.Counts.Established != 9 || result.Counts.PreflightOK != 9 || result.Counts.MessageBearing != 8 || result.MeasuredMessages != 8 || result.NoPartner != 1 || result.Counts.Missing != 1 {
+		t.Fatalf("GOST Primary %s changed the registered orphan lifecycle: phase=%s flags=%v counts=%+v no_partner=%d measured=%d", task.coordinate.ID, result.Phase, result.Flags, result.Counts, result.NoPartner, result.MeasuredMessages)
+	}
+	if len(training) != 0 || quarantinedFixtures.Load() != 0 {
+		t.Fatal("GOST Primary orphan retained training or unjoined fixture ownership")
 	}
 }
 
