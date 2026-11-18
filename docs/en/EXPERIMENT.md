@@ -329,13 +329,10 @@ be reconstructed. Conditional echo latency does not establish unconditional serv
 
 ### Block 3. Node compromise, adversary A4
 
-Status: earlier evidence covers chain sampling (`cmd/lab -set paths`) and the echo trust boundary
-with one second-CA node described below. Metrics have tests with hand-computed answers. A separate
-`lab/nodeview` harness defines actual-node observation in the `compromise`, `collude` and `mailbox`
-sets. Their full empirical series is not published here; route sampling, the mathematical model
-and the earlier trust test do not replace it
-([#117](https://github.com/jimichi-org/jimichi/issues/117)). Replay and tampering have relay and
-client tests but do not belong to this passive-observation series.
+[Recorded results](#recorded-controlled-node-results) cover the registered `compromise`,
+`collude` and `mailbox` observations ([#117](https://github.com/jimichi-org/jimichi/issues/117)).
+Earlier chain sampling and the echo trust-boundary test remain separate evidence below.
+Relay and client tests cover replay and tampering outside the passive-observation series.
 
 | Scenario | Metric |
 |---|---|
@@ -523,8 +520,9 @@ comparisons for two periods and two distinguishers. Margin 0.05, family alpha 0.
 are unchanged. For the model, an initial minimum of 2048 attempted slots per nontrivial row is
 raised by sample-size and exact Wilson-power calculations; differences require five separate
 pilots and at least 30 primary runs per point. Five mailbox training runs enter neither pilot nor
-primary data. Difference planning searches every n = 30..512 using exact Wilcoxon with 10000
-simulations per n; normal approximation is forbidden. GOST executes separate descriptive checks,
+primary data. Difference planning searches n in ascending order from 30 to 512, stopping at the
+first n that meets the power threshold. Each evaluated n uses exact Wilcoxon with 10000
+simulations. GOST executes separate descriptive checks,
 with neither transferred training direction nor cross-suite equivalence inference.
 
 `train`, `pilot` and `primary` require a saved sealed plan bound to current source and binary.
@@ -543,6 +541,51 @@ null. No extra attempts replace failed slots to reach a success target. Incomple
 insufficient support, unresolved power or resource
 cost stop progression to primary collection. An unfavorable AUC can be an honest result; omission
 of a mandatory scenario cannot complete the block.
+
+#### Recorded controlled-node results
+
+The v0.4.0 evidence uses two separate experimental series. Each has its own verified plans,
+registrations and optimized binary. The common build profile is Go 1.27.4, Linux/amd64 v1,
+CGO disabled and default JSONv2. The runs used protected local processes on isolated loopback.
+
+- c25519 commit `ee804c87049d793a2fa68e82f9591782e066f762`, tree
+  `1d78a5b542d7c7966d92eb37e91c3738891fb241`, collector SHA-256
+  `9892992991f62b3cb980f904695f844da99ec7eae29c93714555e46189c81c48`,
+  operator SHA-256 `9bf3648105361cb45cf73c63acc786e0d2acbe7936ebd7995d61de90ba6e4bb8`.
+  All six original registrations completed before that study's first Primary. The released
+  c25519 measurements retain the original Structural, Train, Pilot, Combine and Primary
+  ancestry. The single c25519 Joint used its original full Collude and Mailbox Primary reports
+  and their corresponding Primary plans.
+- GOST commit `8a7b140d39f4f23c2faa7205d3b2cdae17df8508`, tree
+  `1e63839b6193d111d5f79f1edc90354bd988cb6e`, collector SHA-256
+  `fcd547b1be7179a59014e11e3fdb40f10089736e55c26a51b8189fafe962ea76`,
+  operator SHA-256 `7365403c2b395283334ed1c86db989403e6aa91fa171b8653a4acdaf65660926`.
+  This series contains three Structural sets, one Mailbox Train that releases all eight
+  models, three registrations before its first Primary, and three Primary sets. The c25519
+  Joint ran after these three GOST Primary sets. Its inputs stayed within the c25519 series.
+
+The shared validation image has SHA-256
+`0fbc5be78038de98e609acbb35823f8153f1778ac3624d4c20bf449f304dde1f`.
+The empirical units and timings belong to the respective binaries and workloads.
+
+| Suite | Primary set | Runs | Planned units |
+|---|---|---:|---:|
+| c25519 | Compromise | 321 | 10272 |
+| c25519 | Collude | 270 | 3150 |
+| c25519 | Mailbox | 120 | 1920 |
+| GOST | Compromise | 33 | 673 |
+| GOST | Collude | 27 | 216 |
+| GOST | Mailbox | 20 | 320 |
+
+For c25519 Compromise, each of the 13 model claims used 2048 eligible units. All Bonferroni
+intervals fit the registered margin of ±0.05. The 13 paired Joint positions used 30 pairs each.
+Holm adjustment at family alpha 0.05 rejected six of the ten nondegenerate comparisons.
+Three comparisons were degenerate. A cutoff with no rejection provides no equivalence result.
+
+The two declared GOST Compromise cases without a partner remain in accounting. GOST provides
+descriptive results and keeps 13 model and 13 difference positions with `null/unsupported`.
+The results use voluntary observations of registered participants and declared workloads.
+Load was recorded and the effect of load was outside the experiment.
 
 #### Earlier sampling and model implementation
 
@@ -1335,12 +1378,12 @@ comparison will be made: the conditions differ, and that will be stated.
 
 1. A live message through three nodes. The panel of what each node learns is planned with the
    dashboard ([#21](https://github.com/jimichi-org/jimichi/issues/21)).
-2. The observer: the linking attack runs without protection and with each measure in turn. Cover
-   traffic on top of the payload is not expected to lower its AUC: in the preliminary series it
-   stayed at 1.000 with cover, and nodes sending on their own clocks lowered it to medians of
-   0.44-0.67 against 0.94-1.00 in the other rows of the README table; these runs cannot show that
-   it is at chance ([README](../../README.md)). A live view of the attack result is planned with
-   the dashboard ([#21](https://github.com/jimichi-org/jimichi/issues/21)).
+2. The observer compares the baseline and the registered measures. In the passive series,
+   cover on top kept the AUC median at 1.000. With relay clocks the medians were 0.434-0.566
+   across both windows. These are descriptive results from five runs per configuration.
+   [README](../../README.md). A live view is planned with the dashboard
+   ([#21](https://github.com/jimichi-org/jimichi/issues/21)).
+
 3. The bandwidth multiplier against AUC curve. The published figure has no intervals; confidence
    intervals across runs are planned with the full series
    ([#23](https://github.com/jimichi-org/jimichi/issues/23)).

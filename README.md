@@ -39,12 +39,16 @@ better one for the observer. Chance is AUC 0.5 and top-1 10%.
 
 | Set | What varies | Revision | Flows | Relays | Runs per point | Windows |
 |---|---|---|---|---|---|---|
-| main | `none`, cover on top (`add-*`), a constant rate at the client (`fixed-*`) | 2078098 | 10 | 3 | 5 x 30 s | 10 ms, 100 ms |
-| rates | `none`, a constant rate at the client by period (`fixed-*`) | 2078098 | 10 | 3 | 5 x 30 s | 10 ms, 100 ms |
-| paced | `none`, relays on their own clocks (`relay-*`), both (`both-*`), the client alone (`fixed-*`) | 2078098 | 10 | 3 | 5 x 30 s | 10 ms, 100 ms |
+| main | `none`, cover on top (`add-*`), a constant rate at the client (`fixed-*`) | 8a7b140 | 10 | 3 | 5 x 30 s | 10 ms, 100 ms |
+| rates | `none`, a constant rate at the client by period (`fixed-*`) | 8a7b140 | 10 | 3 | 5 x 30 s | 10 ms, 100 ms |
+| paced | `none`, relays on their own clocks (`relay-*`), both (`both-*`), the client alone (`fixed-*`) | 8a7b140 | 10 | 3 | 5 x 30 s | 10 ms, 100 ms |
 | paths | the choice of a chain of 3 among 5 nodes, 1 or 2 of them rogue | 2078098 | - | 3 | 100000 draws each | - |
 
-Suite c25519, base seed 1. Each client starts its schedule at a random phase; every AUC, top-1, bandwidth and round trip is the median across the runs of its configuration. As a consistency check between the sets, the paced set repeats the client-only runs: its medians at a 10 ms window (AUC 0.922 at 70 ms and 0.946 at 35 ms) lie within the run-to-run range of the rates set (0.890-0.965 and 0.907-0.984).
+Suite c25519, base seed 1. The 2026-11-18 series on `8a7b140` records 110 loopback runs,
+with both windows scored on each run. Each client starts at a random phase. Values in the table
+are medians within each configuration. The repeated client-only rates in `paced` give 10 ms
+AUCs of 0.953 at 70 ms and 0.960 at 35 ms. The corresponding run ranges in `rates` are
+0.890-0.963 and 0.914-0.973.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/tradeoff-en-dark.png">
@@ -53,27 +57,34 @@ Suite c25519, base seed 1. Each client starts its schedule at a random phase; ev
 
 | Set | Protection | Bandwidth between relays | Median round trip | AUC, 10 ms | AUC, 100 ms | Top-1, 10 ms |
 |---|---|---|---|---|---|---|
-| main | none | x1.00 | 0.146 ms | 1.000 | 1.000 | 100% |
-| main | cover on top, +2x | x2.99 | 0.131 ms | 1.000 | 1.000 | 100% |
-| rates | constant rate at the client, 70 ms | x2.85 | 48 ms | 0.951 | 0.951 | 70% |
-| rates | constant rate at the client, 35 ms | x5.69 | 20 ms | 0.962 | 0.937 | 70% |
-| paced | relays on their own clocks, 66.5 ms | x3.00 | 187 ms | 0.562 | 0.463 | 5% |
-| paced | relays on their own clocks, 33.25 ms | x6.00 | 88 ms | 0.554 | 0.487 | 15% |
-| paced | both, client 70 ms, relays 66.5 ms | x3.00 | 230 ms | 0.462 | 0.442 | 3% |
-| paced | both, client 35 ms, relays 33.25 ms | x5.99 | 108 ms | 0.673 | 0.472 | 20% |
+| main | none | x1.00 | 0.131 ms | 1.000 | 1.000 | 100% |
+| main | cover on top, +2x | x2.99 | 0.115 ms | 1.000 | 1.000 | 100% |
+| rates | constant rate at the client, 70 ms | x2.85 | 48 ms | 0.943 | 0.943 | 60% |
+| rates | constant rate at the client, 35 ms | x5.69 | 20 ms | 0.947 | 0.947 | 70% |
+| paced | relays on their own clocks, 66.5 ms | x3.00 | 178 ms | 0.531 | 0.516 | 2.5% |
+| paced | relays on their own clocks, 33.25 ms | x5.99 | 81 ms | 0.551 | 0.523 | 10% |
+| paced | both, client 70 ms, relays 66.5 ms | x2.99 | 226 ms | 0.552 | 0.469 | 5% |
+| paced | both, client 35 ms, relays 33.25 ms | x5.99 | 109 ms | 0.566 | 0.434 | 10% |
 
-- Cover on top of real messages (main, `add-0.5x` to `add-2x`, both windows) does not help at all: even at x2.99 bandwidth between relays, AUC is 1.000 and top-1 100% in every run, so every flow is linked.
-- A constant rate at the client (rates, `fixed-25ms` to `fixed-200ms`) does not stop the linking either: each client ticks with its own phase, the relays forward each cell immediately, and at a 10 ms window the AUC medians lie between 0.93 and 0.99 at every period.
-  - At 100 ms the AUC falls to 0.50-0.55 only where the period divides the window (`fixed-25ms`, `fixed-50ms`, `fixed-100ms`) and stays at 0.77-0.95 elsewhere: with a dividing period nearly all scores tie, which says nothing about protection.
+- Cover on top of real messages kept AUC at 1.000 and top-1 at 100% at the five-run medians
+  across both windows and the three tested cover rates. The +2x rate used x2.99 bandwidth between relays.
+- At a constant client rate, the 10 ms AUC medians were 0.932-0.987 across the tested periods.
+  With 100 ms windows, the median was 0.500 at client periods of 25, 50 and 100 ms, where the
+  observation window contains whole periods and scores tie. The other medians were 0.767-0.947.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/window-en-dark.png">
   <img alt="Attack AUC against the client's cell period for a 10 ms and a 100 ms window" src="docs/img/window-en-light.png">
 </picture>
 
-- Relays sending on their own clocks (paced, `relay-*` and `both-*`, both windows): the AUC medians of this attack, which counts cells only, lie between 0.44 and 0.67, against 0.94-1.00 in the other rows, but these runs cannot show that it is at chance: four of the eight medians lie outside 0.45-0.55, and such a claim needs an equivalence interval inside that band, with the quantity and margin fixed before the series, which five runs cannot give.
-  - The 95% interval of a single run includes 0.5 in 33 of 40 cases (of the other seven, three lie above and four below). Five runs of ten flows cannot tell a small remaining leak from none; the full series is to settle it.
-  - The price is a constant stream on every link a relay sends on and about 2.7 to 2.8 node periods added to a round trip (187 ms at 66.5 ms, 88 ms at 33.25 ms). In `both-*` the relay period is 5% shorter than the client's, so a missed tick is caught up; `relay-*` uses the same relay periods with a client that sends at once.
+- With relay clocks, AUC medians for `relay-*` and `both-*` were 0.434-0.566 across both windows.
+  Four of eight medians lay outside 0.45-0.55. These five-run configurations remain descriptive.
+  In 36 of 40 recorded windows the single-run 95% interval included 0.5. One interval was above
+  0.5 and three were below it.
+  - Relay-only median round trips were 178 ms at a 66.5 ms relay period and 81 ms at a 33.25 ms
+    period, about 2.4-2.7 relay periods. Relay clocks send on each link at a constant rate.
+    In `both-*` the relay period is 5% shorter than the client period.
+
 - The choice of the chain (paths, 3 of 5 nodes, 100000 draws each): for a client without `-peer` drawing one chain from full mirrors, with one rogue node 0.599 of the chains include it (0.600 by the model); with two, 0.900 include at least one (0.900) and 0.100 have both entry and exit rogue (0.100), each within one standard error of the model value. A rogue entry that leaves out a node, the pinned exit of a `-peer` client and its rebuilds change these shares ([EXPERIMENT](docs/en/EXPERIMENT.md), block 3; [LIMITATIONS](docs/en/LIMITATIONS.md)).
 
 ### Bounds of these numbers
@@ -83,8 +94,12 @@ Suite c25519, base seed 1. Each client starts its schedule at a random phase; ev
 - 5 runs per point: no difference is claimed as significant; the full series of thirty runs per point is still to come ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
 - The attack is the baseline one: it counts cells only and ranks pairs of flows by Pearson correlation of the counts per window, on the forward direction only and with no time shift; the moments the connections of a circuit open and close match along the chain and are not part of it yet ([#43](https://github.com/jimichi-org/jimichi/issues/43)); a learned correlator remains planned ([#67](https://github.com/jimichi-org/jimichi/issues/67)); a separate timing-mark series is measured ([#116](https://github.com/jimichi-org/jimichi/issues/116), [results](#timing-mark-results)).
 - The observer watches two links and does not model the entry node, which sees the client's cells directly; whether a constant client rate hides from it the moments the client sends is not measured yet: the cell distinguisher is in place ([EXPERIMENT](docs/en/EXPERIMENT.md), block 7) and its series is planned ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
-- The round trip without protection or with cover only is below a millisecond and differs between sets by about 0.01 ms (0.14 to 0.15 ms without protection), so its last digits carry no meaning.
-- Series are run with the kind cluster stopped and no build on the host; every `correlation-*` row records the load inside the VM the lab runs in, the seeds and the code revision, and every `paths-*` row the seed and the revision. The seeds fix the client schedules, not the run: in the paced set, run twice with the same seeds and image, one relay-clock median moved by about 0.15. See [LIMITATIONS](docs/en/LIMITATIONS.md).
+- No-protection median round trips across the three sets ranged from 0.130 to 0.157 ms.
+  The submillisecond differences reflect this fixture and host.
+- The series retained all 110 captures, including 169 unanswered messages across ten 200 ms
+  constant-rate captures. There were no circuit closures, resource-limited captures or drops.
+  The kind cluster was stopped. Reports record VM load, seeds and revision. Earlier runs
+  on the same configuration showed run-to-run variation. [LIMITATIONS](docs/en/LIMITATIONS.md).
 
 ## Reproduce
 
@@ -173,14 +188,32 @@ efficacy nor resistance to privileged acquisition. Natural GC and actual export 
 Acquisition ran with kind stopped and no concurrent builds or source writes. Whole-host CPU
 monitoring had 30 samples during the series: 3-33%, median 11.5%, mean 12.4%. They include assay
 work and cannot isolate unrelated load. No row was discarded for load; no performance or
-load-robustness conclusion is drawn. The passive results above retain their original revision.
+load-robustness conclusion is drawn.
+
+## Controlled node observations
+
+Block 3 uses registered cooperative views on the project's loopback testbed. The c25519 series
+uses `ee804c8` and the GOST series uses `8a7b140`, with separate binaries and registration
+histories. [Protocol and provenance](docs/en/EXPERIMENT.md#recorded-controlled-node-results).
+
+| Suite | Primary runs, compromise / collude / mailbox | Planned units |
+|---|---|---|
+| c25519 | 321 / 270 / 120 | 10272 / 3150 / 1920 |
+| GOST | 33 / 27 / 20 | 673 / 216 / 320 |
+
+On c25519, all 13 Compromise intervals fit the registered model tolerance of ±0.05. Joint used the
+original two c25519 Primary reports. Holm adjustment at family alpha 0.05 rejected six of ten
+nondegenerate comparisons. Three comparisons were degenerate. GOST reports the descriptive
+series, including two declared Compromise cases without a partner. Its model and difference
+families each retain 13 `null/unsupported` positions. The results apply to the declared views,
+features and workloads. [LIMITATIONS](docs/en/LIMITATIONS.md).
 
 ## What is measured
 
 | Block | Today | Planned |
 |---|---|---|
 | Metadata | a traffic correlation attack links flows on the entry link to flows on the last link between relays from cell timings and counts alone; AUC and top-1 accuracy ([Results](#results)), and TPR at FPR 0.01 in the reports, against cover traffic rate, a constant client rate and relays sending on their own clocks | node delay levels ([#45](https://github.com/jimichi-org/jimichi/issues/45)), message size classes ([#68](https://github.com/jimichi-org/jimichi/issues/68)), the topology of a conversation, two entries and the mailbox ([#47](https://github.com/jimichi-org/jimichi/issues/47)) |
-| Partial compromise | how often a randomly drawn chain meets rogue nodes, computed and sampled with the client's own choice, that of a client without `-peer` (`cmd/lab -set paths`); what one node knows of the route by its position, derived from the protocol; a lab test with real nodes that a node certified by another CA joins no chain | the remaining full node-observation measurements, required for v0.4.0, in design and not implemented ([#117](https://github.com/jimichi-org/jimichi/issues/117)) |
+| Partial compromise | how often a randomly drawn chain meets rogue nodes, computed and sampled with the client's own choice, that of a client without `-peer` (`cmd/lab -set paths`); what one node knows of the route by its position, derived from the protocol; a lab test with real nodes that a node certified by another CA joins no chain; [cooperative views](#controlled-node-observations) from both suites ([#117](https://github.com/jimichi-org/jimichi/issues/117)) | keeping pairs of honest nodes busy and effects on surviving chains ([#125](https://github.com/jimichi-org/jimichi/issues/125)) |
 | Key material | `lab -set keymem`: cooperative exact-byte matching of three client circuit cell keys in exported Go Object payloads, `none` versus `all`, active and after Close; registered series measured ([results](#cooperative-key-memory-results), [EXPERIMENT](docs/en/EXPERIMENT.md), block 4) | external memory acquisition, disk/swap searches and other secrets, deferred beyond v0.4.0 ([#192](https://github.com/jimichi-org/jimichi/issues/192)) |
 | Forward secrecy | unit tests: a setup cell stops opening once the node releases the onion key it was built for | setup cells recorded by a neighbour attacked with keys taken from node memory, by the age of the recording, unmeasured and deferred beyond v0.4.0 ([#192](https://github.com/jimichi-org/jimichi/issues/192)) |
 | Cost | round-trip latency through the chain, the bandwidth multiplier of cover and padding, benchmarks of key agreement, signing and sealing a cell, GOST versus X25519 | node throughput at saturation, goodput per client, a setup while a node holds two onion keys, the latency of a one-node chain, the cost of memory locking ([#118](https://github.com/jimichi-org/jimichi/issues/118)) |

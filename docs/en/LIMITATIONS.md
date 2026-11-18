@@ -33,8 +33,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   or default Keepalive 30 s. Missing classes, directions or mandatory scenarios remain unavailable.
   Cover puts does not guarantee q = 0 during a full window, stale state or failure. Even releasable
   aggregates, ranks and models can disclose statistics and encoded categories given side information;
-  raw counters, times, F, records, messages and events are never released. The full #117 series is
-  not published here; earlier calculations and the trust test are not its empirical results.
+  raw counters, times, F, records, messages and events are never released. The
+  [reported series](EXPERIMENT.md#recorded-controlled-node-results) cover the declared cooperative
+  views at their own source revisions.
 - The GOST implementation is not a certified cryptographic facility. It applies to systems handling
   commercial data, not to state information systems or significant critical infrastructure. The
   algorithms are the same and conformance is checked against the test vectors from the standards,
@@ -396,8 +397,8 @@ English | [Русский](../ru/LIMITATIONS.md)
   it names only the middle hop, 1/3 of the positions (EXPERIMENT, block 3); a rogue mailbox that
   leaves the requests through an honest middle hop unanswered gets its colluder as the middle hop
   with probability 19/27 under an honest entry and so learns the entry (the item on rebuilding the
-  chain above); what it sees in the requests is listed in the previous item; neither is measured
-  on the testbed ([#117](https://github.com/jimichi-org/jimichi/issues/117)).
+  chain above). The previous item describes the request view. Block 3 reports request and record
+  distinguishability for cooperating mailboxes. Selective refusal remains a protocol calculation.
 - Before the session the puts carry handshake records only, so the mailbox sees the handshake
   timing. Put times, public record kinds/numbers, outcomes and repeated bytes are observable.
   Without -cover-puts these are activity features, not direct real/dummy labels or exact source
@@ -552,10 +553,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   mirror before refusing it, so that node sees the client's address and the moment of its start
   (the test does not model this request). How often a uniformly drawn chain meets the nodes of the
   key holder is computed and sampled (EXPERIMENT, block 3); what each of them knows of the route
-  is derived from the protocol (same section), and what they see and link is not measured
-  ([#117](https://github.com/jimichi-org/jimichi/issues/117)); nor is what it costs them to
-  keep the pairs of honest nodes busy and how far that raises the share of chains their nodes
-  hold ([#125](https://github.com/jimichi-org/jimichi/issues/125),
+  is derived from the protocol (same section). The registered cooperative views and trust cases
+  are measured in Block 3. The cost of keeping pairs of honest nodes busy and its effect on the
+  share of chains their nodes hold remain open ([#125](https://github.com/jimichi-org/jimichi/issues/125),
   the node limits below). Past circuits stay closed to such a substitution.
 - Nodes publish their descriptors themselves and there is no directory: a node can show
   different keys to different roster nodes, and so to the clients of different entries. With
@@ -641,10 +641,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   no load-based exclusion or unconditional service-performance conclusion follows.
 - The cell distinguisher of block 7 (EXPERIMENT) applies only to a client without -peer: its cover
   cells travel on the link to the entry, and the exit answers every data cell. A -peer client sends
-  a request on every tick, and its fact of sending is a real or a dummy record inside a request;
-  block 7 does not measure that difference: at the mailbox the request feature of block 3 measures
-  it ([#117](https://github.com/jimichi-org/jimichi/issues/117)), on the links of the entries the
-  conversation topology ([#47](https://github.com/jimichi-org/jimichi/issues/47)), both planned. The
+  a request on every tick. A request can contain a real or dummy record.
+  Block 3 measures the request and record views at the cooperating mailbox. Measuring conversation
+  topology at entries remains planned ([#47](https://github.com/jimichi-org/jimichi/issues/47)). The
   distinguisher sees ideal timestamps, on loopback in one process, without network noise
   ([#46](https://github.com/jimichi-org/jimichi/issues/46)), and the labels of cells come from a
   wrapper of the client's provider in the lab, which the observer does not have: this estimates
