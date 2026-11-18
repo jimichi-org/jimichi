@@ -110,7 +110,11 @@ func TestNodeViewLiveOptimized(t *testing.T) {
 					}()
 					if e != nil {
 						if name == "trusted-admission" {
-							t.Fatalf("execution failed: flags=%v counts=%+v startup=%t end=%t %s", result.Flags, result.Counts, result.CostsNS[0] != 0, result.CostsNS[6] != 0, formatBoundEvidence(e))
+							capture := result.Capture
+							t.Fatalf("execution failed: flags=%v counts=%+v startup=%t end=%t request_reason=%d record_reason=%d capture_calls=%d relay_arena_max=%d relay_connections_max=%d relay_pending_max=%d relay_contexts_max=%d relay_cells_max=%d %s",
+								result.Flags, result.Counts, result.CostsNS[0] != 0, result.CostsNS[6] != 0,
+								reasonByte(result.RequestLDA.Reason), reasonByte(result.RecordLDA.Reason),
+								capture.Calls, capture.ArenaHighWater, capture.ConnectionsHighWater, capture.PendingHighWater, capture.ContextsHighWater, capture.CellsHighWater, formatBoundEvidence(e))
 						}
 						t.Fatalf("execution: %v", e)
 					}
