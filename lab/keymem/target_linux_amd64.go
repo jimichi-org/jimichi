@@ -180,7 +180,7 @@ func runChild() int {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		return fail("unsupported_platform")
 	}
-	if runtime.Version() != "go1.27.3" {
+	if runtime.Version() != "go1.27.4" {
 		return fail("unsupported_runtime")
 	}
 	policy := secmem.Baseline

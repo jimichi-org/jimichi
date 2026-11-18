@@ -367,7 +367,7 @@ func statusTestData(c childConfig) []any {
 		returned.Timing.CloseToCaptureNS = pointer(uint64(1_000_000_000))
 		returned.ReleasedLengths = pointer([3]uint64{})
 	}
-	return []any{configuredData{GOOS: "linux", GOARCH: "amd64", Runtime: "go1.27.3", BinaryDigest: "public-binary-digest", BinaryDigestSuite: c.Suite, Protection: p}, ready, returned, cleanedData{ReleasedLengths: [3]uint64{}, MarkerCleared: true}}
+	return []any{configuredData{GOOS: "linux", GOARCH: "amd64", Runtime: "go1.27.4", BinaryDigest: "public-binary-digest", BinaryDigestSuite: c.Suite, Protection: p}, ready, returned, cleanedData{ReleasedLengths: [3]uint64{}, MarkerCleared: true}}
 }
 
 func statusTestFrame(t *testing.T, nonce *string, seq uint64, kind string, data any) []byte {
@@ -455,7 +455,7 @@ func TestIPCStatusRejectsSchemaAndSequenceContradictions(t *testing.T) {
 		"unknown-data-field":     ipcRawFrame(bytes.Replace(validBody, []byte(`"goos":"linux"`), []byte(`"goos":"linux","extra":1`), 1)),
 		"missing-data-field":     ipcRawFrame(bytes.Replace(validBody, []byte(`"goos":"linux",`), nil, 1)),
 		"duplicate-data-field":   ipcRawFrame(bytes.Replace(validBody, []byte(`"goos":"linux"`), []byte(`"goos":"linux","goos":"linux"`), 1)),
-		"wrong-runtime":          ipcRawFrame(bytes.Replace(validBody, []byte(`"runtime":"go1.27.3"`), []byte(`"runtime":"go1.27.4"`), 1)),
+		"wrong-runtime":          ipcRawFrame(bytes.Replace(validBody, []byte(`"runtime":"go1.27.4"`), []byte(`"runtime":"go1.27.3"`), 1)),
 		"wrong-digest":           ipcRawFrame(bytes.Replace(validBody, []byte(`"binary_digest":"public-binary-digest"`), []byte(`"binary_digest":"other"`), 1)),
 		"oversized-body":         ipcRawFrame(bytes.Repeat([]byte{' '}, maxStatusBytes+1)),
 		"zero-body":              {0, 0, 0, 0},

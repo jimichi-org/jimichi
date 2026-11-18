@@ -29,7 +29,7 @@ func Run(ctx context.Context, c Config) (Report, error) {
 		_ = r.finish()
 		return r, errors.New(class)
 	}
-	if runtime.Version() != "go1.27.3" {
+	if runtime.Version() != "go1.27.4" {
 		return unavailable("unsupported_runtime")
 	}
 	if secmem.SetPolicy(secmem.Protected) != nil || secmem.HardenProcess() != nil {

@@ -595,7 +595,7 @@ func readStatuses(r io.Reader, c childConfig, digest string, events chan<- statu
 		switch seq {
 		case 1:
 			var d configuredData
-			if s.Type != "configured" || decodeStrict(s.Data, &d) != nil || d.GOOS != "linux" || d.GOARCH != "amd64" || d.Runtime != "go1.27.3" || d.BinaryDigest != digest || d.BinaryDigestSuite != c.Suite || !validProtection(d.Protection, c.Policy, true) {
+			if s.Type != "configured" || decodeStrict(s.Data, &d) != nil || d.GOOS != "linux" || d.GOARCH != "amd64" || d.Runtime != "go1.27.4" || d.BinaryDigest != digest || d.BinaryDigestSuite != c.Suite || !validProtection(d.Protection, c.Policy, true) {
 				bad()
 				return
 			}

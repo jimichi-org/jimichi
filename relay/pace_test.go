@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jimichi-org/jimichi/crypto/c25519"
@@ -21,29 +22,63 @@ func pacedPipe(t *testing.T, period time.Duration, size int) (*pacer, net.Conn, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer priv.Release()
+	t.Cleanup(priv.Release)
 
 	a, b := net.Pipe()
-	accepted := make(chan error, 1)
+	type acceptResult struct {
+		conn *link.Conn
+		err  error
+	}
+	accepted := make(chan acceptResult, 1)
+	done := make(chan struct{})
+	var out, peer *link.Conn
+	var pc *pacer
+	var acceptErr error
+	joined := false
+	join := func() {
+		if joined {
+			return
+		}
+		result := <-accepted
+		peer, acceptErr = result.conn, result.err
+		<-done
+		joined = true
+	}
+	t.Cleanup(func() {
+		_ = b.Close()
+		_ = a.Close()
+		pc.close()
+		join()
+		if out != nil {
+			_ = out.Close()
+		}
+		if peer != nil {
+			_ = peer.Close()
+		}
+	})
 	go func() {
-		_, err := link.AcceptWithConfig(b, p, link.AcceptConfig{Local: link.Local{StaticPriv: priv, StaticPub: pub, Identity: nil}, AllowAnonymous: true})
-		accepted <- err
+		conn, err := link.AcceptWithConfig(b, p, link.AcceptConfig{Local: link.Local{StaticPriv: priv, StaticPub: pub, Identity: nil}, AllowAnonymous: true})
+		accepted <- acceptResult{conn, err}
+		close(done)
 	}()
-	out, err := link.Dial(a, p, nil, nil)
+	out, err = link.Dial(a, p, nil, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	if err := <-accepted; err != nil {
-		t.Fatalf("Accept: %v", err)
+	if out == nil {
+		t.Fatal("Dial returned no connection")
 	}
+	join()
+	if acceptErr != nil {
+		t.Fatalf("Accept: %v", acceptErr)
+	}
+	if peer == nil {
+		t.Fatal("Accept returned no connection")
+	}
+	priv.Release()
 
 	stats := &Stats{}
-	pc := newPacer(out, period, size, stats)
-	t.Cleanup(func() {
-		_ = b.Close()
-		pc.close()
-		_ = out.Close()
-	})
+	pc = newPacer(out, period, size, stats)
 	return pc, b, stats
 }
 
@@ -141,18 +176,39 @@ func TestBurstLeavesOnePerTick(t *testing.T) {
 	}
 }
 
-func TestIdleLinkCarriesPadding(t *testing.T) {
-	period := 10 * time.Millisecond
-	frame, _ := link.FrameSize(c25519.New())
-	p, raw, stats := pacedPipe(t, period, 4)
+const idlePaddingFrames = 31
 
-	checkGaps(t, frameTimes(t, raw, frame, 11, 5*time.Second), period)
-	_ = raw.Close()
-	p.close()
-	s := stats.Snapshot()
-	if s.Padding < 11 || s.Forwarded != 0 {
-		t.Fatalf("padding %d, forwarded %d; want at least 11 padding frames and nothing forwarded", s.Padding, s.Forwarded)
+func TestIdleLinkCarriesPadding(t *testing.T) {
+	synctest.Test(t, func(innerT *testing.T) {
+		// logical time checks pacing without measuring physical idle-wire jitter
+		period := 10 * time.Millisecond
+		frame, _ := link.FrameSize(c25519.New())
+		p, raw, stats := pacedPipe(innerT, period, 4)
+
+		checkGaps(innerT, frameTimes(innerT, raw, frame, idlePaddingFrames, 5*time.Second), period)
+		_ = raw.Close()
+		p.close()
+		s := stats.Snapshot()
+		if s.Padding < idlePaddingFrames || s.Forwarded != 0 {
+			innerT.Fatalf("padding %d, forwarded %d; want at least %d padding frames and nothing forwarded", s.Padding, s.Forwarded, idlePaddingFrames)
+		}
+	})
+}
+
+func TestIdlePaddingSampleToleratesOneHiccup(t *testing.T) {
+	period := 10 * time.Millisecond
+	times := make([]time.Time, idlePaddingFrames)
+	times[0] = time.Unix(0, 0)
+	for i := 1; i < len(times); i++ {
+		gap := period
+		if i == 5 {
+			gap = 16 * time.Millisecond
+		} else if i == 6 {
+			gap = 4 * time.Millisecond
+		}
+		times[i] = times[i-1].Add(gap)
 	}
+	checkGaps(t, times, period)
 }
 
 func TestFullQueueRefuses(t *testing.T) {

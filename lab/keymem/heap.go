@@ -430,7 +430,7 @@ func (d *heapDecoder) record(tag uint64) error {
 		if err := d.string("amd64"); err != nil {
 			return err
 		}
-		if err := d.string("go1.27.3"); err != nil {
+		if err := d.string("go1.27.4"); err != nil {
 			return err
 		}
 		return d.uints(1)

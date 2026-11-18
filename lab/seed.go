@@ -15,6 +15,17 @@ const (
 	StreamMarkTarget
 	StreamMarkPermutation
 	StreamMarkOrder
+	StreamNodeModel
+	StreamNodeSetup
+	StreamNodeGaps
+	StreamNodeLifetime
+	StreamNodePairOrder
+	StreamNodeTraining
+	StreamNodePilot
+	StreamNodeMain
+	StreamNodeBootstrap
+	StreamNodePower
+	StreamNodeAnonymous
 )
 
 // Derive mixes the parts into the seed with splitmix64, so neighbouring seeds,

@@ -299,8 +299,8 @@ does not fall back to those formulas.
   node (failed_extend). Both count with the dropped setups as well.
 - Without -auth a node extends to any address through NN and permits inbound NN. This is the
   explicit baseline: hiding headers from a passive observer without protection against a
-  substituted neighbour. The lab harness uses this configuration; no block compares it with
-  the authenticated one.
+  substituted neighbour. The original correlation harness uses this configuration; its results
+  do not compare it with authenticated links. `lab/nodeview` node observation uses authenticated links.
 - Defaults are c25519, -auth=true and NN disabled. Accept refuses NN; AcceptWithConfig and relay
   allow it only with explicit AllowAnonymous. Without a roster, outbound NN also needs that
   permission. A missing protected-client key or an NK/KK failure never selects NN.
@@ -706,10 +706,13 @@ Parameter rule:
 | replies refused by the client | 3 within 10 min |
 | outbox, records before pinning, received messages | 256, 16, 256 |
 
-What the mailbox sees: with CoverPuts a put on every tick while fewer than W requests with a put
-are in flight; without them the moment and number of real messages, the copies of the initiator's
-first record after kk2 and the keepalives. The copies of a sticky record are identical bytes, so
-the mailbox sees a repeat. Before pinning the requests only fetch, so the first put shows when
+What the mailbox sees: put timing/outcomes, public record kinds/numbers and identical copies.
+CoverPuts aims to keep a put on every tick of an established fresh session while fewer than W
+requests with a put are in flight. Without CoverPuts, puts can still carry real records, keepalive
+dummy records or repeated records. These observations alone neither label real/dummy records
+nor reveal exact source-message times/counts. Sticky copies have identical bytes: the mailbox
+sees a repeat, but several requests carrying copies do not imply several source messages.
+Before pinning the requests only fetch, so the first put shows when
 the contact was pinned: at once at the initiator (kk1), at the responder with kk2 once kk1 has
 come.
 
@@ -1623,8 +1626,8 @@ The switch:
 The startup line of a node carries consistency=<value>. The baseline (nodes with
 -consistency=false): no pass, no records, no proofs, mirrors as before, a node with two keys stays a
 peer everywhere; /descriptors/peer still answers. The testbed manifests (deploy/base/relay.yaml)
-set -consistency=true explicitly, as they set -onion-rotate. The lab harness changes nothing:
--auth=false, no rosters.
+set -consistency=true explicitly, as they set -onion-rotate. The original correlation harness
+retains -auth=false and no rosters; `lab/nodeview` separately verifies signed bundles under its own anchor.
 
 What is left to a node that breaks the rules is collected in LIMITATIONS: at most two onion keys
 accepted by one verifier at any instant, and three across clients whose clocks differ, around an
@@ -1685,6 +1688,7 @@ The CA key takes no part in key agreement. Whoever holds it, that is the operato
 stole the key during the issuance, can certify an identity of their own for any name and address
 and, with a position in the network, substitute a node. It gives no layer keys of past circuits:
 those come from the nodes' agreement keys, which the CA never sees.
+A valid certificate alone does not add a roster position: the operator chooses network membership.
 
 ## What is recorded during measurements
 
@@ -1693,7 +1697,7 @@ those come from the nodes' agreement keys, which the CA never sees.
 | client | on the testbed the -peer clients: the lines of subsection "The -peer client", that is the round-trip time of every own message through the mailbox, every minute the state and the counters of the conversation, ends and rebuilds of the circuit by class only, the hashes of the own and of the pinned card, with no path, address, text or key. A client without -peer (cmd/client), per message: the size of the reply and the round-trip time, or a line when no reply comes within 5 s; at the end of the circuit the line `circuit closed`, or `circuit closed: client: reply refused: <check>` with the class of the reply or frame the client refused, naming neither a node nor a cell number, or `send: <class>` with the class of a failed send (with -fixed-chain the error itself, which can name the entry address and the local port); at start the name, fingerprint and certificate validity of every listed node whose bundle it verified, in the listed order (with -fixed-chain the descriptor validity as well), how many of the listed nodes were verified, and the number of hops; with a drawn chain never which nodes form it. In the lab harness, per run: the round-trip time of every message whose echo came back, matched by flow and sequence number, the number of messages a constant-rate schedule dropped, the number left unanswered, the number of clients that refused a reply or a link frame, and per flow whether and when its circuit closed; in the block 7 set also, for every data cell, whether it carries a message, from a wrapper of the client's provider (EXPERIMENT, block 7), a labelling the relays and the observer never see |
 | relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests), mirror requests answered to peers and peers refused by a proof of inconsistency (peer_mirror_requests, peers_refused), the epoch of the onion key and the failed attempts to rotate it (onion_epoch, onion_rotate_failed). With -exit mailbox also the mailbox counters (section "End-to-end layer and mailbox"), on loopback on request only, not on stdout. No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, on every rotation of the onion key a line with the new epoch and no key material, on a failed rotation one line per kind of cause (pages not mapped, pages not locked, key not locked, key refused by the ring, other), a fixed class with no size and no text of the underlying error, with no new line while consecutive failures share the class and a line again for the first failure after a success, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified, the classes `descriptor shorter than the least lifetime` and `not a proof of inconsistency` among them; with -consistency also one line `peer <addr>: refused: <rule>` with one of the seven rule texts when a peer is refused by a proof of inconsistency, one line per kind of cause `peer <addr>: mirror: <class>` when a peer's mirror cannot be fetched or parsed, its proof does not verify or a bundle in it does not pass (the classes of one pass one line each, a class that stays is not logged again), one line `a peer serves a proof against this node: <rule>` per process when a peer's mirror carries a proof against the node itself, and at start with -auth=false one line `WARNING: -consistency needs -auth, the check is off` |
 | network | in the lab harness only, inside its process and without a packet capture: the moment every frame crosses the client-entry link and the last link between nodes, the one into the exit, in both directions. There is no link past the exit to observe yet ([#47](https://github.com/jimichi-org/jimichi/issues/47)) |
-| memory | `lab -set keymem`: cooperative exact-byte matching of three client circuit cell keys only in Object payloads of a voluntary Go 1.27.3 export ([#24](https://github.com/jimichi-org/jimichi/issues/24), EXPERIMENT, block 4); only aggregate reports are retained; the registered series is complete ([README](../../README.md#cooperative-key-memory-results)). External relay-memory acquisition remains unmeasured and deferred beyond v0.4.0 ([#192](https://github.com/jimichi-org/jimichi/issues/192)) |
+| memory | `lab -set keymem`: cooperative exact-byte matching of three client circuit cell keys only in Object payloads of a voluntary Go 1.27.4 export ([#24](https://github.com/jimichi-org/jimichi/issues/24), EXPERIMENT, block 4); only aggregate reports are retained; the registered Go 1.27.3 series is complete ([README](../../README.md#cooperative-key-memory-results)). External relay-memory acquisition remains unmeasured and deferred beyond v0.4.0 ([#192](https://github.com/jimichi-org/jimichi/issues/192)) |
 
 Only cmd/lab writes to artifacts/, as JSON reports: rows that carry the run configuration, the seeds
 and the code revision (`correlation-*.json`, `paths-*.json`, `cells-cover-*.json`), the frame counts
@@ -1703,6 +1707,39 @@ leaves out runs whose labels disagree as well), and the verdicts of the forged c
 assumption and the records in hex, without a byte of a secret key (`deny-*.json`). The logs and
 counters of the testbed pods are not stored: the logs stay in stdout (kubectl logs), and
 scripts/stats.sh prints the counters to the terminal.
+
+### Node observation boundary
+
+`lab/nodeview` observes the project's own local nodes through `relay.Config.Provider`, `Dial`,
+`Deliver` and `Serve(net.Listener)`. The cell format and CryptoProvider contract are unchanged.
+Five relays and every client or conversation side run in separate children of the same binary.
+Each participant creates and retains its own keys. Wrappers neither read nor copy a key Buffer
+nor open another node's layer. All nodes have identical instrumentation; prediction receives
+only selected views.
+
+The own setup exposes the hop index from control Header.Counter, the next node's address and
+its local circuit ID; the exit receives First. The index remains exposed beyond three hops
+([#78](https://github.com/jimichi-org/jimichi/issues/78)). A confirmed KK predecessor comes from
+successful authentication and its verified bundle; NK exposes only its endpoint. Setup opening
+alone does not prove circuit admission.
+
+Provenance binds successful own-layer operations, transport AEADs and actual frames by buffer
+equality and connection/cipher generations. Complete write, partial write, local processing
+without a write and censoring remain distinct. Incoming padding frames are not own-layer data
+cells. Forward/backward counters and transitions are checked in RAM; reports contain only sample
+and outcome counts. Private truth never resolves ambiguous matches.
+
+Controller and participants require Linux/amd64, process protection and actually locked pages.
+`CLOCK_MONOTONIC` belongs to one kernel; callbacks take the timestamps. Events and content stay
+in bounded arenas; overflow stops capture without evicting earlier data. Selected-node views and
+private client truth use separate inherited RAM channels. Predictions freeze before truth is
+joined; the scorer starts after application processes have stopped and released their resources.
+Cancellation has bounded deadlines and cleans only owned processes, sockets, arenas and keys.
+
+`cmd/lab` persists only allowlisted aggregate reports, plans and release-guarded encoded-feature
+models. Raw events, F, payloads, records, endpoints, circuit IDs, nonces, counters and keys are
+never persisted. Ordinary relay logs remain aggregate. EXPERIMENT, block 3, specifies matrices,
+statistical conditions and model-release limits.
 
 ## Package layout
 
@@ -1727,6 +1764,7 @@ scripts/stats.sh prints the counters to the terminal.
 | vault | client container: the file format, the keys from a password, the derivation of a volume's identity, the single write | crypto, crypto/secmem |
 | vault/profile | the -peer client profile in a volume: the contact card, the own card from the volume's identity, the parsing rules | crypto, crypto/secmem, e2e, mailbox, noise, vault |
 | lab | harness that runs one configuration in one process, the observer on two links, seeds, sampling of chains, cell labels of block 7 | client, relay, link, wire, crypto, crypto/secmem, crypto/suite |
+| lab/nodeview | own child relay/client observations, isolated prediction/evaluation, bounded RAM capture, aggregate reports | lab, lab/metrics, client, conversation, crypto, crypto/secmem, e2e, internal/verify, link, mailbox, pki, relay, wire |
 | lab/metrics | correlation scores, AUC and its bootstrap interval, traffic multiplier and latency percentiles, share of compromised chains, cell features, discriminant, KS and TV, degrees of anonymity | standard library only |
 | lab/scenario | experiments that act on the system: a recipient forging a conversation of the end-to-end layer with the production session (Genuine, Forge, Verify, a recording and injecting provider wrapper), run by `cmd/lab -set deny` | crypto, crypto/secmem, e2e, noise |
 | lab/report | an empty package reserved for a report writer; today cmd/lab writes the reports | nothing yet |

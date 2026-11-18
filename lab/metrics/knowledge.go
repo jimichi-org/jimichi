@@ -42,9 +42,9 @@ type Recovery struct {
 }
 
 // the chain is drawn uniformly from full mirrors and the views of its rogue
-// nodes are pooled; a pinned exit is public and not a position; beyond three
-// hops a middle does not know its index, so there the model is an upper bound
-// on what a position-wise claim can reach
+// nodes are pooled; a pinned exit is public and not a position; setup exposes
+// every hop's index, but the pooling and exact claim-merging assumptions need
+// separate justification beyond three hops
 func RecoveryModel(nodes, hops, rogue int, exit ExitChoice) Recovery {
 	nan := math.NaN()
 	none := Recovery{Mean: nan, StdDev: nan, RogueExit: nan, Ends: nan, Touched: nan}

@@ -213,6 +213,53 @@ func Wilcoxon(x, y []float64) Test {
 	out.Effect = float64(2*w2-total2) / float64(total2)
 
 	if n <= exactWilcoxon {
+		out.P = signedRankTail(ranks, total2, dev)
+		out.Method = "exact"
+		return out
+	}
+	k := float64(n)
+	variance := k*(k+1)*(2*k+1)/24 - ties/48
+	out.P = normalTail(float64(dev)/2, variance)
+	out.Method = "normal"
+	return out
+}
+
+func WilcoxonExact(x, y []float64, maxNonzero int) (Test, bool) {
+	if maxNonzero < 1 || maxNonzero > 512 || len(x) == 0 || len(x) != len(y) || !finite(x) || !finite(y) {
+		return undefinedTest(), false
+	}
+	d := make([]float64, 0, min(len(x), maxNonzero))
+	for i := range x {
+		if same(x[i], y[i]) {
+			continue
+		}
+		v := x[i] - y[i]
+		if len(d) == maxNonzero || math.IsInf(v, 0) || math.IsNaN(v) {
+			return undefinedTest(), false
+		}
+		d = append(d, v)
+	}
+	n := len(d)
+	if n == 0 {
+		return Test{P: 1, Method: "degenerate"}, true
+	}
+	magnitudes := make([]float64, n)
+	for i, v := range d {
+		magnitudes[i] = math.Abs(v)
+	}
+	ranks, _ := doubledRanks(magnitudes)
+	w2 := 0
+	for i, v := range d {
+		if v > 0 {
+			w2 += ranks[i]
+		}
+	}
+	total2 := n * (n + 1)
+	dev := absInt(w2 - total2/2)
+	p := 1.0
+	if n <= exactWilcoxon {
+		p = signedRankTail(ranks, total2, dev)
+	} else if dev != 0 {
 		counts := make([]float64, total2+1)
 		counts[0] = 1
 		reach := 0
@@ -222,22 +269,40 @@ func Wilcoxon(x, y []float64) Test {
 				counts[s] += counts[s-r]
 			}
 		}
-		var hits, all float64
-		for s, c := range counts {
-			all += c
-			if absInt(s-mean2) >= dev {
-				hits += c
+		var hits float64
+		for s, count := range counts {
+			if absInt(s-total2/2) >= dev {
+				hits += count
 			}
 		}
-		out.P = hits / all
-		out.Method = "exact"
-		return out
+		p = math.Min(1, hits/math.Ldexp(1, n))
 	}
-	k := float64(n)
-	variance := k*(k+1)*(2*k+1)/24 - ties/48
-	out.P = normalTail(float64(dev)/2, variance)
-	out.Method = "normal"
-	return out
+	return Test{
+		Statistic: float64(w2) / 2,
+		P:         p,
+		Effect:    float64(2*w2-total2) / float64(total2),
+		Method:    "exact",
+	}, true
+}
+
+func signedRankTail(ranks []int, total2, dev int) float64 {
+	counts := make([]float64, total2+1)
+	counts[0] = 1
+	reach := 0
+	for _, r := range ranks {
+		reach += r
+		for s := reach; s >= r; s-- {
+			counts[s] += counts[s-r]
+		}
+	}
+	var hits, all float64
+	for s, c := range counts {
+		all += c
+		if absInt(s-total2/2) >= dev {
+			hits += c
+		}
+	}
+	return hits / all
 }
 
 // thresholds of Romano et al. (2006) for Cliff's delta, used for the paired

@@ -2,10 +2,114 @@ package metrics_test
 
 import (
 	"math"
+	"math/big"
 	"testing"
 
 	"github.com/jimichi-org/jimichi/lab/metrics"
 )
+
+func exactBinomialTail(n, last int) float64 {
+	hits := new(big.Int)
+	for k := 0; k <= last; k++ {
+		hits.Add(hits, new(big.Int).Binomial(int64(n), int64(k)))
+	}
+	hits.Lsh(hits, 1)
+	total := new(big.Int).Lsh(big.NewInt(1), uint(n))
+	p, _ := new(big.Rat).SetFrac(hits, total).Float64()
+	return p
+}
+
+func TestBoundedWilcoxonExactKnownAnswers(t *testing.T) {
+	// all n differences tied at magnitude one have rank (n+1)/2
+	// k positive signs give W=k(n+1)/2 and effect (2k-n)/n
+	// the two-sided tail is 2*sum(C(n,j),j=0..min(k,n-k))/2^n
+	for _, c := range []struct {
+		n, plus, zeros int
+	}{
+		{101, 61, 0},
+		{128, 96, 3},
+		{512, 260, 2},
+	} {
+		x := concat(repeat(1, c.plus), repeat(-1, c.n-c.plus), repeat(0, c.zeros))
+		got, ok := metrics.WilcoxonExact(x, repeat(0, len(x)), 512)
+		if !ok {
+			t.Fatalf("%d nonzero pairs refused", c.n)
+		}
+		w := float64(c.plus*(c.n+1)) / 2
+		effect := float64(2*c.plus-c.n) / float64(c.n)
+		checkTest(t, "bounded exact ties", got, w, exactBinomialTail(c.n, min(c.plus, c.n-c.plus)), effect, "exact")
+	}
+	// distinct ranks 1..128 sum to 8256; only all plus and all minus are as extreme
+	// the p-value is 2/2^128=2^-127, never a normal approximation
+	got, ok := metrics.WilcoxonExact(seq(1, 128), repeat(0, 128), 128)
+	if !ok {
+		t.Fatal("128 nonzero pairs refused")
+	}
+	checkTest(t, "128 positive pairs", got, 8256, math.Ldexp(1, -127), 1, "exact")
+	// one nonzero difference among 514 pairs consumes only one registered slot
+	got, ok = metrics.WilcoxonExact(concat(repeat(0, 513), []float64{1}), repeat(0, 514), 1)
+	if !ok {
+		t.Fatal("zero differences consumed the cap")
+	}
+	checkTest(t, "one nonzero pair", got, 1, 1, 1, "exact")
+}
+
+func TestBoundedWilcoxonExactPreservesLegacy(t *testing.T) {
+	for n := 1; n <= 100; n++ {
+		x, y := make([]float64, n), make([]float64, n)
+		for i := range x {
+			x[i] = float64((i*7+n)%13) / 10
+			y[i] = float64((i*3+n)%11) / 10
+		}
+		want := metrics.Wilcoxon(x, y)
+		got, ok := metrics.WilcoxonExact(x, y, 100)
+		if !ok || got != want {
+			t.Fatalf("%d pairs: exact %+v, %t, legacy %+v", n, got, ok, want)
+		}
+	}
+	got, ok := metrics.WilcoxonExact(seq(1, 4), seq(1, 4), 1)
+	if !ok || got != metrics.Wilcoxon(seq(1, 4), seq(1, 4)) {
+		t.Fatalf("degenerate %+v, %t", got, ok)
+	}
+}
+
+func TestBoundedWilcoxonExactCenteredTailKnownAnswer(t *testing.T) {
+	// equal positive and negative tied ranks put W at its mean, so all 2^n signs qualify
+	for _, n := range []int{128, 256, 512} {
+		x := concat(repeat(1, n/2), repeat(-1, n/2))
+		got, ok := metrics.WilcoxonExact(x, repeat(0, n), 512)
+		if !ok || got.Method != "exact" || got.P != 1 || got.Effect != 0 {
+			t.Fatalf("%d centered pairs: %+v, valid %v", n, got, ok)
+		}
+	}
+}
+
+func TestBoundedWilcoxonExactRejectsInvalid(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		x, y []float64
+		cap  int
+	}{
+		{"empty", nil, nil, 512},
+		{"unpaired", []float64{1, 2}, []float64{0}, 512},
+		{"NaN", []float64{math.NaN()}, []float64{0}, 512},
+		{"infinite x", []float64{math.Inf(1)}, []float64{0}, 512},
+		{"infinite y", []float64{1}, []float64{math.Inf(-1)}, 512},
+		{"infinite difference", []float64{math.MaxFloat64}, []float64{-math.MaxFloat64}, 512},
+		{"zero cap", []float64{1}, []float64{0}, 0},
+		{"negative cap", []float64{1}, []float64{0}, -1},
+		{"excess cap", []float64{1}, []float64{0}, 513},
+		{"excess nonzero", []float64{1, 2}, []float64{0, 0}, 1},
+		{"excess maximum", repeat(1, 513), repeat(0, 513), 512},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := metrics.WilcoxonExact(c.x, c.y, c.cap)
+			if ok || !math.IsNaN(got.Statistic) || !math.IsNaN(got.P) || !math.IsNaN(got.Effect) || got.Method != "" {
+				t.Fatalf("invalid test %+v, %t", got, ok)
+			}
+		})
+	}
+}
 
 func seq(from, to int) []float64 {
 	out := make([]float64, 0, to-from+1)

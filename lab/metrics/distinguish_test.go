@@ -262,6 +262,147 @@ func TestDiscriminantScoresKnownAnswer(t *testing.T) {
 	}
 }
 
+func TestFitDiscriminantFrozenLegacyBits(t *testing.T) {
+	// these bits are the pre-extraction scorer's results for the manual cases above
+	// equal bits retain exact evaluation ties as well as every rounding step
+	want := map[string][]uint64{
+		"two-feature worked case":                {0x3fd6276276276277, 0xbfbd89d89d89d89f, 0x3fa3b13b13b13b0b, 0xbfe0000000000000},
+		"affine invariance":                      {0x3fd6276276276277, 0xbfbd89d89d89d89f, 0x3fa3b13b13b13b0b, 0xbfe0000000000000},
+		"constant column":                        {0x3fd6276276276277, 0xbfbd89d89d89d89f, 0x3fa3b13b13b13b0b, 0xbfe0000000000000},
+		"separator":                              {0x3fe0000000000000, 0xbfe0000000000000},
+		"collinear, test outside the dependency": {0x3fe0000000000000, 0xbfe0000000000000, 0x3fe0000000000000, 0xbfe0000000000000},
+		"dependent column first":                 {0xbfd6276276276279, 0x3fa3b13b13b13b05},
+		"two rows":                               {0x3fe0000000000000, 0xbfe0000000000000},
+		"one column":                             {0x3fe0000000000001, 0xbfc5555555555556},
+		"one column, test swapped":               {0xbfc5555555555556, 0x3fe0000000000001},
+		"one column, falling direction":          {0x3fb2492492492492, 0x3fd6db6db6db6db7, 0xbfe0000000000000},
+		"float constant":                         {0x3fe0000000000001, 0xbfc5555555555556},
+		"just above the pivot tolerance":         {0x3fe00000000000c8, 0xbfe0000000000000, 0x3fe0000000000004},
+		"unbalanced training":                    {0x3fe0000000000000, 0xbfe0000000000000, 0x3fe8000000000000, 0x0},
+		"small units":                            {0x3fd6276276276278, 0xbfbd89d89d89d8a1, 0x3fa3b13b13b13afe, 0xbfe0000000000000},
+	}
+	for _, c := range discriminantCases() {
+		t.Run(c.name, func(t *testing.T) {
+			train, truth := classes(c.payload, c.cover)
+			model, ok := metrics.FitDiscriminant(train, truth)
+			if !ok {
+				t.Fatal("valid training refused")
+			}
+			if !slices.Equal(model.Unused, metrics.UnusedColumns(train)) {
+				t.Fatalf("unused %v, want %v", model.Unused, metrics.UnusedColumns(train))
+			}
+			got := model.Scores(c.test)
+			if len(got) != len(want[c.name]) {
+				t.Fatalf("scores %v, want %d results", got, len(want[c.name]))
+			}
+			for i, s := range got {
+				if bits := math.Float64bits(s); bits != want[c.name][i] {
+					t.Fatalf("score %d bits %#x, want %#x", i, bits, want[c.name][i])
+				}
+			}
+			if legacy := metrics.DiscriminantScores(train, truth, c.test); !slices.Equal(got, legacy) {
+				t.Fatalf("frozen %v, delegated %v", got, legacy)
+			}
+			for _, row := range train {
+				clear(row)
+			}
+			if after := model.Scores(c.test); !slices.Equal(got, after) {
+				t.Fatalf("training mutation changed frozen scores to %v", after)
+			}
+		})
+	}
+}
+
+func cloneDiscriminant(d metrics.Discriminant) metrics.Discriminant {
+	d.Weights = slices.Clone(d.Weights)
+	d.Center = slices.Clone(d.Center)
+	d.Kept = slices.Clone(d.Kept)
+	d.Unused = slices.Clone(d.Unused)
+	return d
+}
+
+func TestDiscriminantRejectsInvalidFrozenModel(t *testing.T) {
+	train := rows([]float64{0, 0, 7}, []float64{1, 0, 7}, []float64{0, 1, 7}, []float64{2, 1, 7})
+	model, ok := metrics.FitDiscriminant(train, []bool{false, false, true, true})
+	if !ok {
+		t.Fatal("valid training refused")
+	}
+	for name, breakModel := range map[string]func(*metrics.Discriminant){
+		"no weights":       func(d *metrics.Discriminant) { d.Weights = nil },
+		"wrong center":     func(d *metrics.Discriminant) { d.Center = d.Center[:1] },
+		"NaN weight":       func(d *metrics.Discriminant) { d.Weights[0] = math.NaN() },
+		"infinite center":  func(d *metrics.Discriminant) { d.Center[0] = math.Inf(1) },
+		"zero normalizer":  func(d *metrics.Discriminant) { d.Normalizer = 0 },
+		"NaN normalizer":   func(d *metrics.Discriminant) { d.Normalizer = math.NaN() },
+		"infinite norm":    func(d *metrics.Discriminant) { d.Normalizer = math.Inf(1) },
+		"negative norm":    func(d *metrics.Discriminant) { d.Normalizer = -1 },
+		"empty kept":       func(d *metrics.Discriminant) { d.Kept = nil },
+		"negative column":  func(d *metrics.Discriminant) { d.Kept[0] = -1 },
+		"absent column":    func(d *metrics.Discriminant) { d.Kept[0] = len(d.Weights) },
+		"duplicate kept":   func(d *metrics.Discriminant) { d.Kept[1] = d.Kept[0] },
+		"unordered kept":   func(d *metrics.Discriminant) { d.Kept[0], d.Kept[1] = d.Kept[1], d.Kept[0] },
+		"duplicate unused": func(d *metrics.Discriminant) { d.Unused[0] = d.Kept[0] },
+		"missing unused":   func(d *metrics.Discriminant) { d.Unused = nil },
+		"unused weight":    func(d *metrics.Discriminant) { d.Weights[d.Unused[0]] = 1 },
+		"no direction":     func(d *metrics.Discriminant) { clear(d.Weights) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := cloneDiscriminant(model)
+			breakModel(&invalid)
+			if got := invalid.Scores(train); got != nil {
+				t.Fatalf("invalid model gave %v", got)
+			}
+		})
+	}
+	for _, test := range [][][]float64{nil, {{}}, {{1}}, {{1, 2, 3}, {1, 2}}, {{1, 2, math.Inf(1)}}, {{1, math.NaN(), 3}}} {
+		if got := model.Scores(test); got != nil {
+			t.Fatalf("invalid rows gave %v", got)
+		}
+	}
+}
+
+func TestFitDiscriminantHeldOutDirection(t *testing.T) {
+	// training positives at one and negatives at zero fix scores +1/2 and -1/2
+	// reversed held-out labels lose their only positive-negative comparison, so AUC is zero
+	train := rows([]float64{1}, []float64{0})
+	model, ok := metrics.FitDiscriminant(train, []bool{true, false})
+	if !ok {
+		t.Fatal("valid training refused")
+	}
+	values := model.Scores(train)
+	if auc := cellAUC(values, []bool{false, true}); auc != 0 {
+		t.Fatalf("held-out AUC %g, want zero", auc)
+	}
+	for _, c := range []struct {
+		train [][]float64
+		truth []bool
+	}{
+		{nil, nil},
+		{train, nil},
+		{train, []bool{true, true}},
+		{rows([]float64{1}, []float64{1}), []bool{true, false}},
+		{rows([]float64{1}, []float64{math.NaN()}), []bool{true, false}},
+		{rows([]float64{1}, []float64{}), []bool{true, false}},
+	} {
+		if got, ok := metrics.FitDiscriminant(c.train, c.truth); ok || len(got.Weights) != 0 {
+			t.Fatalf("undefined fit %+v, %t", got, ok)
+		}
+	}
+}
+
+func TestFitDiscriminantUnusedMidpointOverflow(t *testing.T) {
+	// the second column is constant and unused; its overflowing midpoint cannot move a score
+	// the kept column has class means one and zero, so its two scores remain +1/2 and -1/2
+	train := rows([]float64{1, math.MaxFloat64}, []float64{0, math.MaxFloat64})
+	model, ok := metrics.FitDiscriminant(train, []bool{true, false})
+	if !ok || !slices.Equal(model.Unused, []int{1}) || model.Center[1] != 0 {
+		t.Fatalf("unused overflow fit %+v, %t", model, ok)
+	}
+	if got := model.Scores(train); !slices.Equal(got, []float64{0.5, -0.5}) {
+		t.Fatalf("unused overflow scores %v", got)
+	}
+}
+
 // the underflowing column: payload {2e-200}, {4e-200}, cover {0}, {1e-200}
 // is not constant by same(), but every squared deviation underflows, so
 // S_t,11 = 0 and s_1 = 0. The two-feature worked case times 1e-160 has S_t,11 = 11e-320,

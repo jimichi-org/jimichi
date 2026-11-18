@@ -106,10 +106,12 @@ func UndefinedPairs(scores []Score) int {
 // ties between a positive and a negative count as half a pair
 func AUC(scores []Score) float64 {
 	sorted := make([]Score, len(scores))
+	defer clear(sorted)
 	copy(sorted, scores)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Value < sorted[j].Value })
 
 	ranks := make([]float64, len(sorted))
+	defer clear(ranks)
 	for i := 0; i < len(sorted); {
 		j := i
 		for j+1 < len(sorted) && sorted[j+1].Value == sorted[i].Value {
@@ -143,6 +145,7 @@ type rocPoint struct{ fpr, tpr float64 }
 // at random, so the curve runs straight between the points (Fawcett, 2006)
 func roc(scores []Score) []rocPoint {
 	sorted := make([]Score, len(scores))
+	defer clear(sorted)
 	copy(sorted, scores)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Value > sorted[j].Value })
 
@@ -158,7 +161,7 @@ func roc(scores []Score) []rocPoint {
 		return nil
 	}
 
-	points := []rocPoint{{0, 0}}
+	points := make([]rocPoint, 1, len(sorted)+1)
 	var tp, fp float64
 	for i := 0; i < len(sorted); {
 		j := i
@@ -180,6 +183,7 @@ func roc(scores []Score) []rocPoint {
 // target, reading the curve with ties as straight segments
 func TPRAtFPR(scores []Score, target float64) float64 {
 	points := roc(scores)
+	defer clear(points[:cap(points)])
 	if points == nil {
 		return math.NaN()
 	}
@@ -217,6 +221,7 @@ func TopOneAccuracy(scores []Score, flows int) float64 {
 		return math.NaN()
 	}
 	best := make([]float64, flows)
+	defer clear(best)
 	for i := range best {
 		best[i] = math.Inf(-1)
 	}
@@ -227,6 +232,8 @@ func TopOneAccuracy(scores []Score, flows int) float64 {
 	}
 	tied := make([]int, flows)
 	hit := make([]bool, flows)
+	defer clear(tied)
+	defer clear(hit)
 	for _, s := range scores {
 		if s.Value == best[s.Entry] {
 			tied[s.Entry]++
@@ -271,9 +278,18 @@ func quantile(sorted []float64, p float64) float64 {
 func byEntry(scores []Score, flows int) [][]Score {
 	out := make([][]Score, flows)
 	for _, s := range scores {
-		out[s.Entry] = append(out[s.Entry], s)
+		out[s.Entry] = appendScratchScores(out[s.Entry], s)
 	}
 	return out
+}
+
+func appendScratchScores(dst []Score, scores ...Score) []Score {
+	previous := dst
+	dst = append(dst, scores...)
+	if cap(previous) < len(dst) {
+		clear(previous[:cap(previous)])
+	}
+	return dst
 }
 
 // BCa bootstrap over flows rather than over pairs: the pairs of one flow are not
@@ -286,16 +302,24 @@ func BootstrapAUC(scores []Score, flows, resamples int, seed int64) Interval {
 		return out
 	}
 	groups := byEntry(scores, flows)
+	defer func() {
+		for _, group := range groups {
+			clear(group[:cap(group)])
+		}
+		clear(groups)
+	}()
 
 	rng := rand.New(rand.NewSource(seed))
 	samples := make([]float64, 0, resamples)
+	defer clear(samples[:cap(samples)])
 	below, equal := 0, 0
 	for r := 0; r < resamples; r++ {
 		pool := make([]Score, 0, len(scores))
 		for i := 0; i < flows; i++ {
-			pool = append(pool, groups[rng.Intn(flows)]...)
+			pool = appendScratchScores(pool, groups[rng.Intn(flows)]...)
 		}
 		v := AUC(pool)
+		clear(pool[:cap(pool)])
 		if math.IsNaN(v) {
 			continue
 		}
@@ -322,14 +346,17 @@ func BootstrapAUC(scores []Score, flows, resamples int, seed int64) Interval {
 	z0 := normQuantile(p0)
 
 	jack := make([]float64, 0, flows)
+	defer clear(jack[:cap(jack)])
 	for leave := 0; leave < flows; leave++ {
 		pool := make([]Score, 0, len(scores))
 		for i := 0; i < flows; i++ {
 			if i != leave {
-				pool = append(pool, groups[i]...)
+				pool = appendScratchScores(pool, groups[i]...)
 			}
 		}
-		if v := AUC(pool); !math.IsNaN(v) {
+		v := AUC(pool)
+		clear(pool[:cap(pool)])
+		if !math.IsNaN(v) {
 			jack = append(jack, v)
 		}
 	}

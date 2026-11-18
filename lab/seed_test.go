@@ -36,6 +36,12 @@ func TestStreamsKeepTheirValues(t *testing.T) {
 	}{
 		{"phases", streamPhases, 1}, {"gaps", streamGaps, 2}, {"paths", streamPaths, 3},
 		{"training", StreamTraining, 4}, {"shift", StreamShift, 5}, {"permute", StreamPermute, 6},
+		{"mark workload", StreamMarkWorkload, 7}, {"mark code", StreamMarkCode, 8}, {"mark target", StreamMarkTarget, 9},
+		{"mark permutation", StreamMarkPermutation, 10}, {"mark order", StreamMarkOrder, 11},
+		{"node model", StreamNodeModel, 12}, {"node setup", StreamNodeSetup, 13}, {"node gaps", StreamNodeGaps, 14},
+		{"node lifetime", StreamNodeLifetime, 15}, {"node pair order", StreamNodePairOrder, 16}, {"node training", StreamNodeTraining, 17},
+		{"node pilot", StreamNodePilot, 18}, {"node main", StreamNodeMain, 19}, {"node bootstrap", StreamNodeBootstrap, 20},
+		{"node power", StreamNodePower, 21}, {"node anonymous", StreamNodeAnonymous, 22},
 	} {
 		if c.got != c.want {
 			t.Errorf("stream %s is %d, want %d", c.name, c.got, c.want)
