@@ -296,6 +296,16 @@ func appendScratchScores(dst []Score, scores ...Score) []Score {
 // independent, so resampling them would give an interval that is too narrow.
 // the acceleration comes from a jackknife that leaves one flow out at a time
 func BootstrapAUC(scores []Score, flows, resamples int, seed int64) Interval {
+	return bootstrapAUC(scores, flows, resamples, seed, 0.05)
+}
+
+// BootstrapAUCLevel is BootstrapAUC with a two-sided interval of the given
+// level, such as 1 - 0.05/3 when three features share one verdict
+func BootstrapAUCLevel(scores []Score, flows, resamples int, seed int64, level float64) Interval {
+	return bootstrapAUC(scores, flows, resamples, seed, 1-level)
+}
+
+func bootstrapAUC(scores []Score, flows, resamples int, seed int64, alpha float64) Interval {
 	point := AUC(scores)
 	out := Interval{Point: point, Low: math.NaN(), High: math.NaN(), Method: "bca"}
 	if resamples <= 0 || flows <= 1 || math.IsNaN(point) {
@@ -378,11 +388,11 @@ func BootstrapAUC(scores []Score, flows, resamples int, seed int64) Interval {
 		}
 	}
 
-	adjust := func(alpha float64) float64 {
-		z := normQuantile(alpha)
+	adjust := func(p float64) float64 {
+		z := normQuantile(p)
 		return normCDF(z0 + (z0+z)/(1-accel*(z0+z)))
 	}
-	out.Low = quantile(samples, adjust(0.025))
-	out.High = quantile(samples, adjust(0.975))
+	out.Low = quantile(samples, adjust(alpha/2))
+	out.High = quantile(samples, adjust(1-alpha/2))
 	return out
 }
