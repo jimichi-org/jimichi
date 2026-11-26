@@ -533,6 +533,8 @@ func TestVaultFirstPinWritesTheContainer(t *testing.T) {
 	if exists(path) {
 		t.Fatal("a file before the contact")
 	}
+	b.expect(t, http.MethodPut, "/vault/init", "pw2\n\n", http.StatusConflict)
+	b.expect(t, http.MethodPut, "/vault/unlock", "pw\n", http.StatusConflict)
 	peer := newPeerID(t, p, testMailbox)
 	b.expect(t, http.MethodPut, "/contact", peer.card.String(), http.StatusNoContent)
 	written := fileBytes(t, path)
