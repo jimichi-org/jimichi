@@ -911,7 +911,13 @@ the attempt released, and the body is also the line of the log:
 | 500 | `vault: not opened: io` | a read error, or the file changed after the start |
 
 A failed init answers 500 with the same two classes and stays locked without a file. One init or
-unlock at a time: another one in flight gets 429.
+unlock at a time: another one in flight gets 429. A body over the bound gets 413. If after the
+volume opens the first circuit is not built or the conversation does not start, the answer is 503,
+the process exits with code 1 and comes back locked.
+
+Guessing passwords through the admin port is bounded only by one operation at a time and by the
+cost of PasswordKey for each guess: the port listens on the loopback of the pod, and access to it
+already equals control of the pod.
 
 The write of the container:
 

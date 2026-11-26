@@ -705,9 +705,13 @@ English | [Русский](../ru/LIMITATIONS.md)
   ([#84](https://github.com/jimichi-org/jimichi/issues/84),
   [#87](https://github.com/jimichi-org/jimichi/issues/87)); a restart for any reason leaves the
   client locked until the operator opens the volume, and the conversation recovers in about 4 min
-  at worst after the unlock; log lines carry no identity values, but their times show the starts
-  and the openings; the passwords reach the admin port in a request body, which net/http buffers
-  outside secmem (CRYPTO, "Known gaps").
+  at worst after the unlock; before the write a restart loses the new profile; log lines carry no
+  identity values, and the decoy volume and the real one give the same kinds of lines, but the
+  times of the lines in the process logs on the node's disk show the starts, the openings and the
+  work of the circuits; the passwords reach the admin port in a request body, which net/http
+  buffers outside secmem (CRYPTO, "Known gaps"); guessing passwords through the admin port is
+  bounded only by the cost of PasswordKey, but access to the loopback of the pod already equals
+  control of the pod.
 - A running client: copies of the password, the Argon2id matrix and the PBKDF2 state on the heap
   ([#36](https://github.com/jimichi-org/jimichi/issues/36),
   [#37](https://github.com/jimichi-org/jimichi/issues/37),
