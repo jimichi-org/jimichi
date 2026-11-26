@@ -9,7 +9,7 @@ import (
 	"github.com/jimichi-org/jimichi/vault"
 )
 
-// the formulas of CRYPTO "Контейнер" written again on the provider: lab finds
+// the formulas of the CRYPTO container section written again on the provider: lab finds
 // the area a password opens, and reseals one, without a seam in vault
 const (
 	areaR     = 32

@@ -302,6 +302,9 @@ func BootstrapAUC(scores []Score, flows, resamples int, seed int64) Interval {
 // BootstrapAUCLevel is BootstrapAUC with a two-sided interval of the given
 // level, such as 1 - 0.05/3 when three features share one verdict
 func BootstrapAUCLevel(scores []Score, flows, resamples int, seed int64, level float64) Interval {
+	if !(level > 0 && level < 1) {
+		resamples = 0
+	}
 	return bootstrapAUC(scores, flows, resamples, seed, 1-level)
 }
 

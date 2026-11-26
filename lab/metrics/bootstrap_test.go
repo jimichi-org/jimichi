@@ -135,3 +135,13 @@ func TestBootstrapAUCLevelWidens(t *testing.T) {
 		}
 	}
 }
+
+func TestBootstrapAUCLevelRejectsLevelOutsideUnitInterval(t *testing.T) {
+	scores := []metrics.Score{{Entry: 0, True: true, Value: 1}, {Entry: 1, Value: 0}, {Entry: 2, True: true, Value: 2}, {Entry: 3, Value: -1}}
+	for _, level := range []float64{0, -0.5, 1, 1.5, math.NaN()} {
+		got := metrics.BootstrapAUCLevel(scores, 4, 100, 1, level)
+		if got.Point != 1 || !math.IsNaN(got.Low) || !math.IsNaN(got.High) {
+			t.Fatalf("level %v: got %+v, want point 1 and no interval", level, got)
+		}
+	}
+}

@@ -457,7 +457,8 @@ func (v *volumes) release() {
 	}
 }
 
-// 128 bits as jimichi vault init prints them, above the 80 the claim needs
+// 128 bits as jimichi vault init prints them; drawn from the seed, so the seed
+// bounds their secrecy, which no measurement of the set relies on
 func newPassword(seed int64, parts ...uint64) (*secmem.Buffer, error) {
 	raw, err := secmem.New(passwordBytes)
 	if err != nil {
@@ -836,6 +837,7 @@ func integrity(p jcrypto.CryptoProvider, cfg VaultConfig) ([]IntegrityCase, erro
 	}
 
 	key, fresh := make([]byte, areaKey), make([]byte, areaR)
+	defer clear(key)
 	if _, err := io.ReadFull(cfg.Random, key); err != nil {
 		return nil, err
 	}
