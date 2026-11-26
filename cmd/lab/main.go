@@ -177,7 +177,7 @@ func command(args []string, stdout, stderr io.Writer) int {
 	binList := fs.String("bins", "100ms", "comma-separated observation windows, each scored on the same runs")
 	repeats := fs.Int("repeats", 1, "runs per configuration")
 	out := fs.String("out", "artifacts", "directory for the json report")
-	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, mark: active timing marks with sham controls and survival, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic, cover: payload against cover cells at the entry, immediate with cover against constant rate, keymem: cooperative object exposure with both policies and every endpoint fixed, compromise: registered one/two-node views and trust cases, collude: registered residual linking, mailbox: registered request/record distinction")
+	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, mark: active timing marks with sham controls and survival, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic, cover: payload against cover cells at the entry, immediate with cover against constant rate, keymem: cooperative object exposure with both policies and every endpoint fixed, vault: block 5, the second area of a container against one-volume files with its controls, trace, integrity and cost, compromise: registered one/two-node views and trust cases, collude: registered residual linking, mailbox: registered request/record distinction")
 	markReplay := fs.String("mark-replay", "", "mark set: replay a mark-v1 observation JSONL without truth")
 	rev := fs.String("rev", "unknown", "code revision recorded in every row")
 	seed := fs.Int64("seed", 1, "base seed; every repeat derives its own from it")
@@ -195,6 +195,8 @@ func command(args []string, stdout, stderr io.Writer) int {
 	nodePhase := fs.String("node-phase", "structural", "node sets: structural, train, pilot or primary; coordinates come from the registered matrix")
 	nodePlan := fs.String("node-plan", "", "node sets: frozen plan path, required for train, pilot and primary")
 	peer := fs.Bool("peer", false, "compromise structural only: validate its peer subset")
+	containers := fs.Int("containers", 300, "vault set: one-volume and as many two-volume containers")
+	resamples := fs.Int("resamples", 10000, "vault set: bootstrap resamples of every interval")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, _ = io.Copy(stderr, &parseOutput)
@@ -226,8 +228,15 @@ func command(args []string, stdout, stderr io.Writer) int {
 		fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 		return markCommand(markFlags{flows: *flows, hops: *hops, duration: *duration, send: *send, repeats: *repeats, seed: *seed, suite: *suiteName, revision: *rev, out: *out, replay: *markReplay, explicit: explicit}, stdout, stderr)
 	}
+	if *set == "vault" {
+		return vaultCommand(vaultFlags{suite: *suiteName, seed: *seed, containers: *containers, resamples: *resamples, revision: *rev, out: *out, explicit: explicit, positional: fs.NArg()}, stdout, stderr)
+	}
 	if *markReplay != "" {
 		fmt.Fprintln(stderr, "-mark-replay requires -set mark")
+		return 2
+	}
+	if explicit["containers"] || explicit["resamples"] {
+		fmt.Fprintln(stderr, "-containers and -resamples require -set vault")
 		return 2
 	}
 
