@@ -895,7 +895,8 @@ any content. The place of the volume of pw_a is random in both worlds.
   proof of it: it is an assumption.
 - Where the argument ends: a password within the search, filesystem metadata, the memory of a
   running client, the environment (log line times, the mailbox, shell history). There is no
-  formal proof, there is the reasoning; the measurement is planned (EXPERIMENT, block 5).
+  formal proof, there is the reasoning; the measuring set is implemented, its series is not
+  recorded yet (EXPERIMENT, block 5). An AUC near 0.5 there refutes only the features of the block.
 
 ### The card
 

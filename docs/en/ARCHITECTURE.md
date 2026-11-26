@@ -1765,8 +1765,8 @@ statistical conditions and model-release limits.
 | vault/profile | the -peer client profile in a volume: the contact card, the own card from the volume's identity, the parsing rules | crypto, crypto/secmem, e2e, mailbox, noise, vault |
 | lab | harness that runs one configuration in one process, the observer on two links, seeds, sampling of chains, cell labels of block 7 | client, relay, link, wire, crypto, crypto/secmem, crypto/suite |
 | lab/nodeview | own child relay/client observations, isolated prediction/evaluation, bounded RAM capture, aggregate reports | lab, lab/metrics, client, conversation, crypto, crypto/secmem, e2e, internal/verify, link, mailbox, pki, relay, wire |
-| lab/metrics | correlation scores, AUC and its bootstrap interval, traffic multiplier and latency percentiles, share of compromised chains, cell features, discriminant, KS and TV, degrees of anonymity | standard library only |
-| lab/scenario | experiments that act on the system: a recipient forging a conversation of the end-to-end layer with the production session (Genuine, Forge, Verify, a recording and injecting provider wrapper), run by `cmd/lab -set deny` | crypto, crypto/secmem, e2e, noise |
+| lab/metrics | correlation scores, AUC and its bootstrap interval, traffic multiplier and latency percentiles, share of compromised chains, cell features, discriminant, KS and TV, degrees of anonymity, container area features, D1 and password search time | standard library only |
+| lab/scenario | experiments that act on the system: a recipient forging a conversation of the end-to-end layer with the production session (Genuine, Forge, Verify, a recording and injecting provider wrapper), run by `cmd/lab -set deny`; block 5 on the client container (a sample through vault and vault/profile, controls, trace, integrity, cost), run by `cmd/lab -set vault` | crypto, crypto/secmem, e2e, lab/metrics, mailbox, noise, vault, vault/profile |
 | lab/report | an empty package reserved for a report writer; today cmd/lab writes the reports | nothing yet |
 | web | planned: testbed dashboard ([#21](https://github.com/jimichi-org/jimichi/issues/21)); an empty package today | nothing yet |
 | cmd/relay, cmd/client, cmd/lab | entry points and configuration; cmd/client -peer with the admin port and the rebuild of the circuit | the packages above |
@@ -1781,9 +1781,9 @@ well: a CryptoProvider and the noise.Static interface.
 ## Client container
 
 Status: the packages vault and vault/profile and the commands `jimichi vault init` and `jimichi
-vault show` are implemented. The -peer client with a container (-vault) and the measurement of
-the property (EXPERIMENT, block 5) are planned
-([#20](https://github.com/jimichi-org/jimichi/issues/20)).
+vault show` are implemented. The set that measures the property (EXPERIMENT, block 5) is
+implemented, its series is not recorded yet. The -peer client with a container (-vault) is
+planned ([#20](https://github.com/jimichi-org/jimichi/issues/20)).
 
 The container is a client file of a constant size with one or two volumes, each under its own
 password. A written volume holds the pin, that is the contact card, and nothing else. The file
@@ -1958,7 +1958,8 @@ A volume holds `u8 version = 1 | canonical contact card`, at most 339 bytes.
 
 What is claimed and under which assumptions is written in CRYPTO ("Container") and THREAT_MODEL
 ("Client container"), the limits in LIMITATIONS. A distinguisher of one volume from two with
-controls and a trace of the file states are planned (EXPERIMENT, block 5). Statistical batteries
+controls, a trace of the file states, integrity by sampling and the cost of a guess are
+implemented by the set `cmd/lab -set vault` (EXPERIMENT, block 5), the series is not recorded yet. Statistical batteries
 such as NIST STS are no evidence: they can show that a file differs from random data, not that it
 is indistinguishable from it.
 

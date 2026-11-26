@@ -30,8 +30,8 @@ traffic sets. Block 4 records its own schedule and environment without seeded se
 The codes are used in every results table. Measured so far: A1 with the count correlation attack
 (block 1) and the choice of chains for A4 (block 3). The A3 timing-mark series is measured on its recorded historical revision
 (block 2). Block 4 implements a narrow cooperative client
-cell-key assay with a completed descriptive series, without full A5 validation; broader A5 and A6 experiments
-remain planned. For A2 the cell distinguisher is implemented (block 7) and its series remains planned.
+cell-key assay with a completed descriptive series, without full A5 validation. For the container file (A5 and A6) block 5 is implemented and its
+series is not recorded yet; broader A5 memory and disk experiments remain planned. For A2 the cell distinguisher is implemented (block 7) and its series remains planned.
 
 | Code | Adversary | What it sees and can do |
 |---|---|---|
@@ -40,7 +40,7 @@ remain planned. For A2 the cell distinguisher is implemented (block 7) and its s
 | A3 | Active network | delays, duplicates and drops cells, embeds a timing watermark in a flow |
 | A4 | Node compromise | full access to some of the nodes, including process memory: one or two of the three nodes of a chain, k of the N nodes a client draws its chains from |
 | A5 | Local on a machine | memory and disk of a node or a client during a session and after |
-| A6 | Local with history | several snapshots of the container file over time |
+| A6 | Local with history | several states of the container file: snapshots over time, backups, earlier versions |
 
 The adversary knows the design and the source code. Security rests on keys and statistical
 indistinguishability, not on the secrecy of the implementation.
@@ -136,17 +136,18 @@ key bytes to open recorded cells.
 
 ### Client container
 
-Status: the container is implemented (ARCHITECTURE, "Client container"), its metrics are planned
-([#20](https://github.com/jimichi-org/jimichi/issues/20)). NIST STS and entropy can show only
-that the ciphertext has no statistical structure; they do not show that a second volume is
-deniable. That is the task of the volume distinguisher.
+Status: implemented, the series is not recorded yet (block 5, [#20](https://github.com/jimichi-org/jimichi/issues/20)). The object to
+tell apart is the area the cover password does not open. Statistical batteries such as NIST STS
+and entropy per byte are not metrics here: they can show that the ciphertext differs from random
+data, not that one volume cannot be told from two.
 
-| Metric | Definition |
-|---|---|
-| NIST STS pass rate | out of the 15 tests, over at least 100 containers |
-| Entropy per byte | estimated from the sample, close to eight expected |
-| Volume distinguisher AUC | a classifier separates one-volume from two-volume containers; 0.5 expected |
-| Brute force cost | Argon2id parameters, time to open, cost estimate for a password of a given entropy |
+| Metric | Definition | Expected |
+|---|---|---|
+| AUC of distinguisher A2 | three features of the area the cover password does not open, two-volume containers against one-volume ones; BCa interval over containers at level 1 - 0.05/3 | the interval of every feature contains 0.5 |
+| AUC of distinguisher A1 | the same features on the whole file against random bytes of the same size | the interval of every feature contains 0.5 |
+| D1 | of the 15 pairs of six states of the file after creation, the number of pairs that differ in the area the cover password does not open | 0 of 15 |
+| Share of refused opens | for each case of damage to and substitution of the file | 1 when the volume that opens is changed; 0 when only the other area is changed |
+| Cost of a guess | core-seconds and wall clock of a wrong open, guesses per core-second, expected time to search 2^(H-1) guesses for H = 40, 60 and 80 | the numbers as they are |
 
 ## Experiment blocks
 
@@ -933,23 +934,136 @@ The broader scenarios below remain unimplemented and unmeasured, deferred beyond
 
 ### Block 5. Client container, adversaries A5 and A6
 
-Status: the container is implemented, the measurement is planned
-([#20](https://github.com/jimichi-org/jimichi/issues/20)).
+Status: implemented, the series is not recorded yet
+([#20](https://github.com/jimichi-org/jimichi/issues/20)); there are no numbers yet. The set
+`cmd/lab -set vault` checks, on the production vault package and at the production cost of the
+stretch, whether the file in one state and the password of one volume give away the second
+volume, whether the states of the file after creation add anything, whether opening a changed
+volume is refused, and what a password guess costs. What is claimed and under which assumptions:
+CRYPTO ("Container") and THREAT_MODEL ("Client container").
 
-| Scenario | Metric |
+The sample:
+
+| What | How |
 |---|---|
-| Ciphertext statistics | NIST STS, entropy, chi-square; no evidence about a hidden volume |
-| One volume against two | classifier AUC over a sample of containers |
-| Several snapshots over time | fraction of cases where the changes reveal the hidden volume |
-| Integrity | fraction of modifications detected, one hundred percent expected |
-| Cost to open | time at the chosen Argon2id parameters on the target hardware |
+| Containers | M one-volume and M two-volume containers per suite, M = 300 by default; made by the production `vault.Create`, their volumes filled by vault/profile |
+| Passwords | 128 bits from the seed, in the same base32 form that `jimichi vault init` prints; the claim covers only a generated password of at least 80 bits |
+| Contact cards | the card of a key nobody keeps, made as `jimichi keygen-card` makes one, with the mailbox address of the stand |
+| Cover password | the password of volume 0; a two-volume container has its second volume under a password of its own |
+| Object | the area the cover password does not open, 4096 bytes. lab finds it itself: it derives W, k_s and K_b through the CryptoProvider by the formulas of CRYPTO ("Container") and tries both areas. A lab test checks this derivation against the golden area vectors of the vault package; the production API does not give out the number of an area |
+| Reproducibility | statistical: the seed sets the passwords, the cards, the training halves and the bootstrap. vault takes the salt, r, the place of a volume and the key of an empty volume from crypto/rand, so the files of two runs differ; the files are not kept |
 
-NIST STS, entropy and chi-square are no evidence about a hidden volume: they can show that a file
-differs from random data, not that one volume cannot be told from two.
+Features of an area (lab/metrics; each has a known-answer test with the calculation written in
+the test; the positive class is the two-volume containers):
 
-For A6 the file is written once (ARCHITECTURE, "The single write"), so its snapshots are expected
-to be the same byte for byte; what the filesystem and the drive keep beyond the file is a
-boundary (LIMITATIONS). The result will be reported as measured.
+| Feature | Definition |
+|---|---|
+| chi_square_bytes | chi-square of the byte histogram against the uniform one |
+| duplicate_chunks | the number of 16-byte chunks equal to an earlier chunk of the same area |
+| learned_bit | on the training half, the bit position with the largest absolute difference of the frequencies of the two classes, and the sign of that difference; the score on the test half is that sign when the bit is 1, otherwise 0. The halves are drawn from each class by the seed, and the AUC is taken on the test half only |
+
+The distinguishers (the variant names follow the report fields a2 and a1; they are not adversary
+codes):
+
+| Variant | Positive class | Negative class | Object |
+|---|---|---|---|
+| A2, the main one | two-volume, M | one-volume, M | the area the cover password does not open |
+| A1 | all 2M files | 2M crypto/rand strings of the same size | the whole file, 8224 bytes; indistinguishability here is claimed only under the IND$ assumption (CRYPTO, "Container") |
+
+The controls show that the features and the trace catch a known defect. lab builds them from the
+production files; vault has no weakening switches.
+
+| Control | What lab does | Threshold | Expected |
+|---|---|---|---|
+| K1, zero area | replaces the object with zeroes in the one-volume files | the best feature has an AUC at least 0.45 away from 0.5 | 0.5: the chi-square of 4096 zeroes is (4096 - 16)^2/16 + 255 · 16 = 1044480 against about 255 for a random area |
+| K2, bit of r | clears the top bit of the first byte of r of the object in the two-volume files, the model of the fault "an MGM nonce stored as it is" | the learned_bit point at least 0.65 and an interval without 0.5 | 0.75: in two-volume containers the bit is always 0, in one-volume ones 0 with probability 1/2, AUC = 1/2 + 1/2 · 1/2; bit 0 is picked with direction -1 |
+| K3, resealed area | in a separate two-volume container, after state 1 of the trace, reseals the object with a fresh r under the key from the known password of the second volume and writes the file back, the model of an updatable volume; all five opens succeed | 8 of 15 pairs for the resealed one and 0 of 15 for a one-volume one without resealing | exactly the thresholds: states 0 and 1 against 2-5 give 2 · 4 = 8 pairs |
+
+Power of K2 at M = 300 (training 150 + 150, test 150 + 150): the probability of picking the wrong
+bit and the probability of a point below 0.65 are each below 1e-6; the calculation is written in
+the lab/metrics test.
+
+The inference rule:
+
+- The AUC and its BCa interval come from lab/metrics; Score.Entry is the number of the container,
+  so the bootstrap resamples containers, 10000 resamples (-resamples).
+- Three features give one verdict, so the interval level is 1 - 0.05/3: quantiles 0.05/6 and
+  1 - 0.05/6.
+- A variant distinguishes the classes when at least one feature has a two-sided interval without
+  0.5. The direction is not fixed in advance: an interval wholly below 0.5 is a distinguisher as
+  well. The verdict of the set is the verdict of A2.
+- At M = 300 the half-width of the interval around an AUC of 0.5 is about 0.056 for the features
+  without training (300 + 300) and 0.08 for learned_bit (150 + 150).
+- The report carries A2, A1 and the verdict only when K1 and K2 pass, and the verdict of the trace
+  only when K3 passes. Otherwise it holds the numbers of the controls, status `controls failed`
+  and the list failed_controls. Integrity and cost do not depend on the controls and are always
+  written.
+- Where the inference ends: an AUC near 0.5 refutes only these three features at this level. The
+  claim about the second volume rests on the reasoning of CRYPTO ("Container", "One and several
+  states of the file") under its assumptions, not on the measurement: another feature may
+  distinguish even when the block passes.
+
+The trace of states (A6):
+
+- The production vault API (Prepare, Write, Open) on one one-volume and one two-volume container:
+  state 0 after the only write, states 1-5 after five opens with the profile parsed; the
+  two-volume container is opened by both passwords in turn.
+- D1 (SnapshotReveal) counts how many of the 15 pairs of the six states differ in the object.
+  Expected 0 of 15 for both: the file is written once (ARCHITECTURE, "The single write"). The
+  verdict is `states equal` or `states differ`.
+- The trace sees only the bytes of the file. What the filesystem, the drive, backups and earlier
+  versions keep beyond the file is a boundary (LIMITATIONS). That the -peer client does not write
+  the file after creation is not checked by the trace.
+
+Integrity at the production cost, by sampling, on one two-volume container:
+
+| Case | Password | Expected outcome |
+|---|---|---|
+| flip_salt: a random bit of the salt flipped, 34 times | cover | refused, `no_volume` |
+| flip_opened_area: a bit of the area that opens flipped, 33 times | cover | refused, `no_volume` |
+| flip_other_area: a bit of the other area flipped, 33 times | cover | opens |
+| swap_areas: the areas swapped | cover; second volume | refused, `no_volume` |
+| truncate_one_byte, extend_one_byte: the file one byte shorter or longer | cover | refused, `not_vault` |
+| replace_other_area_with_empty: the other area replaced with a fresh empty volume | cover | opens |
+| replace_other_area_with_empty | second volume | refused, `no_volume` |
+
+For each case the report gives the number of trials, of opens, the share refused and the outcomes
+by class; a case holds when every trial gave the expected outcome. The vault tests check this
+exhaustively over every bit of the file on a cheap provider wrapper.
+
+The cost:
+
+- 30 opens with the right and 30 with a wrong password in turn on a one-volume container, so a
+  drift of the host falls on both; median and p95 by wall clock and by the process CPU time
+  (core-seconds, user + sys: getrusage on Linux, GetProcessTimes on Windows with a step of about
+  15.6 ms; wall clock only on other systems).
+- Guesses per core-second: 1 / the median core-seconds of a wrong open. The expected time to find
+  a password of entropy H on one core is 2^(H-1) · core-seconds per guess for H = 40, 60 and 80,
+  in core-seconds and years. When the median reads zero these rows are left out.
+- The stretch parameters are written as a string: `password/1: argon2id t=3 m=64MiB p=4` on
+  c25519, `password/1: pbkdf2 hmac-streebog-512 c=2600` on GOST. The cost on GPUs is not measured
+  (LIMITATIONS).
+
+Running it, on the Linux/amd64 stand with the host otherwise idle and no build during the series:
+
+```
+go run ./cmd/lab -set vault -suite c25519 -seed 1 -rev <revision> -out artifacts
+go run ./cmd/lab -set vault -suite gost -seed 1 -rev <revision> -out artifacts
+```
+
+- The flags of the set: `-suite`, `-seed`, `-rev`, `-out`, `-containers` (300 by default,
+  4..100000 allowed) and `-resamples` (10000 by default, 1..1000000 allowed). Any other flag, and
+  `-containers` or `-resamples` with another set, exit with code 2.
+- The containers are spread over min(GOMAXPROCS, 16) workers: an Argon2id stretch takes 64 MiB.
+  At M = 300 that is about 1700 stretches per suite. The files go to a temporary directory that is
+  removed when the set ends.
+- The report `artifacts/vault-<suite>-<UTC time>.json`: revision, seed, M, resamples, level, the
+  stretch parameters, workers, OS, core count, CPU model, host load before and after, status and
+  failed_controls, the controls, A2 and A1 with their features and intervals, the verdict, the
+  trace, integrity and cost. It holds no passwords, keys or volume bytes.
+- Exit code 0 when every control passes and every integrity case holds; 1 when a control fails or
+  a case does not hold (the report is still written) and on an error; 2 for invalid flags.
+- The numbers of block 5 are published only from a recorded report.
 
 ### Block 6. Performance and primitive cost
 
@@ -1347,6 +1461,7 @@ Rules:
 | 1, full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run | attack AUC at each level of a factor against the baseline configuration of the same set | Wilcoxon by repeat number with the rank-biserial correlation, Holm over the levels of one factor; between sets with different seeds Mann-Whitney with Cliff's delta | repeat r of every level of a set is derived from one seed, so these are pairs |
 | 2 | repeat block, all executed attempts retained | correct declaration with responsive survival per executed planned attempt; each positive relay period against zero within each client mode | matched Wilcoxon, fixed ten-comparison Holm family; degenerate p=1, unavailable null; only complete forty-block series inferential | exhaustive balanced-code global no-mark test within each run; contemporaneous decoys and separate sham arm; no resistance-threshold or equivalence claim |
 | 3 ([#117](https://github.com/jimichi-org/jimichi/issues/117)) | planned initial echo chain and -peer side process (its first chain), retaining refusals and unavailable outcomes, for shares and the mean R; clean run for AUC, the request feature and the mean R with circuits set up at once | shares of chains and the mean share of the route recovered against the model; residual linking AUC from the vantage point of the rogue nodes against the A1 AUC on the same runs; scenarios of the block against each other | shares: Wilson interval, mean R: normal interval; agreement by equivalence with a margin set before the series at level 1 - 0.05/m, for the mean R only where linking is exact by construction; deviation in SE of the model as a consistency check; AUC: Wilcoxon for a claimed difference, "not lower" only as non-inferiority by an interval of the paired differences with a margin set before the series; Holm over non-degenerate comparisons | the model proportion is known exactly, so the question is agreement, not rejection; both attacks watch the same links of one run |
+| 5, series not recorded ([#20](https://github.com/jimichi-org/jimichi/issues/20)) | container of the sample, M of each class | the AUC of every feature of variants A2 and A1 against 0.5 | BCa interval over containers, 10000 resamples, at level 1 - 0.05/3; a variant distinguishes when any interval excludes 0.5, in either direction; only when K1 and K2 pass | three features give one verdict; an AUC near 0.5 refutes only these features, and indistinguishability rests on the reasoning of CRYPTO ("Container") |
 | 7, series planned ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run of the series | AUC of the cell distinguisher on the run (unfolded), D and TV against the null level of the same run; the immediate mode with cover traffic against the constant rate by the per-run AUC and by the excess D - D_0 and TV - TV_0 over the null level, not by D and TV themselves: they depend on the group sizes, and the share of payload cells agrees between runs and modes only on average | a difference: D and TV against the null level by Wilcoxon over runs, the modes by the pairing rule above, Holm over the non-degenerate comparisons; equality with guessing: equivalence in which the lower bound of the s-quantile and the upper bound of the (1 - s)-quantile of the per-run AUC at level 1 - 0.05/m lie in the corridor [0.45, 0.55], at the constant-rate level only; the per-run AUCs of the series are independent since the direction comes from training runs outside it; s and the number of runs are set before the series from the pilot, m by the claim plan of the block | indistinguishability is claimed by equivalence of the AUC, not by a non-significant p, and bounds the share of runs that separate, not only the centre; D and TV serve only claims of a difference |
 
 ## Threats to validity
@@ -1369,8 +1484,8 @@ latency figures. Of the deniability properties this work has today deniability o
 constant rate with relays sending on their own clocks, nothing to surrender after a session and
 offline deniable authentication between clients, shown by a forgery and not measured
 (THREAT_MODEL); the client container
-([#20](https://github.com/jimichi-org/jimichi/issues/20)) is implemented, and the measurement of
-its property is planned (block 5). Numbers for other systems
+([#20](https://github.com/jimichi-org/jimichi/issues/20)) is implemented, and so is its
+distinguisher (block 5), with the series not recorded yet. Numbers for other systems
 will come from their documentation and papers, ours will be measured. No direct performance
 comparison will be made: the conditions differ, and that will be stated.
 
@@ -1394,8 +1509,10 @@ comparison will be made: the conditions differ, and that will be stated.
    copies remain listed in [CRYPTO](CRYPTO.md), "Known gaps".
 5. The container ([#20](https://github.com/jimichi-org/jimichi/issues/20)): `jimichi vault
    init` and `jimichi vault show`, one password opens the decoy volume and another the second
-   volume; the distinguisher of block 5 is planned. NIST STS results are no evidence about a
-   hidden volume: they show only that the ciphertext has no statistical structure.
+   volume; the distinguisher, controls and trace of block 5 (`cmd/lab -set vault`) are
+   implemented, the series is not recorded yet. An AUC near 0.5 refutes only the features of the
+   block. Statistical batteries such as NIST STS are no evidence about a hidden volume: they show
+   only that the ciphertext has no statistical structure.
 6. The cost table: GOST against X25519 from the benchmarks and round-trip latency for chains of
    two and three nodes; the rest of block 6 is planned
    ([#118](https://github.com/jimichi-org/jimichi/issues/118)).
