@@ -671,6 +671,14 @@ them:
 - Reflection: the directions have different Split keys and a direction byte in the context of
   every ratchet step, and the record kind enters h.
 - Identity hiding: KK sends no static keys.
+- A restart with the same identity (the -peer client with -vault): the ring of the last 64 kk1
+  lives in the memory of the process, so after a restart every old kk1 is outside it, and under the
+  same static key it opens again, where a new key used to refuse it. A restarted responder
+  without a session takes an old kk1 from its queue, or one the mailbox replays, since it keeps
+  records as long as it likes, answers kk2 and enters an unconfirmed session. This reveals no key:
+  the data keys need se = DH(s_I, e_R), and the initiator's ephemeral key of that kk1 is long
+  erased. An unconfirmed responder seals no real records, and a fresh kk1 of the initiator replaces
+  the unconfirmed session, so the recovery takes as long as without the replay.
 
 ### Hash ratchet
 
@@ -707,8 +715,11 @@ inner   = flags (bit 0: dummy, the rest 0) | u16be(length) | body | zeroes, 371 
 
 | Key | Made by | Where | Lives |
 |---|---|---|---|
-| client identity key (static agreement key) | GenerateEphemeral at start | secmem | until the process ends |
-| fetch capability F | crypto/rand | secmem; a copy in every request on the client heap and in the clear at the mailbox | until the -peer client process ends |
+| client identity key (static agreement key) | GenerateEphemeral at start; with -vault DerivePair from the volume key at every init or unlock (section "Container") | secmem | until the process ends |
+| fetch capability F | crypto/rand; with -vault DeriveKey `vault/fetch` from the volume key | secmem; a copy in every request on the client heap and in the clear at the mailbox | until the -peer client process ends |
+| volume password (-vault) | the body of PUT /vault/init or /vault/unlock | secmem; a copy in the read buffer of the net/http connection ("Known gaps") | until the end of Prepare or Open |
+| k_s and the volume buffer of a draft (-vault) | Prepare at init | secmem | until the write of the container or the stop |
+| buffer of the opened volume (-vault) | Open at unlock | secmem | until Parse, which copies the contact card out |
 | one-time key of the card check | GenerateEphemeral | secmem | one agreement when a session is made |
 | e_I | GenerateEphemeral | secmem | until kk2 or a new handshake: the wait for kk1 to be stored plus 60 s |
 | e_R | GenerateEphemeral | secmem | the writing of kk2 only |
@@ -1062,6 +1073,12 @@ Values of the container in the rows of the table:
   the public key, at every opening of a volume.
 - x/crypto chacha20poly1305 and gogost, Kuznyechik: the region key K_b in the cipher struct for
   one Seal or Open, as the record key mk_n of the end-to-end layer.
+
+The bodies of PUT /vault/init and PUT /vault/unlock on the admin port of the -peer client with
+-vault: net/http reads them through the bufio buffer of the connection, which is neither locked
+nor wiped and lives until the heap memory is reused. cmd/client reads a body into one buffer of a
+fixed size, so no growing read leaves copies behind, copies each password into secmem and, with
+zeroing on, clears that buffer after the operation.
 
 QueueID(F) leaves F outside secmem in the code of this work too: crypto.NewContext builds the
 transcript `mailbox/queue` with F on the heap and does not zero it, and the hash state holds it

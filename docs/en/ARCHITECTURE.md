@@ -26,7 +26,7 @@ topology.
 | crypto | CryptoProvider: two primitive suites behind one interface |
 | crypto/secmem | key buffers outside the Go heap: mlock, no dumps, zeroed on release |
 | wire | cell format and nested route encryption |
-| vault | client container: a file of a constant size with one or two volumes under passwords of their own; a volume holds the contact card, while the identity key and F are derived from the volume password and the salt of the file at every opening (section "Client container"); the -peer client with a container is planned ([#20](https://github.com/jimichi-org/jimichi/issues/20)) |
+| vault | client container: a file of a constant size with one or two volumes under passwords of their own; a volume holds the contact card, while the identity key and F are derived from the volume password and the salt of the file at every opening (section "Client container"); with -vault the -peer client takes its identity and its contact from a volume (subsection "The -peer client with a container") |
 | lab | experiment runs, the observer and metrics; cmd/lab writes the reports to artifacts/ |
 | web | planned ([#21](https://github.com/jimichi-org/jimichi/issues/21)), no code yet: testbed dashboard with the network graph, what each node learns and the live attack result |
 
@@ -732,6 +732,7 @@ circuits. One contact, one circuit and one queue per process.
 | -rate | 200 ms | the request period |
 | -interval, -count | 1 s, 1 | the period and the number of own messages; -interval 0 sends none, -count 0 without end |
 | -message | | the text of own messages, at most 363 bytes |
+| -vault | empty | the container file the identity comes from (subsection "The -peer client with a container") |
 
 Refused with code 2 before any network request and before the identity is made: no -mailbox or a
 mailbox not among -nodes; -hops below 2; -mode other than fixed; -cover above 0; -rate below
@@ -835,6 +836,141 @@ message or a node address.
 Exit codes: 0 on SIGTERM; 1 when the rebuild has failed for 10 min or on another failure; 2 when
 the flags do not pass the check; 3 when three circuits within 10 min ended in a refused reply. A
 changed card gives no exit.
+
+### The -peer client with a container
+
+With -vault the identity key and F come from a volume of the container (section "Client
+container") instead of GenerateEphemeral and crypto/rand, so a restart keeps the identity, the
+queue and the pin. Without -vault everything is as above.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| -vault | empty: the identity lives in RAM for the process | the path of the container file |
+
+Refused with code 2: -vault without -peer, or a directory of the file that does not exist. Code 1
+before the listener: a file at the path that is not a regular file of 8224 bytes (`the vault file
+is not a vault`).
+
+Start order with -vault:
+
+1. The key memory policy, the dump prevention, RLIMIT_MEMLOCK of at least 96 KiB; the suite, the
+   flags, the anchor, as above.
+2. vault.Clean removes a `<path>.tmp` that a creation killed before its link left behind.
+3. The admin listener: `admin listening on <address>`, then `vault locked`. No card_hash line and
+   no network request.
+4. The client waits for PUT /vault/init (no file) or PUT /vault/unlock (the file exists). SIGTERM in
+   the locked state: code 0.
+5. The identity and F derived from the key of the volume, the own card built from them:
+   `vault opened`.
+6. The first circuit and the conversation, as above.
+7. Unlock: the contact card of the volume is pinned on the path of PUT /contact, `contact pinned`.
+   Init: the draft of the container lives until its write.
+
+States: locked without a file, locked with a file, opening (an init or an unlock in flight up to
+the pin), running without a write (a draft), running, stopped (D-038).
+
+| Request | Locked, no file | Locked, file | Opening | Running, not written | Running | Stopped |
+|---|---|---|---|---|---|---|
+| PUT /vault/init | body below; Prepare; 204 once the conversation runs | 409 | 429 | 409 | 409 | 409 |
+| PUT /vault/unlock | 409 | Open, Parse, Fit, the contact's key; 204 once the contact is pinned | 429 | 409 | 409 | 409 |
+| GET /card | 503 | 503 | 503 | the own card | the own card | 409 |
+| PUT /contact | 503 | 503 | 503 | the checks of PUT /contact, Draft.Write with WithContact, then the pin | the same card 204, another one 409 and the stop | 409 |
+| GET /status | 503 | 503 | 503 | JSON below | JSON below | 409 |
+
+The body of PUT /vault/init, at most 2 KiB:
+
+```
+body  = block [ block ]
+block = password LF card LF          a line ends in LF or CR LF
+```
+
+- A password is 1 to 256 bytes without NUL and CR, copied into secmem at once.
+- The card line may be empty only in the first block: the contact of that volume comes with PUT
+  /contact. The second block's card is required.
+- Before any stretch: the card is canonical, of the provider's suite and names -mailbox, two cards
+  share neither the key nor the queue, the passwords differ. Each of these is 400 with the block
+  number in the answer and no line in the log.
+- After the stretch, on the identity of each volume: the key of the card passes a trial agreement
+  and is not the own key or queue; otherwise 400 `the key of the card does not pass`, without a
+  block number.
+- A card in the first block is written at once, before the first circuit: a client that exits
+  there keeps its container.
+
+The body of PUT /vault/unlock is one password line by the same rules; anything else is 400.
+
+The answers of PUT /vault/unlock other than 204; after each the client stays locked, every key of
+the attempt released, and the body is also the line of the log:
+
+| Code | Body and line | Cause |
+|---|---|---|
+| 403 | `vault: no volume opens with this password` | ErrNoVolume, which a volume of another suite gives as well |
+| 409 | `vault: the volume does not fit this client: mailbox` | the mailbox of the volume's contact is not -mailbox |
+| 409 | `vault: the volume does not fit this client: contact` | the contact's key does not pass the check of conv.Pair, run before the first circuit |
+| 409 | `vault: the volume is corrupt` | ErrCorrupt (also a scalar or an F of zeroes) and a content the profile refuses |
+| 500 | `vault: not opened: memory` | a secmem error (mmap, mlock) |
+| 500 | `vault: not opened: io` | a read error, or the file changed after the start |
+
+A failed init answers 500 with the same two classes and stays locked without a file. One init or
+unlock at a time: another one in flight gets 429.
+
+The write of the container:
+
+- The first PUT /contact of a client without a write runs the checks of PUT /contact, then
+  Draft.Write with WithContact, then the pin. The write comes before the pairing, so the trial
+  session of WithContact and the session of the conversation never hold locked pages at once.
+  The log gives `vault written` and then `contact pinned`.
+- A failed write answers 500 `vault: not written: <class>` with a line of the same text, and the
+  pin holds for the process. The classes: `write` (before the link: the tmp, its write and sync, the
+  seal), `link` (the link, or a file that appeared at the path), `sync` (after the link: the read
+  back or the sync of the directory), `memory` (a secmem error).
+- The same card again repeats the write with the content fixed by the first attempt, and only a
+  write that succeeded logs `vault written`. After `sync` the draft is spent: the file and the tmp
+  are removed, as `jimichi vault init` does, and a restart finds no container.
+- Another card while the write waits: 409 and the stop, the draft is released and nothing is
+  written. After the write the file never changes: the stop leaves it as it is.
+
+GET /status, JSON: `state` (unpaired, handshaking, established, confirmed, stale), the counters of
+the minute line under its names, `round_trips`, `last_round_trip_at` (RFC 3339) and
+`last_round_trip` once a reply came, `silent_for` in seconds since the pin or the last record of the
+contact that opened.
+
+The log with -vault:
+
+| Without -vault | With -vault |
+|---|---|
+| `card_hash=<hash>` at start | none; `admin listening on <address>`, `vault locked`, then `vault opened` |
+| | `vault written`, once in the life of a container |
+| `contact pinned card_hash=<hash> role=<role>` | `contact pinned` |
+| the minute line, `e2e round trip in <time>`, `e2e peer not reachable for <time>, pinned card_hash=<hash>` | none; the same values in GET /status |
+| `contact card changed, refusing: pinned card_hash=<hash>` | `contact card changed, refusing` |
+| | the refusal lines of unlock, init and the write above |
+| the lines of the circuit, `shutting down`, `conversation ended: <cause>`, the warnings | unchanged |
+
+No line names the region, the number of volumes, a password, a card hash, the role or the state of
+the conversation. A run with the decoy volume and a run with the real one give the same kinds of
+lines; the times of the lines are visible (LIMITATIONS). The operator takes the own card from GET
+/card or `jimichi vault show`.
+
+Restart and exit:
+
+- Any exit (SIGTERM, codes 1 and 3 of D-040, a refused first circuit, OOM, a node rollout) leads to
+  a locked start: the orchestrator restarts the process and the conversation waits for the
+  operator's unlock. The client fails closed.
+- Before the write a restart loses the new profile: init again, a new identity.
+- The stopped state is not kept in the file: after a restart the unlock restores the original pin,
+  and another card stops the client again. Leaving that contact takes a new container.
+- Recovery after a restart follows the session rules (subsection "Conversation"): a restarted
+  initiator's kk1 is refused by the confirmed session of the contact until that one goes stale
+  (90 s), and the next kk1 comes after the handshake timeout of 60 s; a restarted responder waits
+  for the initiator to go stale and start over. About 4 min at worst. Records of the old session in
+  the queue do not open and count as bad. An old kk1 replayed to a restarted responder opens again,
+  since the identity is the same, but gives a session that is never confirmed (CRYPTO, "KK
+  handshake").
+
+Locked memory (one page a secmem buffer): an unlock holds at most about 7 pages before any
+circuit, an init of two volumes at most 16; running without a write adds the draft's key and buffer
+to the 19 pages above, and a repeated write the two pages of its read back, 23 at most. The 96 KiB
+bound (24 pages) stays.
 
 ## Circuit setup
 
@@ -1694,7 +1830,7 @@ A valid certificate alone does not add a roster position: the operator chooses n
 
 | Source | Data |
 |---|---|
-| client | on the testbed the -peer clients: the lines of subsection "The -peer client", that is the round-trip time of every own message through the mailbox, every minute the state and the counters of the conversation, ends and rebuilds of the circuit by class only, the hashes of the own and of the pinned card, with no path, address, text or key. A client without -peer (cmd/client), per message: the size of the reply and the round-trip time, or a line when no reply comes within 5 s; at the end of the circuit the line `circuit closed`, or `circuit closed: client: reply refused: <check>` with the class of the reply or frame the client refused, naming neither a node nor a cell number, or `send: <class>` with the class of a failed send (with -fixed-chain the error itself, which can name the entry address and the local port); at start the name, fingerprint and certificate validity of every listed node whose bundle it verified, in the listed order (with -fixed-chain the descriptor validity as well), how many of the listed nodes were verified, and the number of hops; with a drawn chain never which nodes form it. In the lab harness, per run: the round-trip time of every message whose echo came back, matched by flow and sequence number, the number of messages a constant-rate schedule dropped, the number left unanswered, the number of clients that refused a reply or a link frame, and per flow whether and when its circuit closed; in the block 7 set also, for every data cell, whether it carries a message, from a wrapper of the client's provider (EXPERIMENT, block 7), a labelling the relays and the observer never see |
+| client | on the testbed the -peer clients: the lines of subsection "The -peer client", that is the round-trip time of every own message through the mailbox, every minute the state and the counters of the conversation, ends and rebuilds of the circuit by class only, the hashes of the own and of the pinned card, with no path, address, text or key; with -vault no card hash, role, counters line or round-trip line, which GET /status of the admin port gives instead (subsection "The -peer client with a container"). A client without -peer (cmd/client), per message: the size of the reply and the round-trip time, or a line when no reply comes within 5 s; at the end of the circuit the line `circuit closed`, or `circuit closed: client: reply refused: <check>` with the class of the reply or frame the client refused, naming neither a node nor a cell number, or `send: <class>` with the class of a failed send (with -fixed-chain the error itself, which can name the entry address and the local port); at start the name, fingerprint and certificate validity of every listed node whose bundle it verified, in the listed order (with -fixed-chain the descriptor validity as well), how many of the listed nodes were verified, and the number of hops; with a drawn chain never which nodes form it. In the lab harness, per run: the round-trip time of every message whose echo came back, matched by flow and sequence number, the number of messages a constant-rate schedule dropped, the number left unanswered, the number of clients that refused a reply or a link frame, and per flow whether and when its circuit closed; in the block 7 set also, for every data cell, whether it carries a message, from a wrapper of the client's provider (EXPERIMENT, block 7), a labelling the relays and the observer never see |
 | relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests), mirror requests answered to peers and peers refused by a proof of inconsistency (peer_mirror_requests, peers_refused), the epoch of the onion key and the failed attempts to rotate it (onion_epoch, onion_rotate_failed). With -exit mailbox also the mailbox counters (section "End-to-end layer and mailbox"), on loopback on request only, not on stdout. No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, on every rotation of the onion key a line with the new epoch and no key material, on a failed rotation one line per kind of cause (pages not mapped, pages not locked, key not locked, key refused by the ring, other), a fixed class with no size and no text of the underlying error, with no new line while consecutive failures share the class and a line again for the first failure after a success, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified, the classes `descriptor shorter than the least lifetime` and `not a proof of inconsistency` among them; with -consistency also one line `peer <addr>: refused: <rule>` with one of the seven rule texts when a peer is refused by a proof of inconsistency, one line per kind of cause `peer <addr>: mirror: <class>` when a peer's mirror cannot be fetched or parsed, its proof does not verify or a bundle in it does not pass (the classes of one pass one line each, a class that stays is not logged again), one line `a peer serves a proof against this node: <rule>` per process when a peer's mirror carries a proof against the node itself, and at start with -auth=false one line `WARNING: -consistency needs -auth, the check is off` |
 | network | in the lab harness only, inside its process and without a packet capture: the moment every frame crosses the client-entry link and the last link between nodes, the one into the exit, in both directions. There is no link past the exit to observe yet ([#47](https://github.com/jimichi-org/jimichi/issues/47)) |
 | memory | `lab -set keymem`: cooperative exact-byte matching of three client circuit cell keys only in Object payloads of a voluntary Go 1.27.4 export ([#24](https://github.com/jimichi-org/jimichi/issues/24), EXPERIMENT, block 4); only aggregate reports are retained; the registered Go 1.27.3 series is complete ([README](../../README.md#cooperative-key-memory-results)). External relay-memory acquisition remains unmeasured and deferred beyond v0.4.0 ([#192](https://github.com/jimichi-org/jimichi/issues/192)) |
@@ -1769,7 +1905,7 @@ statistical conditions and model-release limits.
 | lab/scenario | experiments that act on the system: a recipient forging a conversation of the end-to-end layer with the production session (Genuine, Forge, Verify, a recording and injecting provider wrapper), run by `cmd/lab -set deny`; block 5 on the client container (a sample through vault and vault/profile, controls, trace, integrity, cost), run by `cmd/lab -set vault` | crypto, crypto/secmem, e2e, lab/metrics, mailbox, noise, vault, vault/profile |
 | lab/report | an empty package reserved for a report writer; today cmd/lab writes the reports | nothing yet |
 | web | planned: testbed dashboard ([#21](https://github.com/jimichi-org/jimichi/issues/21)); an empty package today | nothing yet |
-| cmd/relay, cmd/client, cmd/lab | entry points and configuration; cmd/client -peer with the admin port and the rebuild of the circuit | the packages above |
+| cmd/relay, cmd/client, cmd/lab | entry points and configuration; cmd/client -peer with the admin port, the rebuild of the circuit and, with -vault, the container | the packages above |
 | cmd/jimichi | testbed CLI: certificate issuance, the card of a key that is thrown away at once, the hash of a card, creating and showing a client container (vault init, vault show) | pki, e2e, mailbox, crypto, crypto/suite, crypto/secmem, vault, vault/profile |
 
 Rule: no package of the system knows about lab. The experiment harness depends on the system, not
@@ -1780,10 +1916,11 @@ well: a CryptoProvider and the noise.Static interface.
 
 ## Client container
 
-Status: the packages vault and vault/profile and the commands `jimichi vault init` and `jimichi
-vault show` are implemented. The set that measures the property (EXPERIMENT, block 5) is
-implemented, its series is not recorded yet. The -peer client with a container (-vault) is
-planned ([#20](https://github.com/jimichi-org/jimichi/issues/20)).
+Status: the packages vault and vault/profile, the commands `jimichi vault init` and `jimichi
+vault show` and the -peer client with a container (-vault, subsection "The -peer client with a
+container") are implemented. The set that measures the property (EXPERIMENT, block 5) is
+implemented, its series is not recorded yet. The testbed overlay with -vault is planned
+([#20](https://github.com/jimichi-org/jimichi/issues/20)).
 
 The container is a client file of a constant size with one or two volumes, each under its own
 password. A written volume holds the pin, that is the contact card, and nothing else. The file

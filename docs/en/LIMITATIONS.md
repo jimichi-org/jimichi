@@ -420,10 +420,11 @@ English | [Русский](../ru/LIMITATIONS.md)
   circuits per TTL or N open circuits with one request per TTL, for up to 24 h (ARCHITECTURE,
   "Store"); such queues stand in the way of new pairs. Quotas are planned
   ([#84](https://github.com/jimichi-org/jimichi/issues/84)).
-- The identity and the pin of a -peer client live only in process memory: a restart of either
-  client gives a new identity and needs a new introduction (scripts/introduce.sh). The client
-  container is implemented, while the -peer client with it (-vault), whose identity survives a
-  restart, is planned ([#20](https://github.com/jimichi-org/jimichi/issues/20)). The stopped state
+- Without -vault the identity and the pin of a -peer client live only in process memory: a
+  restart of either client gives a new identity and needs a new introduction
+  (scripts/introduce.sh). With -vault the identity and the pin survive a restart, but the client
+  comes back locked (the item on the -peer client with a container); the testbed still runs its
+  clients without it ([#20](https://github.com/jimichi-org/jimichi/issues/20)). The stopped state
   after a foreign card is ended only by the operator.
 - The introduction trusts the kube API: whoever has pods/log and pods/portforward on the client
   pods can pin any card before the first pin or after a restart of the client. This is the same
@@ -698,12 +699,15 @@ English | [Русский](../ru/LIMITATIONS.md)
   overlapping runs on one path make the creation fail; there is no lock.
 - The single write: changing the contact means a new container, a new identity and a new
   introduction; the contact card of a second volume is needed already at creation.
-- The -peer client with a container (-vault) is planned, and it will have limits of its own: a
-  constant F is a constant queue by which the mailbox will link all runs with that container
+- The -peer client with a container (-vault, ARCHITECTURE, "The -peer client with a container")
+  is implemented, with limits of its own: a constant F is a constant queue by which the mailbox
+  links all runs with that container
   ([#84](https://github.com/jimichi-org/jimichi/issues/84),
-  [#87](https://github.com/jimichi-org/jimichi/issues/87)); a restart for any reason will leave
-  the client locked until the operator opens the volume; log lines carry no identity values, but
-  their times will show the starts and the openings.
+  [#87](https://github.com/jimichi-org/jimichi/issues/87)); a restart for any reason leaves the
+  client locked until the operator opens the volume, and the conversation recovers in about 4 min
+  at worst after the unlock; log lines carry no identity values, but their times show the starts
+  and the openings; the passwords reach the admin port in a request body, which net/http buffers
+  outside secmem (CRYPTO, "Known gaps").
 - A running client: copies of the password, the Argon2id matrix and the PBKDF2 state on the heap
   ([#36](https://github.com/jimichi-org/jimichi/issues/36),
   [#37](https://github.com/jimichi-org/jimichi/issues/37),
