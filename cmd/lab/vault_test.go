@@ -57,7 +57,7 @@ func TestVaultCLIRejectsUnrelatedExplicitFlags(t *testing.T) {
 
 func TestVaultCLIInvalidConfig(t *testing.T) {
 	for _, args := range [][]string{
-		{"-containers=3"}, {"-containers=100001"}, {"-resamples=0"}, {"-resamples=1000001"}, {"-suite=other"}, {"positional"},
+		{"-containers=3"}, {"-containers=100001"}, {"-resamples=119"}, {"-resamples=1000001"}, {"-suite=other"}, {"positional"},
 	} {
 		var out, errOut bytes.Buffer
 		if code := command(append([]string{"-set", "vault"}, args...), &out, &errOut); code != 2 {
@@ -104,7 +104,7 @@ func TestVaultSetFromTheCommandLine(t *testing.T) {
 	}
 	dir := t.TempDir()
 	var out, errOut bytes.Buffer
-	status := command([]string{"-set", "vault", "-suite", "gost", "-containers", "4", "-resamples", "20", "-seed", "3", "-rev", "abc", "-out", dir}, &out, &errOut)
+	status := command([]string{"-set", "vault", "-suite", "gost", "-containers", "4", "-resamples", "120", "-seed", "3", "-rev", "abc", "-out", dir}, &out, &errOut)
 	names := reports(t, dir)
 	if len(names) != 1 || !regexp.MustCompile(`^vault-gost-\d{8}-\d{6}\.json$`).MatchString(names[0]) {
 		t.Fatalf("reports %v, status %d, stderr %q", names, status, errOut.String())
@@ -117,7 +117,7 @@ func TestVaultSetFromTheCommandLine(t *testing.T) {
 	if err := json.Unmarshal(raw, &rep); err != nil {
 		t.Fatal(err)
 	}
-	if rep.Set != "vault" || rep.Suite != "gost" || rep.Rev != "abc" || rep.Seed != 3 || rep.Containers != 4 || rep.Resamples != 20 ||
+	if rep.Set != "vault" || rep.Suite != "gost" || rep.Rev != "abc" || rep.Seed != 3 || rep.Containers != 4 || rep.Resamples != 120 ||
 		rep.Cost.Runs != scenario.CostRuns || len(rep.Integrity) == 0 {
 		t.Fatalf("report %s", raw)
 	}

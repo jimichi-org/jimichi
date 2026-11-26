@@ -29,7 +29,9 @@ import (
 const (
 	// three features share one verdict
 	VaultLevel = 1 - 0.05/3
-	CostRuns   = 30
+	// fewer leave a tail of the interval at VaultLevel empty: 120 · 0.05/6 = 1
+	VaultMinResamples = 120
+	CostRuns          = 30
 
 	k1Distance     = 0.45
 	k2Point        = 0.65
@@ -223,8 +225,8 @@ func Vault(p jcrypto.CryptoProvider, cfg VaultConfig) (VaultReport, error) {
 		return VaultReport{}, errors.New("scenario: no provider")
 	case cfg.Containers < 4:
 		return VaultReport{}, errors.New("scenario: at least 4 containers of each kind, so each half has two")
-	case cfg.Resamples < 1:
-		return VaultReport{}, errors.New("scenario: at least one resample")
+	case cfg.Resamples < VaultMinResamples:
+		return VaultReport{}, fmt.Errorf("scenario: at least %d resamples", VaultMinResamples)
 	case cfg.Dir == "" || cfg.Random == nil:
 		return VaultReport{}, errors.New("scenario: no directory or random source")
 	}

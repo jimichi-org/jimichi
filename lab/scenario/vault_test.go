@@ -17,6 +17,13 @@ func runVault(t *testing.T, p cheap, containers, resamples int) VaultReport {
 	return rep
 }
 
+func TestVaultRefusesTooFewResamples(t *testing.T) {
+	_, err := Vault(cheap{realProvider(t, vaultSuites[0])}, VaultConfig{Containers: 4, Resamples: VaultMinResamples - 1, Dir: t.TempDir(), Random: rand.Reader})
+	if err == nil {
+		t.Fatal("accepted a tail of the interval without a resample")
+	}
+}
+
 // the strings a report may carry; anything longer is a value the set must
 // not write, such as a password or a card
 func checkStrings(t *testing.T, rep VaultReport) {
@@ -69,8 +76,8 @@ func TestVaultSetOnASmallPopulation(t *testing.T) {
 	for _, st := range vaultSuites {
 		t.Run(st.String(), func(t *testing.T) {
 			t.Parallel()
-			rep := runVault(t, cheap{realProvider(t, st)}, 4, 50)
-			if rep.Set != "vault" || rep.Suite != st.String() || rep.Containers != 4 || rep.Resamples != 50 || rep.Level != VaultLevel ||
+			rep := runVault(t, cheap{realProvider(t, st)}, 4, 120)
+			if rep.Set != "vault" || rep.Suite != st.String() || rep.Containers != 4 || rep.Resamples != 120 || rep.Level != VaultLevel ||
 				rep.Stretch == "" || rep.Workers < 1 {
 				t.Fatalf("header %+v", rep)
 			}

@@ -41,8 +41,8 @@ func vaultCommand(f vaultFlags, stdout, stderr io.Writer) int {
 	case f.containers < 4 || f.containers > 100000:
 		fmt.Fprintln(stderr, "vault: -containers must lie in 4..100000")
 		return 2
-	case f.resamples < 1 || f.resamples > 1000000:
-		fmt.Fprintln(stderr, "vault: -resamples must lie in 1..1000000")
+	case f.resamples < scenario.VaultMinResamples || f.resamples > 1000000:
+		fmt.Fprintf(stderr, "vault: -resamples must lie in %d..1000000\n", scenario.VaultMinResamples)
 		return 2
 	}
 	chosen, err := suite.Parse(f.suite)
