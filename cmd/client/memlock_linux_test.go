@@ -3,6 +3,7 @@
 package main
 
 import (
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -137,4 +138,62 @@ func TestPeerUnderTheMemlockMinimumNamesTheLimit(t *testing.T) {
 	if strings.Contains(out, "card_hash=") || bed.info.requests.Load() != 0 {
 		t.Fatalf("an identity or a request before the check:\n%s", out)
 	}
+}
+
+// a -vault client at the minimum with every key memory measure on: an init
+// of two volumes, the write of the first pin while the other client waits,
+// talk, a restart, the unlock and talk again, without a page it could not lock
+func TestVaultPeerTalksAtTheMemlockMinimum(t *testing.T) {
+	if !lockingIsBounded(t) {
+		t.Skip("locked memory is not bounded by RLIMIT_MEMLOCK here")
+	}
+	bed := newPeerBed(t, jcrypto.SuiteC25519)
+	// a restart recovers in about 4 min at the default stale bound
+	stale := max(3*time.Second, 40*bed.rate)
+	env := []string{asBoundClient + "=" + strconv.Itoa(minPeerMemlock), staleAfterVar + "=" + stale.String()}
+	talk := []string{"-interval", (messageTicks * bed.rate).String(), "-count", "0", "-respond", "-handshake-timeout", stale.String()}
+	path := vaultPath(t)
+	decoy := newPeerID(t, bed.p, bed.addrs[2]).card
+	vaultArgs := append([]string{"-vault", path}, talk...)
+
+	a := bed.start(t, "a", env, vaultArgs...)
+	b := bed.start(t, "b", env, talk...)
+	adminA := a.locked(t)
+	mustCall(t, http.MethodPut, adminA+"/vault/init", vaultPassword+"\n\nanother password\n"+decoy.String()+"\n", http.StatusNoContent)
+	cardA := vaultCard(t, adminA)
+	textB, _ := b.card(t, bed.p)
+	mustCall(t, http.MethodPut, adminA+"/contact", textB, http.StatusNoContent)
+	mustCall(t, http.MethodPut, "http://"+b.admin(t)+"/contact", cardA.String(), http.StatusNoContent)
+
+	short := func(pr *peerProc) {
+		t.Helper()
+		out := pr.out.String()
+		if pr.exited() || strings.Contains(out, "secmem: ") || strings.Contains(out, "not locked") || strings.Contains(out, "memory") {
+			t.Fatalf("%s ran short of locked memory:\n%s", pr.name, out)
+		}
+	}
+	talked := func(admin string, from int) {
+		t.Helper()
+		for limit := time.Now().Add(maxWait); ; time.Sleep(50 * time.Millisecond) {
+			if vaultStatus(t, admin)["round_trips"].(float64) >= 3 && roundTrips(b.out.String()) >= from+3 {
+				return
+			}
+			short(a)
+			if time.Now().After(limit) {
+				t.Fatal("no three round trips each")
+			}
+		}
+	}
+	talked(adminA, 0)
+	short(a)
+	short(b)
+	a.terminate(t)
+
+	a = bed.start(t, "a again", env, vaultArgs...)
+	adminA = a.locked(t)
+	mustCall(t, http.MethodPut, adminA+"/vault/unlock", vaultPassword+"\n", http.StatusNoContent)
+	talked(adminA, roundTrips(b.out.String()))
+	time.Sleep(200 * time.Millisecond)
+	short(a)
+	short(b)
 }

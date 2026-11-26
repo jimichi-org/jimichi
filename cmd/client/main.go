@@ -57,16 +57,21 @@ func main() {
 	skew := flag.Duration("skew", pki.Skew, "tolerated lag of this clock behind the nodes' clocks")
 	missing := flag.Int("missing", 1, "listed nodes the entry may leave out of its descriptors, at most the nodes beyond -hops; a listed node whose bundle does not pass the check counts as left out; the chain is drawn among the rest, and the entry's own bundle must pass")
 	consistency := flag.Bool("consistency", true, "refuse a listed node the entry serves a proof of inconsistency against, two descriptors it signed that contradict each other, both verified against -ca; such a node is counted apart from -missing, and a descriptor shorter than 16 min does not pass; false counts the node as left out and sets no least lifetime")
-	peer := flag.Bool("peer", false, "talk to one contact through a mailbox at the exit: print card_hash, hand out the card on GET /card of -admin and pin the contact's card on PUT /contact")
+	peer := flag.Bool("peer", false, "talk to one contact through a mailbox at the exit: print card_hash (with -vault none), hand out the card on GET /card of -admin and pin the contact's card on PUT /contact")
 	mailboxAddr := flag.String("mailbox", "", "with -peer: host:port of the node of -nodes that keeps the queues of the conversation and ends every chain")
 	admin := flag.String("admin", "127.0.0.1:9201", "with -peer: loopback IP literal and port of the admin listener")
 	coverPuts := flag.Bool("cover-puts", true, "with -peer: put a record into the contact's queue with every request, a dummy when no message waits, so the mailbox does not see when messages go")
 	respond := flag.Bool("respond", false, "with -peer: answer every message of the contact with its number and text")
 	handshakeTimeout := flag.Duration("handshake-timeout", 60*time.Second, "with -peer: how long the initiator waits for the answer to its handshake once the mailbox holds it, then starts over")
+	vaultPath := flag.String("vault", "", "with -peer: the container file whose volume gives the identity and holds the contact, opened by PUT /vault/init or /vault/unlock of -admin; empty keeps the identity in RAM for the process only")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
 
+	if *vaultPath != "" && !*peer {
+		logger.Print("-vault: only a -peer client holds a container")
+		os.Exit(exitFlags)
+	}
 	if *peer {
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -76,7 +81,7 @@ func main() {
 			hops: *hops, count: *count, missing: *missing,
 			fixed: *fixed, auth: *auth, consistency: *consistency, harden: *harden, coverPuts: *coverPuts, respond: *respond,
 			rate: *rate, jitter: *jitter, cover: *cover, interval: *interval,
-			skew: *skew, handshakeTimeout: *handshakeTimeout,
+			skew: *skew, handshakeTimeout: *handshakeTimeout, vault: *vaultPath,
 		}, logger, stop))
 	}
 

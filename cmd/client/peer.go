@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"sync"
@@ -25,13 +26,18 @@ import (
 	"github.com/jimichi-org/jimichi/internal/fetch"
 	"github.com/jimichi-org/jimichi/internal/verify"
 	"github.com/jimichi-org/jimichi/mailbox"
+	"github.com/jimichi-org/jimichi/pki"
 )
 
 const (
 	exitFlags = 2
 
 	// a client at its peak locks about 19 pages: the circuit and its link about
-	// 9, the identity and F 2, a handshake up to 5, the ratchet up to 3
+	// 9, the identity and F 2, a handshake up to 5, the ratchet up to 3. With
+	// -vault a draft not yet written adds its key and buffer, and a write while
+	// the session runs the key and the buffer of its read back: 23 at most,
+	// since the first write comes before the pairing. An unlock or an init
+	// holds at most 16 before any circuit
 	minPeerMemlock = 96 << 10
 
 	// how often one process may draw new middle hops after the first chain;
@@ -55,7 +61,12 @@ const (
 var (
 	reportEvery = time.Minute
 	rebuildFor  = conversation.DefaultRebuildFor
+	staleAfter  = conversation.DefaultStaleAfter
+	keepalive   = conversation.DefaultKeepalive
 )
+
+// replaced in tests to make the stretch of a password cheap
+var newProvider = suite.New
 
 var (
 	errNoMailbox = errors.New("the entry holds no bundle for the mailbox")
@@ -66,7 +77,7 @@ var (
 type peerFlags struct {
 	nodes, mailbox, admin, infoPort string
 	suite, keymem, ca, mode         string
-	message                         string
+	message, vault                  string
 	hops, count, missing            int
 	fixed, auth, consistency        bool
 	harden                          bool
@@ -75,65 +86,25 @@ type peerFlags struct {
 	skew, handshakeTimeout          time.Duration
 }
 
+// what every start of -peer settles before the identity
+type peerSetup struct {
+	p     jcrypto.CryptoProvider
+	addrs []string
+	exit  int
+	trust pki.Policy
+}
+
 // runs the -peer mode until a signal or the end of the conversation and
 // returns the exit code; every key is released by the time it returns
 func runPeer(f peerFlags, logger *log.Logger, stop <-chan os.Signal) int {
-	policy, err := secmem.ParsePolicy(f.keymem)
-	if err != nil {
-		logger.Printf("keymem: %v", err)
-		return exitFlags
+	set, code := prelude(f, logger)
+	if set == nil {
+		return code
 	}
-	if err := secmem.SetPolicy(policy); err != nil {
-		logger.Printf("keymem: %v", err)
-		return 1
+	if f.vault != "" {
+		return runVaultPeer(set, f, logger, stop)
 	}
-	if f.harden {
-		if err := secmem.HardenProcess(); err != nil {
-			logger.Printf("harden: %v", err)
-			return 1
-		}
-	}
-	if policy.Lock {
-		if err := checkMemlock(minPeerMemlock); err != nil {
-			logger.Print(err)
-			return 1
-		}
-		probe, err := secmem.New(32)
-		if err != nil {
-			logger.Printf("key memory: %v", err)
-			return 1
-		}
-		locked := probe.Locked()
-		probe.Release()
-		if !locked {
-			logger.Print("key memory is not locked, refusing to start")
-			return 1
-		}
-	}
-
-	chosen, err := suite.Parse(f.suite)
-	if err != nil {
-		logger.Print(err)
-		return exitFlags
-	}
-	p, err := suite.New(chosen)
-	if err != nil {
-		logger.Print(err)
-		return 1
-	}
-	addrs, exit, err := checkPeer(p, f)
-	if err != nil {
-		logger.Print(err)
-		return exitFlags
-	}
-	trust, err := trustPolicy(f.auth, f.ca, chosen, f.skew, f.consistency)
-	if err != nil {
-		logger.Print(err)
-		return exitFlags
-	}
-	if !f.auth {
-		logger.Print("WARNING: -auth=false, node keys are taken unverified from whoever answers the descriptor request")
-	}
+	p := set.p
 
 	capability, id, err := newPeerIdentity(p, f.mailbox)
 	if err != nil {
@@ -152,48 +123,15 @@ func runPeer(f peerFlags, logger *log.Logger, stop <-chan os.Signal) int {
 	// node, and whoever holds the card can put into the queue
 	logger.Printf("card_hash=%x", hash)
 
-	r := &route{
-		p: p, exit: exit, logger: logger,
-		sel: selection{
-			addrs: addrs, hops: f.hops, fixed: f.fixed, missing: f.missing, infoPort: f.infoPort,
-			auth: f.auth, trust: trust, consistency: f.consistency,
-			web: fetch.NewClient(), attempts: fetchAttempts, pause: fetchPause,
-			rnd: rand.Reader, now: time.Now,
-		},
-		dial: func(chain []client.Node) (conversation.Circuit, error) {
-			c, err := client.Dial(client.Config{Provider: p, Chain: chain, Jitter: f.jitter})
-			if err != nil {
-				return nil, err
-			}
-			return c, nil
-		},
-	}
+	r := peerRoute(set, f, logger)
 	first, err := r.first()
 	if err != nil {
 		logger.Printf("refusing to build the circuit: %s", peerCause(err))
 		return 1
 	}
-	logger.Printf("circuit of %d hops among %d listed nodes to the mailbox, request period %v", f.hops, len(addrs), f.rate)
+	logger.Printf("circuit of %d hops among %d listed nodes to the mailbox, request period %v", f.hops, len(set.addrs), f.rate)
 
-	conv, err := conversation.Start(conversation.Config{
-		Provider:   p,
-		Self:       id,
-		Fetch:      capability,
-		First:      first,
-		Dial:       r.rebuild,
-		Rate:       f.rate,
-		CoverPuts:  f.coverPuts,
-		RebuildFor: rebuildFor,
-		Session:    e2e.Options{HandshakeTimeout: f.handshakeTimeout},
-		Events: func(ev conversation.Event) {
-			switch ev.Kind {
-			case conversation.CircuitEnded:
-				logger.Print(endLine(ev.Cause))
-			case conversation.CircuitRebuilt:
-				logger.Print("circuit rebuilt through the same entry")
-			}
-		},
-	})
+	conv, err := startConversation(p, f, logger, id, capability, first, r.rebuild)
 	if err != nil {
 		_ = first.Close()
 		logger.Printf("conversation: %v", err)
@@ -220,11 +158,126 @@ func runPeer(f peerFlags, logger *log.Logger, stop <-chan os.Signal) int {
 	}()
 	logger.Printf("admin listening on %s", ln.Addr())
 
-	tk := &talk{
-		conv: conv, logger: logger, now: time.Now,
+	return serve(conv, ct, newTalk(conv, f, logger, false), logger, stop, true)
+}
+
+// the memory policy, the flags and the trust anchor; nil with the exit code
+// when the mode cannot run
+func prelude(f peerFlags, logger *log.Logger) (*peerSetup, int) {
+	policy, err := secmem.ParsePolicy(f.keymem)
+	if err != nil {
+		logger.Printf("keymem: %v", err)
+		return nil, exitFlags
+	}
+	if err := secmem.SetPolicy(policy); err != nil {
+		logger.Printf("keymem: %v", err)
+		return nil, 1
+	}
+	if f.harden {
+		if err := secmem.HardenProcess(); err != nil {
+			logger.Printf("harden: %v", err)
+			return nil, 1
+		}
+	}
+	if policy.Lock {
+		if err := checkMemlock(minPeerMemlock); err != nil {
+			logger.Print(err)
+			return nil, 1
+		}
+		probe, err := secmem.New(32)
+		if err != nil {
+			logger.Printf("key memory: %v", err)
+			return nil, 1
+		}
+		locked := probe.Locked()
+		probe.Release()
+		if !locked {
+			logger.Print("key memory is not locked, refusing to start")
+			return nil, 1
+		}
+	}
+
+	chosen, err := suite.Parse(f.suite)
+	if err != nil {
+		logger.Print(err)
+		return nil, exitFlags
+	}
+	p, err := newProvider(chosen)
+	if err != nil {
+		logger.Print(err)
+		return nil, 1
+	}
+	addrs, exit, err := checkPeer(p, f)
+	if err != nil {
+		logger.Print(err)
+		return nil, exitFlags
+	}
+	trust, err := trustPolicy(f.auth, f.ca, chosen, f.skew, f.consistency)
+	if err != nil {
+		logger.Print(err)
+		return nil, exitFlags
+	}
+	if !f.auth {
+		logger.Print("WARNING: -auth=false, node keys are taken unverified from whoever answers the descriptor request")
+	}
+	return &peerSetup{p: p, addrs: addrs, exit: exit, trust: trust}, 0
+}
+
+func peerRoute(set *peerSetup, f peerFlags, logger *log.Logger) *route {
+	return &route{
+		p: set.p, exit: set.exit, logger: logger,
+		sel: selection{
+			addrs: set.addrs, hops: f.hops, fixed: f.fixed, missing: f.missing, infoPort: f.infoPort,
+			auth: f.auth, trust: set.trust, consistency: f.consistency,
+			web: fetch.NewClient(), attempts: fetchAttempts, pause: fetchPause,
+			rnd: rand.Reader, now: time.Now,
+		},
+		dial: func(chain []client.Node) (conversation.Circuit, error) {
+			c, err := client.Dial(client.Config{Provider: set.p, Chain: chain, Jitter: f.jitter})
+			if err != nil {
+				return nil, err
+			}
+			return c, nil
+		},
+	}
+}
+
+func startConversation(p jcrypto.CryptoProvider, f peerFlags, logger *log.Logger, id *e2e.Identity, capability *secmem.Buffer,
+	first conversation.Circuit, dial func() (conversation.Circuit, error)) (*conversation.Conversation, error) {
+	return conversation.Start(conversation.Config{
+		Provider:   p,
+		Self:       id,
+		Fetch:      capability,
+		First:      first,
+		Dial:       dial,
+		Rate:       f.rate,
+		CoverPuts:  f.coverPuts,
+		Keepalive:  keepalive,
+		StaleAfter: staleAfter,
+		RebuildFor: rebuildFor,
+		Session:    e2e.Options{HandshakeTimeout: f.handshakeTimeout},
+		Events: func(ev conversation.Event) {
+			switch ev.Kind {
+			case conversation.CircuitEnded:
+				logger.Print(endLine(ev.Cause))
+			case conversation.CircuitRebuilt:
+				logger.Print("circuit rebuilt through the same entry")
+			}
+		},
+	})
+}
+
+func newTalk(conv *conversation.Conversation, f peerFlags, logger *log.Logger, quiet bool) *talk {
+	return &talk{
+		conv: conv, logger: logger, now: time.Now, quiet: quiet,
 		message: []byte(f.message), count: f.count, interval: f.interval, respond: f.respond,
 		waiting: make(map[uint32]time.Time),
 	}
+}
+
+// the talk loops and the main loop of a running conversation; report writes
+// the counter line of every reportEvery
+func serve(conv *conversation.Conversation, ct *contact, tk *talk, logger *log.Logger, stop <-chan os.Signal, report bool) int {
 	quit := make(chan struct{})
 	var loops sync.WaitGroup
 	loops.Add(2)
@@ -242,8 +295,12 @@ func runPeer(f peerFlags, logger *log.Logger, stop <-chan os.Signal) int {
 		loops.Wait()
 	}()
 
-	report := time.NewTicker(reportEvery)
-	defer report.Stop()
+	var lines <-chan time.Time
+	if report {
+		ticker := time.NewTicker(reportEvery)
+		defer ticker.Stop()
+		lines = ticker.C
+	}
 	done := conv.Done()
 	for {
 		select {
@@ -263,7 +320,7 @@ func runPeer(f peerFlags, logger *log.Logger, stop <-chan os.Signal) int {
 				return exitRefused
 			}
 			return 1
-		case <-report.C:
+		case <-lines:
 			ct.report(conv.Stats())
 		}
 	}
@@ -309,6 +366,11 @@ func checkPeer(p jcrypto.CryptoProvider, f peerFlags) (addrs []string, exit int,
 		return nil, 0, errors.New("-mailbox is not one of -nodes")
 	case f.fixed && exit != f.hops-1:
 		return nil, 0, fmt.Errorf("-fixed-chain: node %d of -nodes ends the chain and must be the mailbox", f.hops)
+	}
+	if f.vault != "" {
+		if st, err := os.Stat(filepath.Dir(f.vault)); err != nil || !st.IsDir() {
+			return nil, 0, errors.New("-vault: the directory of the file does not exist")
+		}
 	}
 	return addrs, exit, nil
 }
@@ -575,6 +637,11 @@ type talk struct {
 	count    int
 	interval time.Duration
 	respond  bool
+	// with -vault no line names a round trip: GET /status reads these
+	quiet    bool
+	trips    atomic.Uint64
+	lastAt   atomic.Int64
+	lastTook atomic.Int64
 
 	mu      sync.Mutex
 	next    uint32
@@ -651,9 +718,18 @@ func (t *talk) receive() {
 			delete(t.waiting, seq)
 			t.mu.Unlock()
 			// a duplicate finds nothing waiting
-			if ok {
-				t.logger.Printf("e2e round trip in %s", t.now().Sub(sentAt).Round(time.Microsecond))
+			if !ok {
+				break
 			}
+			now := t.now()
+			took := now.Sub(sentAt).Round(time.Microsecond)
+			if !t.quiet {
+				t.logger.Printf("e2e round trip in %s", took)
+				break
+			}
+			t.lastAt.Store(now.UnixNano())
+			t.lastTook.Store(int64(took))
+			t.trips.Add(1)
 		}
 		clear(m)
 	}

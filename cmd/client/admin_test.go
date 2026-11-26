@@ -497,7 +497,8 @@ func TestPeerFlagsAreCheckedBeforeTheNetwork(t *testing.T) {
 }
 
 // the design sets 96 KiB: a client at its peak locks about 19 pages of 4 KiB,
-// and the limit leaves room for five more
+// with -vault 23 while its container waits for the write, and the limit
+// leaves room for one more
 func TestPeerMemlockMinimumIs96KiB(t *testing.T) {
 	if minPeerMemlock != 98304 {
 		t.Fatalf("minPeerMemlock is %d bytes, want 96 KiB", minPeerMemlock)
