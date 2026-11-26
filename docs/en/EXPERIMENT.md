@@ -986,14 +986,20 @@ the lab/metrics test.
 The inference rule:
 
 - The AUC and its BCa interval come from lab/metrics; Score.Entry is the number of the container,
-  so the bootstrap resamples containers, 10000 resamples (-resamples).
+  so the bootstrap resamples containers, 10000 resamples (-resamples, at least 120: at
+  120 · 0.05/6 = 1 each tail of the interval holds at least one resample, with fewer a bound falls
+  on the extreme resample and the interval reads as a verdict).
 - Three features give one verdict, so the interval level is 1 - 0.05/3: quantiles 0.05/6 and
   1 - 0.05/6.
 - A variant distinguishes the classes when at least one feature has a two-sided interval without
   0.5. The direction is not fixed in advance: an interval wholly below 0.5 is a distinguisher as
   well. The verdict of the set is the verdict of A2.
-- At M = 300 the half-width of the interval around an AUC of 0.5 is about 0.056 for the features
-  without training (300 + 300) and 0.08 for learned_bit (150 + 150).
+- At M = 300 the half-width of the interval around an AUC of 0.5 is about 0.056 for
+  chi_square_bytes (300 + 300) and 0.08 for learned_bit (150 + 150).
+- duplicate_chunks is 0 for every container on a random area: a repeated 16-byte chunk among n
+  chunks has a probability of about n^2 / 2^129. All scores are tied, so the AUC is exactly 0.5
+  and the interval [0.5, 0.5] has zero width: the feature saw no structure, this is not precision
+  of the estimate. It can only tell apart an area with structure, as in K1.
 - The report carries A2, A1 and the verdict only when K1 and K2 pass, and the verdict of the trace
   only when K3 passes. Otherwise it holds the numbers of the controls, status `controls failed`
   and the list failed_controls. Integrity and cost do not depend on the controls and are always
@@ -1052,7 +1058,7 @@ go run ./cmd/lab -set vault -suite gost -seed 1 -rev <revision> -out artifacts
 ```
 
 - The flags of the set: `-suite`, `-seed`, `-rev`, `-out`, `-containers` (300 by default,
-  4..100000 allowed) and `-resamples` (10000 by default, 1..1000000 allowed). Any other flag, and
+  4..100000 allowed) and `-resamples` (10000 by default, 120..1000000 allowed). Any other flag, and
   `-containers` or `-resamples` with another set, exit with code 2.
 - The containers are spread over min(GOMAXPROCS, 16) workers: an Argon2id stretch takes 64 MiB.
   At M = 300 that is about 1700 stretches per suite. The files go to a temporary directory that is
