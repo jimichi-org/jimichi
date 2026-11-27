@@ -3,7 +3,7 @@ NAMESPACE ?= jimichi
 SUITE ?= c25519
 export CLUSTER NAMESPACE SUITE
 
-.PHONY: check test lint images kind-up kind-load deploy enroll introduce up redeploy start stop down logs stats sweep
+.PHONY: check test lint images kind-up kind-load deploy enroll introduce up redeploy start stop down logs stats sweep vault-demo
 
 check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
@@ -37,6 +37,9 @@ enroll:
 
 introduce:
 	bash scripts/introduce.sh
+
+vault-demo:
+	bash scripts/vault.sh
 
 up:
 	$(MAKE) kind-up

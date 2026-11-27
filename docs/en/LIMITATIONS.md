@@ -423,9 +423,9 @@ English | [Русский](../ru/LIMITATIONS.md)
 - Without -vault the identity and the pin of a -peer client live only in process memory: a
   restart of either client gives a new identity and needs a new introduction
   (scripts/introduce.sh). With -vault the identity and the pin survive a restart, but the client
-  comes back locked (the item on the -peer client with a container); the testbed still runs its
-  clients without it ([#20](https://github.com/jimichi-org/jimichi/issues/20)). The stopped state
-  after a foreign card is ended only by the operator.
+  comes back locked (the item on the -peer client with a container); the testbed runs its clients
+  without it by default, and make vault-demo runs them with it for the time of the demonstration
+  and returns to deploy/base. The stopped state after a foreign card is ended only by the operator.
 - The introduction trusts the kube API: whoever has pods/log and pods/portforward on the client
   pods can pin any card before the first pin or after a restart of the client. This is the same
   root of trust as certificate issuance. A script, not people, compares the card hashes

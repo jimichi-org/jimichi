@@ -76,6 +76,8 @@ check_inventory() {
       for manager in "${manager_list[@]}"; do
         case "$manager" in
           ''|kubectl|kubectl-client-side-apply|kubectl-rollout|kubectl-set|kube-controller-manager|kubelet) ;;
+          # the scheduler writes the status of a pod whose claim waits for its first consumer
+          kube-scheduler) [ "$kind" = Pod ] || { echo "external reconciliation manager $manager on $kind/$name" >&2; return 1; } ;;
           *) echo "external reconciliation manager $manager on $kind/$name" >&2; return 1 ;;
         esac
       done

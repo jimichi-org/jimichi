@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -31,7 +32,12 @@ var (
 
 func manifests(t *testing.T, name string) map[string]manifest {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "deploy", "base", name))
+	return manifestsIn(t, "base", name)
+}
+
+func manifestsIn(t *testing.T, dir, name string) map[string]manifest {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "deploy", dir, name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,18 +93,29 @@ func flagValue(args []string, flag string) string {
 // volume to write a key to
 func hardened(t *testing.T, m manifest) {
 	t.Helper()
-	for _, c := range []struct {
-		what string
-		ok   bool
-	}{
+	confined(t, m, append(confinement(m), want{"no volume", !strings.Contains(m.text, "volumes:") && !strings.Contains(m.text, "volumeMounts:")}))
+}
+
+type want struct {
+	what string
+	ok   bool
+}
+
+// what hardened asks of a pod besides having no volume
+func confinement(m manifest) []want {
+	return []want{
 		{"strategy Recreate", recreate.MatchString(m.text)},
 		{"IPC_LOCK added", ipcLock.MatchString(m.text)},
 		{"every other capability dropped", dropAll.MatchString(m.text)},
 		{"a read-only root", strings.Contains(m.text, "readOnlyRootFilesystem: true")},
 		{"no privilege escalation", strings.Contains(m.text, "allowPrivilegeEscalation: false")},
 		{"a user other than root", strings.Contains(m.text, "runAsNonRoot: true")},
-		{"no volume", !strings.Contains(m.text, "volumes:") && !strings.Contains(m.text, "volumeMounts:")},
-	} {
+	}
+}
+
+func confined(t *testing.T, m manifest, wants []want) {
+	t.Helper()
+	for _, c := range wants {
 		if !c.ok {
 			t.Errorf("%s: want %s", m.name, c.what)
 		}
@@ -258,5 +275,202 @@ func TestUpOrdersBuildBeforeCommonDeploymentWithoutPreload(t *testing.T) {
 	cluster, build, deploy := strings.Index(text, "kind create cluster"), strings.Index(text, "docker build"), strings.Index(text, "bash scripts/e2e.sh")
 	if cluster < 0 || build <= cluster || deploy <= build || strings.Count(text, "docker build") != 2 || strings.Count(text, "bash scripts/e2e.sh") != 1 || strings.Contains(text, "kind load") {
 		t.Fatalf("unexpected up dry run ordering or count: %s", text)
+	}
+}
+
+// a document without the comment lines that open it, with LF line ends
+func body(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for len(lines) > 0 && (strings.TrimSpace(lines[0]) == "" || strings.HasPrefix(lines[0], "#")) {
+		lines = lines[1:]
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+// the client of deploy/base as deploy/vault must hold it: these lines and only
+// these differ, each at its place
+func withVault(t *testing.T, base, claim string) string {
+	t.Helper()
+	var out []string
+	inserted := map[string]int{}
+	lines := strings.Split(base, "\n")
+	for i, line := range lines {
+		if line == "            limits: {cpu: 500m, memory: 128Mi}" {
+			out = append(out, "            limits: {cpu: 500m, memory: 256Mi}",
+				"      volumes:", "        - name: vault", "          persistentVolumeClaim: {claimName: "+claim+"}")
+			inserted["volumes"]++
+			continue
+		}
+		out = append(out, line)
+		switch {
+		case line == "        runAsGroup: 65532":
+			out = append(out, "        fsGroup: 65532")
+			inserted["fsGroup"]++
+		case i+1 < len(lines) && strings.HasPrefix(line, "            - ") && lines[i+1] == "          securityContext:":
+			out = append(out, `            - "-vault"`, `            - "/vault/peer.vault"`,
+				"          volumeMounts:", "            - {name: vault, mountPath: /vault}")
+			inserted["args"]++
+		}
+	}
+	for _, what := range []string{"fsGroup", "args", "volumes"} {
+		if inserted[what] != 1 {
+			t.Fatalf("%s: the place of %s found %d times in deploy/base, want once", claim, what, inserted[what])
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// deploy/vault is deploy/base byte for byte except for the volume, its mount,
+// -vault, fsGroup and the memory the stretch of a password takes
+func TestVaultOverlayIsBasePlusTheVault(t *testing.T) {
+	base, overlay := manifests(t, "client.yaml"), manifestsIn(t, "vault", "client.yaml")
+	for _, c := range []string{"a", "b"} {
+		name, claim := "Deployment/client-"+c, "vault-client-"+c
+		b, okB := base[name]
+		m, okM := overlay[name]
+		if !okB || !okM {
+			t.Fatalf("%s: in deploy/base %v, in deploy/vault %v", name, okB, okM)
+		}
+		if got, want := argsOf(t, m), append(argsOf(t, b), "-vault", "/vault/peer.vault"); !slices.Equal(got, want) {
+			t.Errorf("%s: args %q, want those of deploy/base and -vault /vault/peer.vault", name, got)
+		}
+		if got, want := body(m.text), withVault(t, body(b.text), claim); got != want {
+			t.Errorf("%s: the overlay differs from deploy/base beyond the vault:\n%s\nwant:\n%s", name, got, want)
+		}
+		confined(t, m, confinement(m))
+		explicitSuite(t, m)
+		labels := "{app: client, client: " + c + "}"
+		if strings.Count(m.text, labels) != 3 || !strings.Contains(m.text, "matchLabels: "+labels) {
+			t.Errorf("%s: want the labels and the selector %s", name, labels)
+		}
+		if strings.Contains(m.text, "ports:") {
+			t.Errorf("%s: want no ports", name)
+		}
+		if strings.Count(m.text, "volumes:") != 1 || strings.Count(m.text, "- name: vault") != 1 ||
+			strings.Count(m.text, "persistentVolumeClaim: {claimName: "+claim+"}") != 1 || strings.Count(m.text, "claimName:") != 1 {
+			t.Errorf("%s: want one volume, the claim %s", name, claim)
+		}
+		if strings.Count(m.text, "volumeMounts:") != 1 || strings.Count(m.text, "mountPath:") != 1 ||
+			strings.Count(m.text, "- {name: vault, mountPath: /vault}") != 1 {
+			t.Errorf("%s: want one mount, the vault at /vault", name)
+		}
+	}
+}
+
+func TestVaultClaimsAreSmallAndDefault(t *testing.T) {
+	overlay := manifestsIn(t, "vault", "client.yaml")
+	claims := 0
+	for _, m := range overlay {
+		if m.kind != "PersistentVolumeClaim" {
+			continue
+		}
+		claims++
+		want := "apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: " + m.name +
+			"\n  namespace: jimichi\nspec:\n  accessModes: [ReadWriteOnce]\n  resources: {requests: {storage: 1Mi}}"
+		if got := body(m.text); got != want {
+			t.Errorf("%s:\n%s\nwant:\n%s", m.name, got, want)
+		}
+	}
+	if claims != 2 {
+		t.Errorf("%d claims in deploy/vault, want two", claims)
+	}
+	for _, c := range []string{"a", "b"} {
+		m := overlay["Deployment/client-"+c]
+		claim := regexp.MustCompile(`claimName: (\S+)\}`).FindStringSubmatch(m.text)
+		if claim == nil || claim[1] != "vault-client-"+c {
+			t.Errorf("client-%s: claim %q, want vault-client-%s", c, claim, c)
+			continue
+		}
+		if _, ok := overlay["PersistentVolumeClaim/"+claim[1]]; !ok {
+			t.Errorf("client-%s: the claim %s is not in deploy/vault", c, claim[1])
+		}
+	}
+}
+
+// a relay keeps nothing on a disk in any manifest, and no manifest mounts a
+// directory of the node or a scratch volume
+func TestNoRelayHasAVolume(t *testing.T) {
+	root := filepath.Join("..", "deploy")
+	var files []string
+	err := filepath.WalkDir(root, func(file string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, file)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() && rel == "kind" {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() && strings.HasSuffix(rel, ".yaml") {
+			files = append(files, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(files)
+	if want := []string{"base/client.yaml", "base/network.yaml", "base/relay.yaml", "vault/client.yaml"}; !slices.Equal(files, want) {
+		t.Fatalf("manifests %q, want %q: a new one is checked here first", files, want)
+	}
+	relayLabel := regexp.MustCompile(`\bapp: relay\b`)
+	relays := 0
+	for _, file := range files {
+		dir, name := path.Split(file)
+		for _, m := range manifestsIn(t, strings.TrimSuffix(dir, "/"), name) {
+			if strings.Contains(m.text, "hostPath:") || strings.Contains(m.text, "emptyDir:") {
+				t.Errorf("%s %s: want no hostPath and no emptyDir", file, m.name)
+			}
+			if !relayLabel.MatchString(m.text) || m.kind == "NetworkPolicy" {
+				continue
+			}
+			if dir == "vault/" {
+				t.Errorf("%s: a relay %s in deploy/vault", file, m.name)
+			}
+			if m.kind == "Deployment" {
+				relays++
+			}
+			if strings.Contains(m.text, "volumes:") || strings.Contains(m.text, "volumeMounts:") {
+				t.Errorf("%s %s: a relay has a volume", file, m.name)
+			}
+		}
+	}
+	if relays != 5 {
+		t.Errorf("%d relay deployments under deploy/, want five", relays)
+	}
+}
+
+// the demonstration with -vault runs on the testbed of a developer only
+func TestVaultDemoStaysOutOfCI(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	makefile := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	target := regexp.MustCompile(`(?m)^vault-demo:\n((?:\t[^\n]*\n)+)`).FindStringSubmatch(makefile)
+	if target == nil || target[1] != "\tbash scripts/vault.sh\n" {
+		t.Errorf("Makefile: want the target vault-demo with the one recipe line bash scripts/vault.sh, got %q", target)
+	}
+	phony := regexp.MustCompile(`(?m)^\.PHONY:(.*)$`).FindStringSubmatch(makefile)
+	if phony == nil || !slices.Contains(strings.Fields(phony[1]), "vault-demo") {
+		t.Error("Makefile: vault-demo is not .PHONY")
+	}
+	workflows, err := filepath.Glob(filepath.Join("..", ".github", "workflows", "*"))
+	if err != nil || len(workflows) == 0 {
+		t.Fatalf("no CI workflows: %v", err)
+	}
+	for _, file := range workflows {
+		text, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, word := range []string{"vault-demo", "vault.sh", "deploy/vault"} {
+			if strings.Contains(string(text), word) {
+				t.Errorf("%s mentions %s: the demonstration is not part of CI", filepath.Base(file), word)
+			}
+		}
 	}
 }

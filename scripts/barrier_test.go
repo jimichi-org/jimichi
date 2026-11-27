@@ -217,6 +217,20 @@ func TestDeploymentBarrierStopsOwnedClientsBeforeRelays(t *testing.T) {
 	}
 }
 
+// the scheduler writes the binding of a pod whose claim waits for its first
+// consumer, as with the volumes of deploy/vault; it reconciles nothing
+func TestDeploymentBarrierTakesThePodsTheSchedulerBound(t *testing.T) {
+	before, relays := baseInventory()
+	before = strings.Replace(before, "|p-client-b|client|b||ReplicaSet,client-b-rs,r-client-b,true;|kubelet;|", "|p-client-b|client|b||ReplicaSet,client-b-rs,r-client-b,true;|kube-controller-manager;kube-scheduler;kubelet;|", 1)
+	if !strings.Contains(before, "kube-scheduler;") {
+		t.Fatal("no pod with the manager kube-scheduler")
+	}
+	status, out, _ := runBarrier(t, before, relays, "")
+	if status != 0 || !strings.Contains(out, "deployment barrier complete") {
+		t.Fatalf("status %d, output %s", status, out)
+	}
+}
+
 func TestDeploymentBarrierPreflightRefusesWithoutMutation(t *testing.T) {
 	before, relays := baseInventory()
 	for _, c := range []struct {
@@ -239,6 +253,8 @@ func TestDeploymentBarrierPreflightRefusesWithoutMutation(t *testing.T) {
 		{"job", before + "Job|lab|job|||||||||-|-|\n", "unexpected workload/controller", nil},
 		{"HPA", before + "HorizontalPodAutoscaler|scale|hpa|||||||||-|-|\n", "unexpected workload/controller", nil},
 		{"external manager", strings.Replace(before, "kubectl-client-side-apply;", "argocd-controller;", 1), "external reconciliation manager", nil},
+		{"scheduler on a Deployment", strings.Replace(before, "|kubectl-client-side-apply;|", "|kubectl-client-side-apply;kube-scheduler;|", 1), "external reconciliation manager kube-scheduler on Deployment/client-a", nil},
+		{"scheduler on a ReplicaSet", strings.Replace(before, "|kube-controller-manager;|", "|kube-controller-manager;kube-scheduler;|", 1), "external reconciliation manager kube-scheduler on ReplicaSet/client-a-rs", nil},
 		{"external owner", strings.Replace(before, "client|a|||", "client|a||Operator,stand,operator,true;|", 1), "conflicting labels", nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
