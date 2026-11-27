@@ -136,7 +136,7 @@ key bytes to open recorded cells.
 
 ### Client container
 
-Status: implemented, the series is not recorded yet (block 5, [#20](https://github.com/jimichi-org/jimichi/issues/20)). The object to
+Status: implemented, the series is not recorded yet (block 5, [#214](https://github.com/jimichi-org/jimichi/issues/214)). The object to
 tell apart is the area the cover password does not open. Statistical batteries such as NIST STS
 and entropy per byte are not metrics here: they can show that the ciphertext differs from random
 data, not that one volume cannot be told from two.
@@ -935,7 +935,7 @@ The broader scenarios below remain unimplemented and unmeasured, deferred beyond
 ### Block 5. Client container, adversaries A5 and A6
 
 Status: implemented, the series is not recorded yet
-([#20](https://github.com/jimichi-org/jimichi/issues/20)); there are no numbers yet. The set
+([#214](https://github.com/jimichi-org/jimichi/issues/214)); there are no numbers yet. The set
 `cmd/lab -set vault` checks, on the production vault package and at the production cost of the
 stretch, whether the file in one state and the password of one volume give away the second
 volume, whether the states of the file after creation add anything, whether opening a changed
@@ -1467,7 +1467,7 @@ Rules:
 | 1, full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run | attack AUC at each level of a factor against the baseline configuration of the same set | Wilcoxon by repeat number with the rank-biserial correlation, Holm over the levels of one factor; between sets with different seeds Mann-Whitney with Cliff's delta | repeat r of every level of a set is derived from one seed, so these are pairs |
 | 2 | repeat block, all executed attempts retained | correct declaration with responsive survival per executed planned attempt; each positive relay period against zero within each client mode | matched Wilcoxon, fixed ten-comparison Holm family; degenerate p=1, unavailable null; only complete forty-block series inferential | exhaustive balanced-code global no-mark test within each run; contemporaneous decoys and separate sham arm; no resistance-threshold or equivalence claim |
 | 3 ([#117](https://github.com/jimichi-org/jimichi/issues/117)) | planned initial echo chain and -peer side process (its first chain), retaining refusals and unavailable outcomes, for shares and the mean R; clean run for AUC, the request feature and the mean R with circuits set up at once | shares of chains and the mean share of the route recovered against the model; residual linking AUC from the vantage point of the rogue nodes against the A1 AUC on the same runs; scenarios of the block against each other | shares: Wilson interval, mean R: normal interval; agreement by equivalence with a margin set before the series at level 1 - 0.05/m, for the mean R only where linking is exact by construction; deviation in SE of the model as a consistency check; AUC: Wilcoxon for a claimed difference, "not lower" only as non-inferiority by an interval of the paired differences with a margin set before the series; Holm over non-degenerate comparisons | the model proportion is known exactly, so the question is agreement, not rejection; both attacks watch the same links of one run |
-| 5, series not recorded ([#20](https://github.com/jimichi-org/jimichi/issues/20)) | container of the sample, M of each class | the AUC of every feature of variants A2 and A1 against 0.5 | BCa interval over containers, 10000 resamples, at level 1 - 0.05/3; a variant distinguishes when any interval excludes 0.5, in either direction; only when K1 and K2 pass | three features give one verdict; an AUC near 0.5 refutes only these features, and indistinguishability rests on the reasoning of CRYPTO ("Container") |
+| 5, series not recorded ([#214](https://github.com/jimichi-org/jimichi/issues/214)) | container of the sample, M of each class | the AUC of every feature of variants A2 and A1 against 0.5 | BCa interval over containers, 10000 resamples, at level 1 - 0.05/3; a variant distinguishes when any interval excludes 0.5, in either direction; only when K1 and K2 pass | three features give one verdict; an AUC near 0.5 refutes only these features, and indistinguishability rests on the reasoning of CRYPTO ("Container") |
 | 7, series planned ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run of the series | AUC of the cell distinguisher on the run (unfolded), D and TV against the null level of the same run; the immediate mode with cover traffic against the constant rate by the per-run AUC and by the excess D - D_0 and TV - TV_0 over the null level, not by D and TV themselves: they depend on the group sizes, and the share of payload cells agrees between runs and modes only on average | a difference: D and TV against the null level by Wilcoxon over runs, the modes by the pairing rule above, Holm over the non-degenerate comparisons; equality with guessing: equivalence in which the lower bound of the s-quantile and the upper bound of the (1 - s)-quantile of the per-run AUC at level 1 - 0.05/m lie in the corridor [0.45, 0.55], at the constant-rate level only; the per-run AUCs of the series are independent since the direction comes from training runs outside it; s and the number of runs are set before the series from the pilot, m by the claim plan of the block | indistinguishability is claimed by equivalence of the AUC, not by a non-significant p, and bounds the share of runs that separate, not only the centre; D and TV serve only claims of a difference |
 
 ## Threats to validity
@@ -1489,10 +1489,9 @@ constant cell size, cover traffic, state kept on a node, deniability, primitive 
 latency figures. Of the deniability properties this work has today deniability of sending at a
 constant rate with relays sending on their own clocks, nothing to surrender after a session and
 offline deniable authentication between clients, shown by a forgery and not measured
-(THREAT_MODEL); the client container
-([#20](https://github.com/jimichi-org/jimichi/issues/20)) is implemented, and so is its
-distinguisher (block 5), with the series not recorded yet. Numbers for other systems
-will come from their documentation and papers, ours will be measured. No direct performance
+(THREAT_MODEL); the client container is implemented, and so is its distinguisher (block 5), with
+the series not recorded yet ([#214](https://github.com/jimichi-org/jimichi/issues/214)). Numbers for
+other systems will come from their documentation and papers, ours will be measured. No direct performance
 comparison will be made: the conditions differ, and that will be stated.
 
 ## What the defence shows
@@ -1513,11 +1512,11 @@ comparison will be made: the conditions differ, and that will be stated.
    in evaluated Object payloads does not establish erasure. Broader memory/disk/history scenarios
    remain unmeasured ([#192](https://github.com/jimichi-org/jimichi/issues/192)); known library
    copies remain listed in [CRYPTO](CRYPTO.md), "Known gaps".
-5. The container ([#20](https://github.com/jimichi-org/jimichi/issues/20)): `jimichi vault
-   init` and `jimichi vault show`, one password opens the decoy volume and another the second
+5. The container: `jimichi vault init`
+   and `jimichi vault show`, one password opens the decoy volume and another the second
    volume; the distinguisher, controls and trace of block 5 (`cmd/lab -set vault`) are
-   implemented, the series is not recorded yet. An AUC near 0.5 refutes only the features of the
-   block. Statistical batteries such as NIST STS are no evidence about a hidden volume: they show
+   implemented, the series is not recorded yet ([#214](https://github.com/jimichi-org/jimichi/issues/214)).
+   An AUC near 0.5 refutes only the features of the block. Statistical batteries such as NIST STS are no evidence about a hidden volume: they show
    only that the ciphertext has no statistical structure.
 6. The cost table: GOST against X25519 from the benchmarks and round-trip latency for chains of
    two and three nodes; the rest of block 6 is planned

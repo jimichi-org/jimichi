@@ -2037,8 +2037,8 @@ well: a CryptoProvider and the noise.Static interface.
 Status: the packages vault and vault/profile, the commands `jimichi vault init` and `jimichi
 vault show` and the -peer client with a container (-vault, subsection "The -peer client with a
 container") are implemented. The set that measures the property (EXPERIMENT, block 5) is
-implemented, its series is not recorded yet. The testbed overlay with -vault and make vault-demo
-are implemented (section "Deployment").
+implemented, its series is not recorded yet ([#214](https://github.com/jimichi-org/jimichi/issues/214)). The testbed
+overlay with -vault and make vault-demo are implemented (section "Deployment").
 
 The container is a client file of a constant size with one or two volumes, each under its own
 password. A written volume holds the pin, that is the contact card, and nothing else. The file
@@ -2233,9 +2233,9 @@ is indistinguishable from it.
   filesystem is read-only, the user is 65532, seccomp is RuntimeDefault and every capability is
   dropped; relays and clients keep only IPC_LOCK for mlock.
 - The clients use the Recreate strategy and the selector `{app: client, client: a|b}`; in
-  deploy/base every pod is a new identity. A full deployment, protocol rollout, suite switch or rollback requires
-  a complete stop barrier; per-Deployment Recreate does not replace it. make deploy,
-  scripts/redeploy.sh and direct scripts/e2e.sh invocation share this path.
+  deploy/base every pod is a new identity. A full deployment, protocol rollout, suite switch or
+  rollback requires a complete stop barrier; per-Deployment Recreate does not replace it. make
+  deploy, scripts/redeploy.sh and direct scripts/e2e.sh invocation share this path.
 - Before workload mutation, preflight checks SUITE (only c25519 or gost), the local kind context,
   NAMESPACE=jimichi, healthy nodes and exclusive control of the stand. Host lab and observer
   processes attached to it are stopped separately. The entire namespace controller and pod
