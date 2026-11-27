@@ -1,0 +1,21 @@
+package perf
+
+import (
+	"syscall"
+	"time"
+)
+
+// kernel and user time of the process; a FILETIME of a duration counts 100 ns
+// ticks, so Filetime.Nanoseconds, which takes it as a date, does not apply
+func ProcessCPU() (time.Duration, bool) {
+	h, err := syscall.GetCurrentProcess()
+	if err != nil {
+		return 0, false
+	}
+	var created, exited, kernel, user syscall.Filetime
+	if err := syscall.GetProcessTimes(h, &created, &exited, &kernel, &user); err != nil {
+		return 0, false
+	}
+	ticks := func(f syscall.Filetime) int64 { return int64(f.HighDateTime)<<32 | int64(f.LowDateTime) }
+	return time.Duration((ticks(kernel) + ticks(user)) * 100), true
+}
