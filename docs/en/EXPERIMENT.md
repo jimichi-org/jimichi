@@ -109,10 +109,12 @@ in block 7. The flow distinguisher is planned.
 | Metric | Definition |
 |---|---|
 | Bandwidth multiplier | frames on a link within the observation window over messages handed to the clients. Reported separately for the client-entry link and for the observed link between nodes, in each direction. The window opens when the flows start sending, once the setup of every flow has crossed every observed link: circuit setup and anything sent before it are excluded. Clients send only while the window is open. A frame at the moment the window opens counts, a frame at the moment it closes does not. A message handed over just before the window closes can cross a link, or come back, after it closes, so a single run without protection can read one frame per such message below x1 there; such runs are rare, and the median of a series without protection stays at x1 |
-| Goodput (planned, [#118](https://github.com/jimichi-org/jimichi/issues/118)) | payload bytes per second per client |
+| Goodput | payload bytes per second per client: in the closed loop of block 6 G_mean = Σ_f N_f P / ((D - w) F) and G_min = min_f N_f P / (D - w), P = MaxPayload(h); at a constant client rate the ceiling MaxPayload(h)/Rate by construction of the schedule, a formula, not a measurement |
 | Latency | median, 95th and 99th percentile. The lab harness measures the round trip: from handing a message to the client to the exit's echo coming back, matched to its message by sequence number, not by order |
-| Cost per cell | nanoseconds of CPU and allocations to strip a layer |
+| Cost per cell | nanoseconds of CPU and allocations per layer operation by position (client, entry, middle, exit), on both suites |
 | Cost per session | nanoseconds to agree a key, per suite |
+| Setup at a node | nanoseconds of CPU per setup with one and with two live onion keys, per suite |
+| Node throughput | T, cells forward per second with a reply at the exit of a one-node chain on n pinned CPUs, and c, core-nanoseconds of the node process per such cell |
 
 ### Key material hygiene
 
@@ -1073,24 +1075,32 @@ go run ./cmd/lab -set vault -suite gost -seed 1 -rev <revision> -out artifacts
 
 ### Block 6. Performance and primitive cost
 
-Status: partly implemented. go test -bench covers key generation, key agreement, signing,
-verification, one AEAD layer of a cell, the transcript hash, the derivation of the hop keys and
-the chaining of two agreements, the key from a password and the pair from a secret on both
-suites (crypto/suite), sealing a cell and layer stripping on c25519 (wire), and the KK
-handshake and one record of the hash ratchet on both suites (e2e). The lab reports round-trip latency for chains of two and more nodes. Planned
-([#118](https://github.com/jimichi-org/jimichi/issues/118)): the setup benchmark
-at a node with one and two onion keys, node throughput at saturation, goodput per client, latency
-for a chain of one node (the lab takes no fewer than two hops) and the cost of memory locking (the
-lab and the benchmarks have no switch for the key-memory measures).
+Status: implemented; no series is recorded. go test -bench covers key generation, key agreement,
+signing, verification, one AEAD layer of a cell, the transcript hash, the derivation of the hop
+keys and the chaining of two agreements, the key from a password and the pair from a secret on
+both suites (crypto/suite), the setup at a node with one and with two onion keys (relay) and the
+layer operations of a cell by position (wire) on both suites, and the KK handshake and one record
+of the hash ratchet on both suites (e2e). The set `cmd/lab -set perf` measures the latency of
+chains of one node and more, the throughput of a chain at saturation and a node on pinned CPUs,
+both suites in one invocation, with memory locking and without; `cmd/lab -set bench` summarises
+go test -bench calls of the relay and wire packages. Numbers are published only from a recorded
+series.
+
+Constants: the cell body is 494 bytes, the AEAD overhead is 16 bytes on both suites, and the
+payload is MaxPayload(h) = 494 - 16h - 2 bytes at h hops (476, 460, 444). The GOST suite fits no
+more than three layers into a setup cell, so the block has no level above three hops.
 
 | Measured | How |
 |---|---|
 | Key agreement | go test -bench, nanoseconds per operation, GOST against X25519 |
-| Setup during the grace period | nanoseconds per setup at a node holding one and two onion keys, GOST against X25519: the second key costs a second agreement, paid only during the grace period, 22 minutes of every hour on the testbed |
-| Layer stripping | nanoseconds and allocations per cell |
-| Node throughput | cells per second at saturation, on 1, 2 and 4 cores |
-| Latency by hop count | one, two, three nodes; p50, p95, p99 |
-| Cost of mlock | the same metrics with memory locking on and off |
+| Setup at a node | BenchmarkSetupAtNode (relay), `<suite>/keys=1/keymem=<level>`, `keys=2/layer=current` and `keys=2/layer=previous`: nanoseconds, bytes and allocations of one setup s_k with k live onion keys, that is the ring opening the layer under every live key, the hop key and the release of the cell key, with no link, extension or network; with an identity key; the cell of a one-node setup, the longest layer. With two keys the ring tries both to the end, and a wrong key fails only at the AEAD. Bytes and allocations count the Go heap only: secmem buffers off the heap are not in them |
+| Setup during the grace period | a model, not a measurement: s̄ = (1 - d) s_1 + d s_2, d = (TTL + Skew)/R; on the testbed TTL is 20 minutes, Skew 2 minutes, R 1 hour, d = 22/60. It holds when setups arrive evenly, and `-set bench` writes it with the label model_uniform_arrivals. The testbed clients build their circuits at start, so s̄ describes a node with even setups, not the testbed |
+| Layer operations | nanoseconds, bytes and allocations per cell, by position: the client BenchmarkSeal `hops=1, 2, 3` with the full payload MaxPayload(h) and BenchmarkOpenExit `hops=3`; the entry and the middle BenchmarkPeel `pos=entry, middle`; the exit BenchmarkOpenLast and BenchmarkSealReply with a reply of 128 bytes; the middle and the entry on the way back BenchmarkWrap `pos=middle, entry`. Link encryption, system calls and node mutexes are not in it; the random refill inside Peel and Wrap is |
+| Latency by hop count | the latency part: 1, 2 and 3 nodes, immediate sending, nodes forwarding at once, `-flows` flows with exponential gaps of mean `-send`, every echo of the run; p50, p95, p99 of the run with the tail rule; the increment per hop Δ_r(h) = L_r(h) - L_r(h - 1) within the pair of one repeat, the median of the differences |
+| Chain throughput | the chain part: a chain of three nodes, every node and client in one process, a closed loop, no cover and no pinning; X = N/(D - w) messages per second from the echoes that arrived in the window, on a ladder of the number of flows F; U_proc = ΔCPU of the process / ((D - w) GOMAXPROCS). It is the capacity of the whole testbed process on the host, not a figure of a node |
+| Goodput | in the chain and node parts: G_mean = Σ_f N_f P / ((D - w) F) and G_min = min_f N_f P / (D - w) bytes per second per client, P = MaxPayload(h) bytes one way, an echo not counted a second time |
+| Node throughput | the node part, linux only: the exit of a one-node chain in a child process on n pinned logical CPUs, one per core and in one L3 group by the topology the OS sees, the SMT siblings of the node CPUs given to nobody; under a hypervisor these are guest vCPUs with no promise of physical cores, and the row writes virtualized. The load generator runs on other CPUs, k circuits per CPU. T cells forward per second, each with a reply, from the node's counters and clock; c = ΔCPU of the node / Δcells, core-nanoseconds per cell; the bottleneck class node_cpu, generator or other, other not telling the node from the generator; T_sat is given only with a plateau and a node_cpu majority; c is compared only at the saturated step among node_cpu runs; E_n = T(n)/(n T(1)) is descriptive, and the frequency and the shared resources of the processor are in it |
+| Cost of mlock | the levels all (every memory measure) and nolock (the same measures without locking), which differ in locking alone; in the chain and latency parts the level holds for the whole testbed process, in the node part for the child node only, the generator never locks. The setup descriptively from the benchmarks; the cell by equivalence of the ratio all/nolock of X and T at the last step and of p50 at three hops, of X and T only when both levels saturate. No secmem buffer is on the path of a cell, which TestCellPathCreatesNoKey (wire) and TestEchoPathCreatesNoKey (relay, a live chain) check |
 | End-to-end layer | go test -bench, nanoseconds per KK handshake of both sides and per record of the hash ratchet, GOST against X25519 |
 | Key from a password | go test -bench (BenchmarkPasswordKey), wall and processor time per call, Argon2id against PBKDF2 with Streebog-512 |
 | Pair from a secret | go test -bench (BenchmarkDerivePair), wall and processor time per call, GOST against X25519 |
@@ -1127,6 +1137,94 @@ DerivePair in the GOST suite depends on the secret, so the benchmark cycles thro
 gives the mean; the worst case, 128 refused candidates, is timed by a separate benchmark in
 crypto/gost. No measurement is recorded yet, and the numbers are published only from a recorded
 run.
+
+#### Method of the perf set and the benchmarks
+
+- The load of the chain and node parts is a closed loop: every flow keeps at most W messages
+  without an echo (`-perf-inflight`) and sends the next on an echo. W is at most 64: the client
+  holds at most 64 unread replies and drops one more, and a reply in its queue still counts as
+  without an echo. An open loop does not fit: when nodes forward at once, a flow without pauses
+  piles up a queue in the socket buffers and runs into the write deadline, and when nodes send on
+  their own clocks, a full queue closes the circuit and the capacity is C/Period by construction.
+- The window opens once the setup of every circuit has crossed every link; [O + w, O + D) is
+  measured, w = `-perf-warmup`, D = `-duration`, the bounds half-open as for the bandwidth
+  multiplier. Before repeat 0 one warmup run of the first cell of the plan goes, a warmup row,
+  and it stays out of the summary.
+- Saturation: X̃_j is the median of X over the clean runs of step j of the ladder (F in the chain
+  part, k in the node part). A plateau is reached when there are at least two steps and
+  |X̃_K - X̃_{K-1}| <= tol X̃_{K-1}, tol = `-perf-plateau`; then X_sat = X̃_K. Otherwise the reason
+  is rising, declined (a fall at the last step is not saturation), short or undefined. The last
+  step is taken, not the maximum: the maximum of noisy medians is biased upwards. In the node part
+  T_sat is given only when the plateau is reached and a strict majority of the clean runs of step K
+  are of class node_cpu; otherwise the reason is generator or unattributed.
+- Bottleneck class: U_node is the busy share of the node CPUs from /proc/stat (user, nice, system,
+  irq, softirq), U_par the load of the generator CPUs; node_cpu when U_node >= 0.9, generator when
+  U_node < 0.9 and U_par >= 0.9, other otherwise. other does not separate a node held by something
+  other than the processor (node mutexes, system calls, the scheduler) from a generator with serial
+  steps per circuit at U_par far below the threshold, so it is not charged to the node. U_node comes
+  from /proc/stat and not from getrusage: the node CPUs belong to the node alone, and with interrupt
+  time accounting in the kernel the softirq of its own loopback sends is not in getrusage; U from
+  getrusage is written beside it.
+- Host noise: foreign_cores = max(0, busy - own)/Δt, where busy is user + nice + system + steal over
+  the CPUs of the run (in the node part the node CPUs, their SMT siblings and the load CPUs, in the
+  chain and latency parts the allowed mask) and own is the processor time of the parent and the
+  child node. irq and softirq are not in busy: they hold the loopback work of the run itself, and
+  foreign_cores would grow with the throughput; they are written as fields of their own. A run with
+  foreign_cores above `-perf-max-foreign` is noisy: it is counted and stays out of the medians.
+  Without interrupt time accounting ksoftirqd may run the softirq, and its time lands in system, so
+  the summary writes foreign_trend, the median of foreign_cores at the last step minus that at the
+  first, clean and noisy runs together. On the pilot on a quiet host foreign_trend must stay at most
+  0.1 core on every saturation line, otherwise the formula and the threshold are revised before the
+  series. loadavg before and after is written and is no threshold.
+- A CPU here is a logical CPU as the OS sees it. Under a hypervisor (WSL2, Docker Desktop, any VM)
+  it is a guest vCPU: pinning holds a thread on a vCPU, not on a physical core, the hypervisor sets
+  the SMT and L3 topology, and the host's work outside the guest is not visible. The row carries
+  virtualized, topology_known and noise_scope (host or guest); physical cores can be spoken of only
+  when virtualized = false.
+- Pinning: every thread of the child node is moved to its CPUs until a pass changes nothing, and
+  the masks of all threads are checked at every snapshot; for a node cell the parent is pinned to
+  the load CPUs and its mask is checked at the end of the window. A run with affinity_ok = false
+  does not count (unpinned_runs). Every node run goes in a fresh child process.
+- Order: the cells of a repeat run in a permutation of the seed and the repeat number, so drift of
+  the host falls on every level alike on average. A pair is the two levels of one repeat. In the
+  latency part a pair shares the seed and so the message gaps (common random numbers). In the chain
+  and node parts the seed sets nothing: they have no phases and no gaps, a pair is only a block by
+  repeat, and closeness in time is statistical.
+- Benchmarks: N calls of `go test -run '^$' -bench 'SetupAtNode|Seal|Peel|OpenLast|SealReply|Wrap|OpenExit'
+  -benchmem -cpu 1 -count 1 ./relay ./wire` under taskset, one file `call-<k>.txt` per call in
+  `artifacts/bench-raw-<rev>/`, in a linux container with `--ulimit memlock=-1` (without it the all
+  level is skipped and `-set bench` refuses). -count 1, since -count repeats each leaf back to back
+  and the suites would not alternate; -cpu 1, since the background work of the garbage collector
+  runs on the same core and nanoseconds per operation are the full cost of the core. A call with no
+  ok line for both packages, with a FAIL line or missing any leaf is dropped whole (dropped_calls);
+  pairs are built by call number. Within a call c25519 always goes first, and a linear drift within
+  a call shifts the ratio.
+- Goodput at a constant client rate: the ceiling MaxPayload(h)/Rate by construction of the
+  schedule, one cell per tick. This is a formula, not a measurement.
+- Values set before the series: the equivalence margin δ 0.05, tol 0.05, the class threshold 0.9,
+  noise 0.25 core, warmup 2 s, D 10 s, F 4, 8, 16, 32, 64, k 1, 2, 4 circuits per CPU, W 8, n 1, 2,
+  4 CPUs, for latency 4 flows and a mean gap of 20 ms. The size of the series comes from a pilot of
+  five repeats on the same revision and the same host: resampling the ratios of the pilot with the
+  same interval of the median at the same level (repeats_for_power in the summary), at least 30
+  repeats. A pilot claim with the reason unsaturated first calls for a revised ladder. The series
+  runs on linux entirely, with the cluster stopped and no builds on the host; rows of other systems
+  are marked series_eligible = false, and summaries of different systems are not mixed.
+
+Not measured in block 6:
+
+- the middle of a three-node chain on pinned CPUs;
+- throughput and the increment per hop when nodes send on their own clocks (the capacity C/Period
+  by construction);
+- network latency, loopback only ([#46](https://github.com/jimichi-org/jimichi/issues/46));
+- the rate of setups under load and parallel setups;
+- the link handshake with authentication;
+- the exit into a mailbox;
+- the testbed under a cgroup quota;
+- the contributions of offheap, dontdump and zero one by one;
+- goodput at a constant client rate (a formula only);
+- memory per circuit;
+- the value of the model s̄ on the testbed;
+- physical cores under a hypervisor.
 
 ### Block 7. Cell indistinguishability, adversary A2
 
@@ -1299,7 +1397,7 @@ Training, test and null levels:
 One convention for the full series of block 1
 ([#23](https://github.com/jimichi-org/jimichi/issues/23)), blocks 2
 ([#116](https://github.com/jimichi-org/jimichi/issues/116)), 3
-([#117](https://github.com/jimichi-org/jimichi/issues/117)) and 7. The procedures are implemented
+([#117](https://github.com/jimichi-org/jimichi/issues/117)), 6 and 7. The procedures are implemented
 once in lab/metrics (stats.go) and checked by tests with hand-computed answers; the summary of block
 7 calls them (Wilcoxon, Holm, the quantile interval, equivalence), the summaries of the other blocks
 will call them with their series.
@@ -1468,6 +1566,7 @@ Rules:
 | 2 | repeat block, all executed attempts retained | correct declaration with responsive survival per executed planned attempt; each positive relay period against zero within each client mode | matched Wilcoxon, fixed ten-comparison Holm family; degenerate p=1, unavailable null; only complete forty-block series inferential | exhaustive balanced-code global no-mark test within each run; contemporaneous decoys and separate sham arm; no resistance-threshold or equivalence claim |
 | 3 ([#117](https://github.com/jimichi-org/jimichi/issues/117)) | planned initial echo chain and -peer side process (its first chain), retaining refusals and unavailable outcomes, for shares and the mean R; clean run for AUC, the request feature and the mean R with circuits set up at once | shares of chains and the mean share of the route recovered against the model; residual linking AUC from the vantage point of the rogue nodes against the A1 AUC on the same runs; scenarios of the block against each other | shares: Wilson interval, mean R: normal interval; agreement by equivalence with a margin set before the series at level 1 - 0.05/m, for the mean R only where linking is exact by construction; deviation in SE of the model as a consistency check; AUC: Wilcoxon for a claimed difference, "not lower" only as non-inferiority by an interval of the paired differences with a margin set before the series; Holm over non-degenerate comparisons | the model proportion is known exactly, so the question is agreement, not rejection; both attacks watch the same links of one run |
 | 5, series not recorded ([#214](https://github.com/jimichi-org/jimichi/issues/214)) | container of the sample, M of each class | the AUC of every feature of variants A2 and A1 against 0.5 | BCa interval over containers, 10000 resamples, at level 1 - 0.05/3; a variant distinguishes when any interval excludes 0.5, in either direction; only when K1 and K2 pass | three features give one verdict; an AUC near 0.5 refutes only these features, and indistinguishability rests on the reasoning of CRYPTO ("Container") |
+| 6, series not recorded | clean run of `-set perf`; a repeat is a block with its cells in random order; a pair is the two levels of one repeat (sharing the message gaps in the latency part, with no common random numbers in the throughput parts); for the benchmarks the k-th complete go test call | GOST against X25519; the increment per hop; the number of CPUs; with memory locking and without | suites, hops, CPUs: the median of paired ratios or differences with the order-statistic interval at 0.95, throughput only when both sides saturate; mlock: equivalence of the interval of the median ratio at level 1 - 0.05/m within the corridor 1 ± δ, δ set before the series, the size by resampling the pilot with the same interval; no Holm family, no comparison of the block is a rejection | a multiple difference is described by its size; no secmem buffer is on the path of a cell, so the claim about the cost of locking is an equivalence, and a non-significant p would show nothing |
 | 7, series planned ([#23](https://github.com/jimichi-org/jimichi/issues/23)) | clean run of the series | AUC of the cell distinguisher on the run (unfolded), D and TV against the null level of the same run; the immediate mode with cover traffic against the constant rate by the per-run AUC and by the excess D - D_0 and TV - TV_0 over the null level, not by D and TV themselves: they depend on the group sizes, and the share of payload cells agrees between runs and modes only on average | a difference: D and TV against the null level by Wilcoxon over runs, the modes by the pairing rule above, Holm over the non-degenerate comparisons; equality with guessing: equivalence in which the lower bound of the s-quantile and the upper bound of the (1 - s)-quantile of the per-run AUC at level 1 - 0.05/m lie in the corridor [0.45, 0.55], at the constant-rate level only; the per-run AUCs of the series are independent since the direction comes from training runs outside it; s and the number of runs are set before the series from the pilot, m by the claim plan of the block | indistinguishability is claimed by equivalence of the AUC, not by a non-significant p, and bounds the share of runs that separate, not only the centre; D and TV serve only claims of a difference |
 
 ## Threats to validity
@@ -1479,6 +1578,11 @@ Rules:
 | Internal | the labels of block 7 are wrong, and the distinguisher is trained and tested against the wrong truth | the wrapper of the client's provider labels a cell by the AEAD instance of the innermost layer and the associated data of a data cell, not by length (a test with equal lengths on c25519 at three hops); in every run the labels are checked against the forward frames and the number of payload labels against the number of messages minus those dropped; a run that disagrees is left out and counted (label_mismatch) |
 | External | the testbed runs on one machine and the series in one process over loopback, network delays are not modelled | absolute latency figures belong to loopback and do not carry over to a network; network emulation profiles are planned ([#46](https://github.com/jimichi-org/jimichi/issues/46)) |
 | Construct | AUC alone does not imply a practical attack | TPR at FPR 0.01 and top-1 accuracy are reported alongside; the precision at the base rate is in the summary: for linking at the F of the testbed and at a pi fixed before the series, for cells at the share of payload cells on the testbed |
+| Internal | block 6: foreign work on the CPUs of the run, and a load generator that runs out before the node | the node and the load are pinned to different CPUs, noise as extra cores from /proc/stat without irq and softirq with a threshold set before the series, noisy runs out of the medians, bottleneck classes, other not charged to the node, the cells of a repeat in random order |
+| Internal | block 6: with interrupt time accounting the softirq of the run's own loopback traffic is not in getrusage | the class of the node from the busy time of its CPUs in /proc/stat with irq and softirq; c from getrusage describes the process without softirq, which is written beside the number |
+| Internal | block 6: frequency and boost, one core under load runs faster than several | frequency and governor are not controlled, the governor is written; E_n is descriptive, and the frequency and the shared resources of the processor are in it |
+| External | block 6: under a hypervisor a CPU is a guest vCPU, and the host's work outside the guest is not visible | virtualized, topology_known and noise_scope in every row and in the summary; physical cores only when virtualized = false |
+| External | block 6: the chain and latency parts share the process and the CPUs of the testbed, the observer's taps are inside the measurement, and the increment from one to two nodes includes one more link with a tap | the chain figure is named the capacity of the testbed process, not a figure of a node; the increment from two to three nodes carries no extra tap |
 | Reproducibility | randomness across runs | fixed seeds, configuration and code version in every report |
 | Survival bias | medians without broken and limited runs describe the runs where every circuit survived; when closures depend on the configuration, such as a node period close to the client's, its medians describe the luckier runs | runs, broken_runs, limited_runs and clean_runs, and in block 7 label_mismatch_runs as well, stand next to every median, and every row records which circuits closed and when (flow_closed, flow_closed_after); block 2 separately reports its completed marked series with all closed outcomes retained |
 
@@ -1518,9 +1622,9 @@ comparison will be made: the conditions differ, and that will be stated.
    ([#214](https://github.com/jimichi-org/jimichi/issues/214)). An AUC near 0.5 refutes only the
    features of the block. Statistical batteries such as NIST STS are no evidence about a hidden
    volume: they show only that the ciphertext has no statistical structure.
-6. The cost table: GOST against X25519 from the benchmarks and round-trip latency for chains of
-   two and three nodes; the rest of block 6 is planned
-   ([#118](https://github.com/jimichi-org/jimichi/issues/118)).
+6. The cost table: GOST against X25519 from the benchmarks, latency by hop count, the throughput of
+   a chain and of a node, the cost of memory locking (block 6, `cmd/lab -set perf` and
+   `-set bench`): implemented, no series recorded.
 7. A forged conversation: `cmd/lab -set deny` on both suites. Holding only its own keys, the
    recipient builds a transcript that passes the same check as the genuine one, while a forgery
    made with a fresh key in place of the recipient's fails it. Shown with its limits: offline
