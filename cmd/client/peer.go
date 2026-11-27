@@ -32,12 +32,13 @@ import (
 const (
 	exitFlags = 2
 
-	// a client at its peak locks about 19 pages: the circuit and its link about
-	// 9, the identity and F 2, a handshake up to 5, the ratchet up to 3. With
+	// a client at its peak locks about 19 pages, 20 on GOST, whose MixKey
+	// holds its seed and its output at once: the circuit and its link about 9,
+	// the identity and F 2, a handshake up to 5, the ratchet up to 3. With
 	// -vault a draft not yet written adds its key and buffer, and a write while
-	// the session runs the key and the buffer of its read back: 23 at most,
-	// since the first write comes before the pairing. An unlock or an init
-	// holds at most 16 before any circuit
+	// the session runs the key and the buffer of its read back: 23 at most, 24
+	// on GOST, since the first write comes before the pairing. An unlock or an
+	// init holds at most 17 before any circuit
 	minPeerMemlock = 96 << 10
 
 	// how often one process may draw new middle hops after the first chain;
@@ -158,7 +159,7 @@ func runPeer(f peerFlags, logger *log.Logger, stop <-chan os.Signal) int {
 	}()
 	logger.Printf("admin listening on %s", ln.Addr())
 
-	return serve(conv, ct, newTalk(conv, f, logger, false), logger, stop, true)
+	return serve(conv, ct, newTalk(conv, f, logger, false), logger, stop, true, nil)
 }
 
 // the memory policy, the flags and the trust anchor; nil with the exit code
@@ -276,8 +277,9 @@ func newTalk(conv *conversation.Conversation, f peerFlags, logger *log.Logger, q
 }
 
 // the talk loops and the main loop of a running conversation; report writes
-// the counter line of every reportEvery
-func serve(conv *conversation.Conversation, ct *contact, tk *talk, logger *log.Logger, stop <-chan os.Signal, report bool) int {
+// the counter line of every reportEvery, and exit carries the code of an exit
+// the admin port decided on
+func serve(conv *conversation.Conversation, ct *contact, tk *talk, logger *log.Logger, stop <-chan os.Signal, report bool, exit <-chan int) int {
 	quit := make(chan struct{})
 	var loops sync.WaitGroup
 	loops.Add(2)
@@ -307,6 +309,8 @@ func serve(conv *conversation.Conversation, ct *contact, tk *talk, logger *log.L
 		case <-stop:
 			logger.Print("shutting down")
 			return 0
+		case code := <-exit:
+			return code
 		case <-done:
 			if ct.halted() {
 				// the stopped state outlives the conversation: only the operator

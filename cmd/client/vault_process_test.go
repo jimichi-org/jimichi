@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,7 +15,9 @@ import (
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/e2e"
+	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/vault"
+	"github.com/jimichi-org/jimichi/vault/profile"
 )
 
 // a client process started by the tests below takes this in place of the
@@ -71,17 +73,13 @@ func mustCall(t *testing.T, method, url, body string, want int) {
 	}
 }
 
-func vaultStatus(t *testing.T, admin string) map[string]any {
+func vaultStatus(t *testing.T, admin string) statusFields {
 	t.Helper()
 	code, text := httpCall(t, http.MethodGet, admin+"/status", "")
 	if code != http.StatusOK {
 		t.Fatalf("GET /status = %d %q", code, text)
 	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(text), &m); err != nil {
-		t.Fatal(err)
-	}
-	return m
+	return decodeStatus(t, text)
 }
 
 // SIGTERM where there is one; Windows has none to send, so the process is
@@ -196,9 +194,15 @@ func TestVaultClientStart(t *testing.T) {
 // locked; the unlock gives the same card, pins the contact without a PUT, and
 // the conversation resumes while the other client sees no other card. The
 // file is written once, and no line names a card, a role, the session or a
-// round trip
+// round trip. Both suites, on the cheap stretch
 func TestVaultClientResumesAfterARestart(t *testing.T) {
-	bed := newPeerBed(t, jcrypto.SuiteC25519)
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) { resumesAfterARestart(t, s) })
+	}
+}
+
+func resumesAfterARestart(t *testing.T, s jcrypto.Suite) {
+	bed := newPeerBed(t, s)
 	stale := max(3*time.Second, 40*bed.rate)
 	env := []string{reportEveryVar + "=" + bed.reportEvery().String(), staleAfterVar + "=" + stale.String()}
 	talk := []string{"-interval", (messageTicks * bed.rate).String(), "-count", "0", "-respond", "-handshake-timeout", stale.String()}
@@ -222,7 +226,7 @@ func TestVaultClientResumesAfterARestart(t *testing.T) {
 	}
 	written := fileBytes(t, path)
 
-	trips := func(admin string) float64 { return vaultStatus(t, admin)["round_trips"].(float64) }
+	trips := func(admin string) uint64 { return vaultStatus(t, admin).RoundTrips }
 	waitFor := func(what string, done func() bool) {
 		t.Helper()
 		for limit := time.Now().Add(maxWait); !done(); time.Sleep(50 * time.Millisecond) {
@@ -232,9 +236,9 @@ func TestVaultClientResumesAfterARestart(t *testing.T) {
 		}
 	}
 	waitFor("round trips both ways", func() bool { return trips(adminA) >= 2 && roundTrips(b.out.String()) >= 2 })
-	if st := vaultStatus(t, adminA); st["last_round_trip"] == nil || st["silent_for"] == nil ||
-		(st["state"] != "established" && st["state"] != "confirmed") {
-		t.Fatalf("GET /status %v", st)
+	if st := vaultStatus(t, adminA); st.LastRoundTripMS == nil || st.LastRoundTripAt == nil || st.SilentFor == nil ||
+		st.Container != containerWritten || (st.State != "established" && st.State != "confirmed") {
+		t.Fatalf("GET /status %+v", st)
 	}
 	a.stop(t)
 	checkVaultOutput(t, a, append(cardSecrets(cardA, cardB), vaultPassword)...)
@@ -247,7 +251,9 @@ func TestVaultClientResumesAfterARestart(t *testing.T) {
 	if got := vaultCard(t, adminA); !bytes.Equal(got.Bytes(), cardA.Bytes()) {
 		t.Fatalf("the card after the restart %s, before it %s", got, cardA)
 	}
-	again.await(t, "the pin from the volume", func(out string) bool { return strings.Contains(out, " contact pinned\n") })
+	if !strings.Contains(again.out.String(), " contact pinned\n") {
+		t.Fatalf("no pin from the volume before the answer:\n%s", again.out.String())
+	}
 	seen := roundTrips(b.out.String())
 	waitFor("the conversation after the restart", func() bool {
 		return trips(adminA) >= 2 && roundTrips(b.out.String()) >= seen+2
@@ -262,6 +268,97 @@ func TestVaultClientResumesAfterARestart(t *testing.T) {
 	mustCall(t, http.MethodGet, "http://"+b.admin(t)+"/card", "", http.StatusOK)
 	checkVaultOutput(t, again, append(cardSecrets(cardA, cardB), vaultPassword)...)
 	again.stop(t)
+}
+
+// an open whose first chain cannot be built answers before the listener goes,
+// and the process exits with code 1; the operator reads from the answer that
+// no container is on disk
+func TestVaultClientNotStarted(t *testing.T) {
+	bed := newPeerBed(t, jcrypto.SuiteC25519)
+	m := *bed.info.mirror.Load()
+	entries, err := pki.ParseMirror(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	short, err := pki.MarshalMirror(entries[:2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	bed.info.mirror.Store(&short)
+	path := vaultPath(t)
+	pr := bed.startVault(t, "no chain", path, nil)
+	admin := pr.locked(t)
+	code, text := httpCall(t, http.MethodPut, admin+"/vault/init", vaultPassword+"\n\n")
+	if want := notStarted + "circuit, " + noContainer + "\n"; code != http.StatusServiceUnavailable || text != want {
+		t.Fatalf("the init: %d %q, want %q", code, text, want)
+	}
+	if code := pr.exit(t, 60*time.Second); code != 1 || exists(path) {
+		t.Fatalf("exit code %d, file %v:\n%s", code, exists(path), pr.out.String())
+	}
+	if out := pr.out.String(); !strings.Contains(out, " refusing to build the circuit: ") || logsAnAddress(out, bed.addrs) {
+		t.Fatalf("the line of the chain:\n%s", out)
+	}
+}
+
+// a SIGTERM ends a locked client and an open that waits for its first chain
+// alike with code 0; meanwhile the routes of the running client say the
+// volume is opening
+func TestVaultClientStopsWhileOpening(t *testing.T) {
+	nodes := strings.Join([]string{"127.0.0.1:1", "127.0.0.1:2", "127.0.0.1:3"}, ",")
+	args := func(path string) []string {
+		return []string{"-peer", "-nodes", nodes, "-mailbox", "127.0.0.1:3", "-mode", "fixed", "-auth=false",
+			"-harden=false", "-keymem", "none", "-admin", "127.0.0.1:0", "-vault", path}
+	}
+	env := []string{cheapStretchVar + "=1"}
+	p := provider(t, jcrypto.SuiteC25519)
+	path := vaultPath(t)
+	mustCreate(t, cheapStretch{CryptoProvider: p}, path, volumeSpec{vaultPassword, profile.New(p, "127.0.0.1:3", cardOf(t, p, "127.0.0.1:3"))})
+
+	pr := startClient(t, "locked", env, args(path)...)
+	pr.locked(t)
+	pr.stop(t)
+
+	pr = startClient(t, "opening", env, args(path)...)
+	admin := pr.locked(t)
+	type answer struct {
+		code int
+		text string
+	}
+	result := make(chan answer, 1)
+	// a kill on Windows ends the request without an answer
+	go func() {
+		req, err := http.NewRequest(http.MethodPut, admin+"/vault/unlock", strings.NewReader(vaultPassword+"\n"))
+		if err != nil {
+			result <- answer{}
+			return
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			result <- answer{}
+			return
+		}
+		defer resp.Body.Close()
+		text, _ := io.ReadAll(resp.Body)
+		result <- answer{resp.StatusCode, string(text)}
+	}()
+	for limit := time.Now().Add(30 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, text := httpCall(t, http.MethodGet, admin+"/card", ""); text == openingText+"\n" {
+			break
+		}
+		if time.Now().After(limit) {
+			t.Fatalf("not opening:\n%s", pr.out.String())
+		}
+	}
+	mustCall(t, http.MethodGet, admin+"/status", "", http.StatusServiceUnavailable)
+	mustCall(t, http.MethodPut, admin+"/vault/unlock", vaultPassword+"\n", http.StatusTooManyRequests)
+	if runtime.GOOS == "windows" {
+		return
+	}
+	pr.terminate(t)
+	got := <-result
+	if want := notStarted + "shutdown, " + onDisk + "\n"; got.code != http.StatusServiceUnavailable || got.text != want {
+		t.Fatalf("the unlock: %d %q, want %q", got.code, got.text, want)
+	}
 }
 
 // the second volume gives another card and its own contact, and a run with

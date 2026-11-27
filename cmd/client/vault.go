@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,14 @@ const (
 	maxInitBody = 2 << 10
 	// one password line and its CR LF
 	maxUnlockBody = jcrypto.PasswordMax + 2
+
+	// how long the answer that ends the process has to reach the operator
+	// before the listener goes
+	answerFor = 2 * time.Second
+
+	// unlocks refused in a row before the pause, and its longest step
+	freeUnlocks    = 3
+	maxUnlockPause = 64 * time.Second
 )
 
 // the lines of the refusals are also the bodies of the answers: fixed
@@ -42,7 +51,23 @@ const (
 	lineMemory   = "vault: not opened: memory"
 	lineIO       = "vault: not opened: io"
 	lineNotVault = "the vault file is not a vault"
+	lineNoStart  = "the conversation did not start"
 	notWritten   = "vault: not written: "
+	notPinned    = "vault: not pinned: "
+	notStarted   = "vault: not started: "
+
+	onDisk      = "the container is on disk"
+	noContainer = "no container"
+	openingText = "the volume is opening"
+	pauseText   = "wait before the next unlock"
+	leavingText = "shutting down"
+)
+
+// what GET /status says of the file
+const (
+	containerDraft     = "draft"
+	containerWritten   = "written"
+	containerUnsettled = "unsettled"
 )
 
 // replaced in tests to fail as a drive fails
@@ -53,7 +78,7 @@ type vaultState int
 const (
 	lockedNoFile vaultState = iota
 	lockedFile
-	// an init or an unlock in flight, up to the pin of the contact
+	// an init or an unlock in flight, up to its answer
 	opening
 	running
 )
@@ -71,6 +96,7 @@ func runVaultPeer(set *peerSetup, f peerFlags, logger *log.Logger, stop <-chan o
 		return 1
 	}
 	va := newVaultAdmin(set.p, f, logger, exists)
+	va.listed = len(set.addrs)
 	ln, err := net.Listen("tcp", f.admin)
 	if err != nil {
 		logger.Printf("admin: %v", err)
@@ -90,33 +116,18 @@ func runVaultPeer(set *peerSetup, f peerFlags, logger *log.Logger, stop <-chan o
 	select {
 	case <-stop:
 		logger.Print("shutting down")
-		_ = srv.Close()
-		va.drain()
+		va.shut(srv)
 		return 0
 	case req = <-va.opened:
 	}
-
 	r := peerRoute(set, f, logger)
-	first, err := r.first()
-	if err != nil {
-		logger.Printf("refusing to build the circuit: %s", peerCause(err))
-		req.release()
-		req.done <- openResult{http.StatusServiceUnavailable, "the circuit could not be built"}
-		_ = srv.Close()
-		va.drain()
-		return 1
+	l, code := va.start(req, r.first, r.rebuild, stop)
+	if l == nil {
+		va.shut(srv)
+		return code
 	}
-	logger.Printf("circuit of %d hops among %d listed nodes to the mailbox, request period %v", f.hops, len(set.addrs), f.rate)
-	l, err := va.attach(req, first, r.rebuild)
-	if err != nil {
-		logger.Printf("conversation: %v", err)
-		_ = srv.Close()
-		va.drain()
-		return 1
-	}
-	code := serve(l.conv, l.ct, l.tk, logger, stop, false)
-	_ = srv.Close()
-	va.drain()
+	code = serve(l.conv, l.ct, l.tk, logger, stop, false, va.exit)
+	va.shut(srv)
 	l.release()
 	return code
 }
@@ -140,8 +151,8 @@ func vaultFileExists(path string) (bool, error) {
 type handover struct {
 	pr     *profile.Profile
 	writer *draftWriter
-	// the contact pinned once the conversation runs, and the answer of a
-	// write that failed before the chain
+	// the contact the volume fixed, pinned before the answer, and the answer
+	// of a write that failed before the chain
 	pin   *e2e.Card
 	wrote openResult
 	done  chan openResult
@@ -157,6 +168,15 @@ func (o *handover) release() {
 	if o.writer != nil {
 		o.writer.close()
 	}
+}
+
+// an unlock opened a file that is there; an init has one once its write
+// reached the link
+func (o *handover) where() string {
+	if o.writer == nil || o.writer.linked() {
+		return onDisk
+	}
+	return noContainer
 }
 
 // what a running client holds; release goes in the order of the
@@ -179,25 +199,43 @@ func (l *live) release() {
 	}
 }
 
+func (l *live) container() string {
+	if l.writer == nil {
+		return containerWritten
+	}
+	return l.writer.container()
+}
+
 type vaultAdmin struct {
 	p      jcrypto.CryptoProvider
 	f      peerFlags
 	logger *log.Logger
 	now    func() time.Time
+	listed int
+	// replaced in tests to refuse the pin
+	pairs func(*conversation.Conversation) pairing
 
 	mu      sync.Mutex
 	state   vaultState
 	closing bool
 	ops     sync.WaitGroup
+	// the 403s of unlock so far, and the end of the pause they set
+	refused int
+	resume  time.Time
 
 	live      atomic.Pointer[live]
 	opened    chan *handover
 	quit      chan struct{}
 	closeOnce sync.Once
+	// the code of an exit a running client decided on
+	exit chan int
 }
 
 func newVaultAdmin(p jcrypto.CryptoProvider, f peerFlags, logger *log.Logger, exists bool) *vaultAdmin {
-	va := &vaultAdmin{p: p, f: f, logger: logger, now: time.Now, opened: make(chan *handover), quit: make(chan struct{})}
+	va := &vaultAdmin{
+		p: p, f: f, logger: logger, now: time.Now,
+		opened: make(chan *handover), quit: make(chan struct{}), exit: make(chan int, 1),
+	}
 	if exists {
 		va.state = lockedFile
 	}
@@ -213,7 +251,7 @@ func (va *vaultAdmin) handler() http.Handler {
 	mux.HandleFunc("GET /status", va.whenRunning(va.status))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !va.enter() {
-			http.Error(w, "shutting down", http.StatusServiceUnavailable)
+			http.Error(w, leavingText, http.StatusServiceUnavailable)
 			return
 		}
 		defer va.ops.Done()
@@ -237,19 +275,58 @@ func (va *vaultAdmin) enter() bool {
 	return true
 }
 
-func (va *vaultAdmin) drain() {
+// from here on every request is 503 and an open waiting for its start ends
+func (va *vaultAdmin) close() {
 	va.mu.Lock()
 	va.closing = true
 	va.mu.Unlock()
 	va.closeOnce.Do(func() { close(va.quit) })
+}
+
+func (va *vaultAdmin) drain() {
+	va.close()
 	va.ops.Wait()
+}
+
+// the answer that ends the process is written before the listener closes
+func (va *vaultAdmin) shut(srv *http.Server) {
+	va.close()
+	ctx, cancel := context.WithTimeout(context.Background(), answerFor)
+	_ = srv.Shutdown(ctx)
+	cancel()
+	_ = srv.Close()
+	va.ops.Wait()
+}
+
+// a pin that failed on a running client: every later request is 503 and the
+// process exits, a closed conversation with the code of its end
+func (va *vaultAdmin) leave(conv *conversation.Conversation, err error) {
+	code := 1
+	if errors.Is(err, conversation.ErrClosed) && errors.Is(conv.Err(), conversation.ErrRefused) {
+		code = exitRefused
+	}
+	va.close()
+	select {
+	case va.exit <- code:
+	default:
+	}
+}
+
+func (va *vaultAdmin) current() vaultState {
+	va.mu.Lock()
+	defer va.mu.Unlock()
+	return va.state
 }
 
 func (va *vaultAdmin) whenRunning(h func(*live, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		l := va.live.Load()
 		if l == nil {
-			http.Error(w, "locked: no volume is open", http.StatusServiceUnavailable)
+			text := "locked: no volume is open"
+			if va.current() == opening {
+				text = openingText
+			}
+			http.Error(w, text, http.StatusServiceUnavailable)
 			return
 		}
 		h(l, w, r)
@@ -265,6 +342,10 @@ func (va *vaultAdmin) begin(w http.ResponseWriter, from vaultState) bool {
 		http.Error(w, "another init or unlock is under way", http.StatusTooManyRequests)
 		return false
 	case from:
+		if from == lockedFile && va.now().Before(va.resume) {
+			http.Error(w, pauseText, http.StatusTooManyRequests)
+			return false
+		}
 		va.state = opening
 		return true
 	case running:
@@ -277,10 +358,28 @@ func (va *vaultAdmin) begin(w http.ResponseWriter, from vaultState) bool {
 	return false
 }
 
-func (va *vaultAdmin) set(s vaultState) {
+// back to the locked state after a refusal; a 403 counts towards the pause,
+// which only a restart of the process resets
+func (va *vaultAdmin) relock(back vaultState, status int) {
 	va.mu.Lock()
-	va.state = s
-	va.mu.Unlock()
+	defer va.mu.Unlock()
+	va.state = back
+	if status != http.StatusForbidden {
+		return
+	}
+	va.refused++
+	if va.refused >= freeUnlocks {
+		va.resume = va.now().Add(unlockPause(va.refused))
+	}
+}
+
+// 1 s after the third 403, doubled with every further one up to 64 s
+func unlockPause(k int) time.Duration {
+	steps := k - freeUnlocks
+	if steps >= 6 {
+		return maxUnlockPause
+	}
+	return min(time.Second<<steps, maxUnlockPause)
 }
 
 func (va *vaultAdmin) initVault(w http.ResponseWriter, r *http.Request) {
@@ -289,11 +388,11 @@ func (va *vaultAdmin) initVault(w http.ResponseWriter, r *http.Request) {
 	}
 	status, text, req := va.prepare(r)
 	if req == nil {
-		va.set(lockedNoFile)
+		va.relock(lockedNoFile, status)
 		reply(w, status, text)
 		return
 	}
-	va.handOver(w, req, lockedNoFile)
+	va.handOver(w, req)
 }
 
 func (va *vaultAdmin) unlockVault(w http.ResponseWriter, r *http.Request) {
@@ -302,25 +401,31 @@ func (va *vaultAdmin) unlockVault(w http.ResponseWriter, r *http.Request) {
 	}
 	status, text, req := va.open(r)
 	if req == nil {
-		va.set(lockedFile)
+		va.relock(lockedFile, status)
 		reply(w, status, text)
 		return
 	}
-	va.handOver(w, req, lockedFile)
+	va.handOver(w, req)
 }
 
-// the answer waits for the conversation, and for an unlock for its pin
-func (va *vaultAdmin) handOver(w http.ResponseWriter, req *handover, back vaultState) {
+// the answer waits for the outcome of the open
+func (va *vaultAdmin) handOver(w http.ResponseWriter, req *handover) {
 	select {
 	case va.opened <- req:
 	case <-va.quit:
-		req.release()
-		va.set(back)
-		http.Error(w, "shutting down", http.StatusServiceUnavailable)
-		return
+		va.notStarted(req, "shutdown")
 	}
 	res := <-req.done
 	reply(w, res.status, res.text)
+}
+
+// the answer of an open that ends the process; whether a container is on
+// disk tells the operator to unlock or to init after the restart
+func (va *vaultAdmin) notStarted(req *handover, cause string) {
+	where := req.where()
+	req.release()
+	va.close()
+	req.done <- openResult{http.StatusServiceUnavailable, notStarted + cause + ", " + where}
 }
 
 func (va *vaultAdmin) refuse(status int, line string) (int, string, *handover) {
@@ -353,6 +458,7 @@ func (va *vaultAdmin) prepare(r *http.Request) (int, string, *handover) {
 		}
 		volumes = append(volumes, vault.Contents{Password: pw, Fill: profile.New(va.p, va.f.mailbox, b.card)})
 	}
+	forget(body)
 	d, err := vault.Prepare(va.p, volumes...)
 	for _, v := range volumes {
 		v.Password.Release()
@@ -381,12 +487,13 @@ func (va *vaultAdmin) prepare(r *http.Request) (int, string, *handover) {
 	pr.Card = own
 	va.logger.Print("vault opened")
 
-	w := &draftWriter{p: va.p, path: va.f.vault, own: own, logger: va.logger, draft: d}
+	w := &draftWriter{p: va.p, path: va.f.vault, own: own, logger: va.logger, draft: d, state: containerDraft}
 	req := &handover{pr: pr, writer: w, done: make(chan openResult, 1)}
 	if card := blocks[0].card; card != nil {
-		// New checked this card in Prepare, so the container is written before
-		// the chain: a client that exits there still has its contact
-		w.filled = true
+		// New checked this card in Prepare, so it is the contact of the process
+		// and the container is written before the chain: a client that exits
+		// there still has it
+		w.card = card
 		req.pin = card
 		if status, text := w.again(); status != 0 {
 			req.wrote = openResult{status, text}
@@ -422,6 +529,7 @@ func (va *vaultAdmin) open(r *http.Request) (int, string, *handover) {
 		return http.StatusBadRequest, "want one line, the password of a volume: " + badPassword, nil
 	}
 	pw, err := secmem.NewFrom(lines[0])
+	forget(body)
 	if err != nil {
 		return va.refuse(http.StatusInternalServerError, lineMemory)
 	}
@@ -483,48 +591,107 @@ func memoryError(err error) bool {
 	return errors.Is(err, secmem.ErrNotMapped) || errors.Is(err, secmem.ErrNotLocked)
 }
 
-// the conversation of an opened volume: the contact pins before the client
-// takes any request of the running state
-func (va *vaultAdmin) attach(req *handover, first conversation.Circuit, dial func() (conversation.Circuit, error)) (*live, error) {
-	fail := func(err error) (*live, error) {
-		_ = first.Close()
-		req.release()
-		req.done <- openResult{http.StatusServiceUnavailable, "the conversation did not start"}
-		return nil, err
+func pinClass(err error) string {
+	switch {
+	case memoryError(err):
+		return "memory"
+	case errors.Is(err, conversation.ErrClosed):
+		return "closed"
 	}
+	return "io"
+}
+
+// the open of a volume up to its answer. The first chain is built in a
+// goroutine, since its mirror may take minutes and a stop must end the wait;
+// nil and the exit code when the open ends the process
+func (va *vaultAdmin) start(req *handover, build, dial func() (conversation.Circuit, error), stop <-chan os.Signal) (*live, int) {
+	type built struct {
+		c   conversation.Circuit
+		err error
+	}
+	ch := make(chan built, 1)
+	go func() {
+		c, err := build()
+		ch <- built{c, err}
+	}()
+	select {
+	case <-stop:
+		va.logger.Print("shutting down")
+		go func() {
+			if b := <-ch; b.c != nil {
+				_ = b.c.Close()
+			}
+		}()
+		va.notStarted(req, "shutdown")
+		return nil, 0
+	case b := <-ch:
+		if b.err != nil {
+			va.logger.Printf("refusing to build the circuit: %s", peerCause(b.err))
+			va.notStarted(req, "circuit")
+			return nil, 1
+		}
+		va.logger.Printf("circuit of %d hops among %d listed nodes to the mailbox, request period %v", va.f.hops, va.listed, va.f.rate)
+		return va.attach(req, b.c, dial)
+	}
+}
+
+// the conversation of an opened volume: a contact the volume fixed is pinned
+// before the client takes any request of the running state
+func (va *vaultAdmin) attach(req *handover, first conversation.Circuit, dial func() (conversation.Circuit, error)) (*live, int) {
 	id, err := req.pr.Identity(va.p)
 	if err != nil {
-		return fail(err)
+		_ = first.Close()
+		va.logger.Print(lineNoStart)
+		va.notStarted(req, "conversation")
+		return nil, 1
 	}
 	conv, err := startConversation(va.p, va.f, va.logger, id, req.pr.Fetch, first, dial)
 	if err != nil {
-		return fail(err)
+		_ = first.Close()
+		id.Close()
+		va.logger.Print(lineNoStart)
+		va.notStarted(req, "conversation")
+		return nil, 1
+	}
+	var pairs pairing = conv
+	if va.pairs != nil {
+		pairs = va.pairs(conv)
 	}
 	own := id.Card()
 	l := &live{conv: conv, id: id, pr: req.pr, writer: req.writer}
 	l.ct = &contact{
-		p: va.p, own: own, text: own.String(), conv: conv, logger: va.logger, now: va.now,
+		p: va.p, own: own, text: own.String(), conv: pairs, logger: va.logger, now: va.now,
 		paired: make(chan struct{}), halt: l.release, vault: true, writer: req.writer,
+		leave: func(err error) { va.leave(conv, err) },
 	}
 	l.tk = newTalk(conv, va.f, va.logger, true)
-	res := openResult{status: http.StatusNoContent}
 	if req.pin != nil {
-		out := l.ct.pinCard(*req.pin)
-		switch {
-		case out.status != http.StatusNoContent:
-			res = openResult{out.status, out.text}
-		case req.wrote.status != 0:
-			res = req.wrote
+		if err := l.ct.pinVolume(*req.pin); err != nil {
+			conv.Close()
+			id.Close()
+			va.notStarted(req, "pin")
+			return nil, 1
 		}
+	}
+	res := openResult{status: http.StatusNoContent}
+	if req.wrote.status != 0 {
+		res = req.wrote
 	}
 	va.live.Store(l)
 	va.set(running)
 	req.done <- res
-	return l, nil
+	return l, 0
+}
+
+func (va *vaultAdmin) set(s vaultState) {
+	va.mu.Lock()
+	va.state = s
+	va.mu.Unlock()
 }
 
 type statusReply struct {
 	State              string  `json:"state"`
+	Container          string  `json:"container"`
 	Requests           uint64  `json:"requests"`
 	Puts               uint64  `json:"puts"`
 	PutRefused         uint64  `json:"put_refused"`
@@ -552,7 +719,7 @@ type statusReply struct {
 	Unanswered         uint64  `json:"unanswered"`
 	RoundTrips         uint64  `json:"round_trips"`
 	LastRoundTripAt    string  `json:"last_round_trip_at,omitempty"`
-	LastRoundTrip      string  `json:"last_round_trip,omitempty"`
+	LastRoundTripMS    *int64  `json:"last_round_trip_ms,omitempty"`
 	SilentFor          *uint64 `json:"silent_for,omitempty"`
 }
 
@@ -562,8 +729,9 @@ func (va *vaultAdmin) status(l *live, w http.ResponseWriter, _ *http.Request) {
 	st := l.conv.Stats()
 	s := st.Session
 	out := statusReply{
-		State:    "unpaired",
-		Requests: st.Requests, Puts: st.Puts, PutRefused: st.PutRefused, WindowFull: st.WindowFull, Hits: st.Hits,
+		State:     sessionState(st),
+		Container: l.container(),
+		Requests:  st.Requests, Puts: st.Puts, PutRefused: st.PutRefused, WindowFull: st.WindowFull, Hits: st.Hits,
 		Sent: s.Sent, Received: s.Received, DummiesSent: s.DummiesSent, DummiesReceived: s.DummiesReceived,
 		Copies: s.Copies, Late: s.Late, Lost: s.Lost, Window: s.Window, Bad: s.Bad,
 		BadReplies: st.BadReplies, Handshakes: s.Handshakes, RefusedHandshakes: s.RefusedHandshakes,
@@ -572,12 +740,10 @@ func (va *vaultAdmin) status(l *live, w http.ResponseWriter, _ *http.Request) {
 		InboxDropped: st.InboxDropped, Unanswered: st.Unanswered,
 		RoundTrips: l.tk.trips.Load(),
 	}
-	if st.Paired {
-		out.State = st.State.String()
-	}
 	if out.RoundTrips > 0 {
-		out.LastRoundTripAt = time.Unix(0, l.tk.lastAt.Load()).UTC().Format(time.RFC3339Nano)
-		out.LastRoundTrip = time.Duration(l.tk.lastTook.Load()).String()
+		out.LastRoundTripAt = time.Unix(0, l.tk.lastAt.Load()).UTC().Truncate(time.Second).Format(time.RFC3339)
+		ms := time.Duration(l.tk.lastTook.Load()).Milliseconds()
+		out.LastRoundTripMS = &ms
 	}
 	if silent, ok := l.ct.silence(st); ok {
 		secs := uint64(max(silent, 0) / time.Second)
@@ -585,6 +751,19 @@ func (va *vaultAdmin) status(l *live, w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// the names PR5 reads; a pinned conversation without a session yet is still
+// handshaking
+func sessionState(st conversation.Stats) string {
+	if !st.Paired {
+		return "unpaired"
+	}
+	switch st.State {
+	case e2e.StateEstablished, e2e.StateConfirmed, e2e.StateStale:
+		return st.State.String()
+	}
+	return "handshaking"
 }
 
 // the draft of a container created by init, until its only write
@@ -596,17 +775,21 @@ type draftWriter struct {
 
 	mu    sync.Mutex
 	draft *vault.Draft
-	// the content holds a card, so a retry writes it as it is
-	filled bool
+	// the contact of the process once the content holds it; a retry writes
+	// the same bytes
+	card *e2e.Card
+	// draft until the write; unsettled when it linked the file but did not
+	// end, and the client then keeps the file as it is
+	state string
 }
 
-// the write before the first pin: pin says whether the pin goes on, and a
-// status other than 0 is the answer once it has
-func (w *draftWriter) first(card e2e.Card) (status int, text string, pin bool) {
+// the write of the first PUT /contact: fixed says whether the content now
+// holds the card, and a status other than 0 is the answer once it is pinned
+func (w *draftWriter) first(card e2e.Card) (status int, text string, fixed bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.draft == nil || w.filled {
-		return 0, "", true
+	if w.draft == nil {
+		return http.StatusServiceUnavailable, leavingText, false
 	}
 	inner := profile.WithContact(w.p, w.own, card)
 	filled := false
@@ -622,7 +805,7 @@ func (w *draftWriter) first(card e2e.Card) (status int, text string, pin bool) {
 		status, text := w.failed(err)
 		return status, text, false
 	}
-	w.filled = true
+	w.card = &card
 	if err != nil {
 		status, text := w.failed(err)
 		return status, text, true
@@ -631,12 +814,18 @@ func (w *draftWriter) first(card e2e.Card) (status int, text string, pin bool) {
 	return 0, "", true
 }
 
-// the same content again, after a write that failed
+// the fixed content again; a container that linked its file is never
+// written twice
 func (w *draftWriter) again() (int, string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.draft == nil {
+	switch {
+	case w.state == containerWritten:
 		return 0, ""
+	case w.state == containerUnsettled:
+		return http.StatusInternalServerError, notWritten + "sync"
+	case w.draft == nil:
+		return http.StatusServiceUnavailable, leavingText
 	}
 	if err := writeDraft(w.draft, w.path, nil); err != nil {
 		return w.failed(err)
@@ -648,19 +837,19 @@ func (w *draftWriter) again() (int, string) {
 func (w *draftWriter) written() {
 	w.draft.Close()
 	w.draft = nil
+	w.state = containerWritten
 	w.logger.Print("vault written")
 }
 
-// a failure after the link spent the draft; the file goes, as with jimichi
-// vault init, so the pin holds for the process only and a restart finds no
-// container
+// a failure after the link spent the draft and leaves the file: it may be
+// whole, and a peer may hold the card of its identity already. The tmp it
+// may leave is removed by vault.Clean at the next start
 func (w *draftWriter) failed(err error) (int, string) {
 	class := writeClass(err)
 	if class == "sync" {
-		_ = os.Remove(w.path)
-		_ = vault.Clean(w.path)
 		w.draft.Close()
 		w.draft = nil
+		w.state = containerUnsettled
 	}
 	w.logger.Print(notWritten + class)
 	return http.StatusInternalServerError, notWritten + class
@@ -674,6 +863,23 @@ func (w *draftWriter) close() {
 		w.draft = nil
 	}
 }
+
+func (w *draftWriter) fixed() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.card == nil {
+		return nil
+	}
+	return w.card.Bytes()
+}
+
+func (w *draftWriter) container() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.state
+}
+
+func (w *draftWriter) linked() bool { return w.container() != containerDraft }
 
 func writeClass(err error) string {
 	var link *os.LinkError
@@ -762,19 +968,26 @@ func splitLines(body []byte) ([][]byte, bool) {
 }
 
 // into one buffer of a fixed size, so the passwords leave no copies in the
-// arrays a growing read would drop
+// arrays a growing read would drop. Only a body that arrived whole is taken:
+// one cut short at the end of a block would read as fewer volumes
 func readBody(r *http.Request, limit int) ([]byte, int, string) {
 	buf := make([]byte, limit+1)
-	n, err := io.ReadFull(r.Body, buf)
+	n := 0
+	var err error
+	for err == nil && n < len(buf) {
+		var m int
+		m, err = r.Body.Read(buf[n:])
+		n += m
+	}
 	switch {
-	case err == nil:
+	case n > limit:
 		forget(buf)
 		return nil, http.StatusRequestEntityTooLarge, fmt.Sprintf("the body is longer than %d bytes", limit)
-	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return buf[:n], 0, ""
+	case !errors.Is(err, io.EOF), r.ContentLength >= 0 && int64(n) != r.ContentLength:
+		forget(buf)
+		return nil, http.StatusBadRequest, "the body did not arrive"
 	}
-	forget(buf)
-	return nil, http.StatusBadRequest, "the body did not arrive"
+	return buf[:n], 0, ""
 }
 
 // the body held passwords; under -keymem without zero it stays as it is, so

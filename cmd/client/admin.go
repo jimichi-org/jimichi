@@ -44,10 +44,12 @@ type contact struct {
 	paired chan struct{}
 	// closes the conversation and releases the identity and F
 	halt func()
-	// with -vault no line names a card or a role, and writer holds the draft
-	// until the container is written
+	// with -vault no line names a card or a role, writer holds the draft
+	// until the container is written, and leave ends the process after a pin
+	// that failed
 	vault  bool
 	writer *draftWriter
+	leave  func(error)
 
 	stopped atomic.Bool
 
@@ -135,48 +137,29 @@ func reply(w http.ResponseWriter, status int, text string) {
 
 // the checks run in this order: a pinned contact takes only its own card
 // again, and a first card must be another client of the same suite on the
-// same mailbox whose key passes an agreement. With a draft the container is
-// written before the pairing, so the throwaway session of the write and the
-// session of the conversation never hold pages at once
+// same mailbox whose key passes an agreement
 func (c *contact) pinCard(card e2e.Card) pinOutcome {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.stopped.Load() {
 		return pinOutcome{status: http.StatusConflict, text: stoppedText}
 	}
+	if c.vault {
+		return c.pinVault(card)
+	}
 	if c.pinned != nil {
 		if !bytes.Equal(card.Bytes(), c.pinned) {
 			c.stopped.Store(true)
 			return pinOutcome{stop: true, pinned: c.pinHash}
 		}
-		if c.writer != nil {
-			if status, text := c.writer.again(); status != 0 {
-				return pinOutcome{status: status, text: text}
-			}
-		}
 		return pinOutcome{status: http.StatusNoContent}
 	}
-	switch {
-	case card.Suite != c.own.Suite:
-		return pinOutcome{status: http.StatusBadRequest, text: "the card is of another suite"}
-	case card.Mailbox != c.own.Mailbox:
-		return pinOutcome{status: http.StatusBadRequest, text: "the card names another mailbox"}
-	case bytes.Equal(card.Static, c.own.Static) || card.Queue == c.own.Queue:
-		return pinOutcome{status: http.StatusBadRequest, text: "the card is this client's own"}
+	if out, ok := c.formal(card); !ok {
+		return out
 	}
 	hash, err := e2e.CardHash(c.p, card)
 	if err != nil {
 		return pinOutcome{status: http.StatusBadRequest, text: "not a contact card"}
-	}
-	written := pinOutcome{status: http.StatusNoContent}
-	if c.writer != nil {
-		status, text, pin := c.writer.first(card)
-		if !pin {
-			return pinOutcome{status: status, text: text}
-		}
-		if status != 0 {
-			written = pinOutcome{status: status, text: text}
-		}
 	}
 	if err := c.conv.Pair(card); err != nil {
 		if errors.Is(err, e2e.ErrCard) || errors.Is(err, e2e.ErrSelf) {
@@ -185,23 +168,91 @@ func (c *contact) pinCard(card e2e.Card) pinOutcome {
 		return pinOutcome{status: http.StatusServiceUnavailable, text: "the conversation has ended"}
 	}
 	c.pinned, c.pinHash, c.pinnedAt = card.Bytes(), hash, c.now()
-	if c.vault {
-		c.logger.Print("contact pinned")
-	} else {
-		role := e2e.RoleResponder
-		if bytes.Compare(c.own.Static, card.Static) < 0 {
-			role = e2e.RoleInitiator
-		}
-		c.logger.Printf("contact pinned card_hash=%x role=%s", hash, role)
+	role := e2e.RoleResponder
+	if bytes.Compare(c.own.Static, card.Static) < 0 {
+		role = e2e.RoleInitiator
 	}
+	c.logger.Printf("contact pinned card_hash=%x role=%s", hash, role)
 	close(c.paired)
-	return written
+	return pinOutcome{status: http.StatusNoContent}
+}
+
+func (c *contact) formal(card e2e.Card) (pinOutcome, bool) {
+	switch {
+	case card.Suite != c.own.Suite:
+		return pinOutcome{status: http.StatusBadRequest, text: "the card is of another suite"}, false
+	case card.Mailbox != c.own.Mailbox:
+		return pinOutcome{status: http.StatusBadRequest, text: "the card names another mailbox"}, false
+	case bytes.Equal(card.Static, c.own.Static) || card.Queue == c.own.Queue:
+		return pinOutcome{status: http.StatusBadRequest, text: "the card is this client's own"}, false
+	}
+	return pinOutcome{}, true
+}
+
+// with -vault the contact the volume fixed is the only card of the process,
+// so another one stops the client even before its pin returned. The draft is
+// written before the pairing, so the throwaway session of the write and the
+// session of the conversation never hold pages at once
+func (c *contact) pinVault(card e2e.Card) pinOutcome {
+	fixed := c.pinned
+	if fixed == nil && c.writer != nil {
+		fixed = c.writer.fixed()
+	}
+	if fixed != nil && !bytes.Equal(card.Bytes(), fixed) {
+		c.stopped.Store(true)
+		return pinOutcome{stop: true}
+	}
+	switch {
+	case c.pinned != nil:
+		if c.writer != nil {
+			if status, text := c.writer.again(); status != 0 {
+				return pinOutcome{status: status, text: text}
+			}
+		}
+		return pinOutcome{status: http.StatusNoContent}
+	case fixed != nil, c.writer == nil:
+		// the pin of the fixed contact failed and the process is on its way out
+		return pinOutcome{status: http.StatusServiceUnavailable, text: leavingText}
+	}
+	if out, ok := c.formal(card); !ok {
+		return out
+	}
+	status, text, ok := c.writer.first(card)
+	if !ok {
+		return pinOutcome{status: status, text: text}
+	}
+	if err := c.pairFixed(card); err != nil {
+		c.leave(err)
+		return pinOutcome{status: http.StatusInternalServerError, text: notPinned + pinClass(err)}
+	}
+	if status != 0 {
+		return pinOutcome{status: status, text: text}
+	}
+	return pinOutcome{status: http.StatusNoContent}
+}
+
+// the pin of the contact an unlock or the first block of an init fixed
+func (c *contact) pinVolume(card e2e.Card) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pairFixed(card)
+}
+
+func (c *contact) pairFixed(card e2e.Card) error {
+	if err := c.conv.Pair(card); err != nil {
+		c.logger.Print(notPinned + pinClass(err))
+		return err
+	}
+	c.pinned, c.pinnedAt = card.Bytes(), c.now()
+	c.logger.Print("contact pinned")
+	close(c.paired)
+	return nil
 }
 
 // since when the pinned contact has been silent, false before the pin
 func (c *contact) silence(st conversation.Stats) (time.Duration, bool) {
 	c.mu.Lock()
-	pinned, since := c.pinHash, c.pinnedAt
+	pinned, since := c.pinned, c.pinnedAt
 	c.mu.Unlock()
 	if pinned == nil {
 		return 0, false

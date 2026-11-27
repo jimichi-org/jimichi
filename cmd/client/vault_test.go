@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,7 +34,20 @@ import (
 // as the tests in this process do
 const cheapStretchVar = "JIMICHI_TEST_CHEAP_STRETCH"
 
+// a client process started with this variable fails its first write of the
+// container before the link, after the content took the contact
+const failFirstWriteVar = "JIMICHI_TEST_FAIL_FIRST_WRITE"
+
 func init() {
+	if os.Getenv(failFirstWriteVar) != "" {
+		var failed atomic.Bool
+		writeDraft = func(d *vault.Draft, path string, fill vault.Fill) error {
+			if failed.CompareAndSwap(false, true) {
+				return d.Write(filepath.Join(path+".absent", "client.vault"), fill)
+			}
+			return d.Write(path, fill)
+		}
+	}
 	if os.Getenv(cheapStretchVar) == "" {
 		return
 	}
@@ -110,6 +126,9 @@ type vaultBed struct {
 	url  string
 	out  *logBuffer
 	path string
+	// the SIGTERM of the process, and the codes it would exit with
+	stop  chan os.Signal
+	exits chan int
 
 	mu    sync.Mutex
 	lives []*live
@@ -129,9 +148,9 @@ func newVaultBed(t *testing.T, p jcrypto.CryptoProvider, path, mailboxAddr strin
 	if redial == nil {
 		redial = func() (conversation.Circuit, error) { return nil, errEntryRefuses }
 	}
-	b := &vaultBed{p: p, out: &logBuffer{}, path: path}
+	b := &vaultBed{p: p, out: &logBuffer{}, path: path, stop: make(chan os.Signal, 1), exits: make(chan int, 4)}
 	t.Cleanup(func() { checkVaultLines(t, b.out.String()) })
-	f := peerFlags{mailbox: mailboxAddr, vault: path, rate: 50 * time.Millisecond, coverPuts: true, handshakeTimeout: time.Minute}
+	f := peerFlags{mailbox: mailboxAddr, vault: path, hops: 3, rate: 50 * time.Millisecond, coverPuts: true, handshakeTimeout: time.Minute}
 	b.va = newVaultAdmin(p, f, log.New(b.out, "", 0), exists)
 	srv := httptest.NewServer(b.va.handler())
 	b.url = srv.URL
@@ -141,17 +160,14 @@ func newVaultBed(t *testing.T, p jcrypto.CryptoProvider, path, mailboxAddr strin
 		for {
 			select {
 			case req := <-b.va.opened:
-				c, err := first()
-				if err != nil {
-					req.release()
-					req.done <- openResult{http.StatusServiceUnavailable, "no circuit"}
+				l, code := b.va.start(req, first, redial, b.stop)
+				if l == nil {
+					b.exits <- code
 					continue
 				}
-				if l, err := b.va.attach(req, c, redial); err == nil {
-					b.mu.Lock()
-					b.lives = append(b.lives, l)
-					b.mu.Unlock()
-				}
+				b.mu.Lock()
+				b.lives = append(b.lives, l)
+				b.mu.Unlock()
 			case <-b.va.quit:
 				return
 			}
@@ -194,11 +210,97 @@ func (b *vaultBed) lines() []string {
 func (b *vaultBed) vaultLines() []string {
 	var out []string
 	for _, l := range b.lines() {
-		if !strings.HasPrefix(l, "circuit ") {
+		if !circuitLine(l) {
 			out = append(out, l)
 		}
 	}
 	return out
+}
+
+func circuitLine(l string) bool {
+	return strings.HasPrefix(l, "circuit ") || strings.HasPrefix(l, "refusing to build the circuit: ")
+}
+
+// the code the process would exit with: after an open that did not start, or
+// after a pin that failed on a running client
+func (b *vaultBed) exitCode(t *testing.T) int {
+	t.Helper()
+	select {
+	case code := <-b.exits:
+		return code
+	case code := <-b.va.exit:
+		return code
+	case <-time.After(10 * time.Second):
+		t.Fatal("no exit")
+		return 0
+	}
+}
+
+// every request after an exit is decided waits for the end of the process
+func (b *vaultBed) leaving(t *testing.T) {
+	t.Helper()
+	for _, req := range [][3]string{{http.MethodGet, "/card", ""}, {http.MethodGet, "/status", ""}, {http.MethodPut, "/contact", "x"},
+		{http.MethodPut, "/vault/init", "pw\n\n"}, {http.MethodPut, "/vault/unlock", "pw\n"}} {
+		if text := b.expect(t, req[0], req[1], req[2], http.StatusServiceUnavailable); text != leavingText+"\n" {
+			t.Fatalf("%s %s after the exit: %q", req[0], req[1], text)
+		}
+	}
+}
+
+// what GET /status answers, field by field: PR5 reads these names and types
+type statusFields struct {
+	State              string  `json:"state"`
+	Container          string  `json:"container"`
+	Requests           uint64  `json:"requests"`
+	Puts               uint64  `json:"puts"`
+	PutRefused         uint64  `json:"put_refused"`
+	WindowFull         uint64  `json:"window_full"`
+	Hits               uint64  `json:"hits"`
+	Sent               uint64  `json:"sent"`
+	Received           uint64  `json:"received"`
+	DummiesSent        uint64  `json:"dummies_sent"`
+	DummiesReceived    uint64  `json:"dummies_received"`
+	Copies             uint64  `json:"copies"`
+	Late               uint64  `json:"late"`
+	Lost               uint64  `json:"lost"`
+	Window             uint64  `json:"window"`
+	Bad                uint64  `json:"bad"`
+	BadReplies         uint64  `json:"bad_replies"`
+	Handshakes         uint64  `json:"handshakes"`
+	RefusedHandshakes  uint64  `json:"refused_handshakes"`
+	ReplayedHandshakes uint64  `json:"replayed_handshakes"`
+	Stale              uint64  `json:"stale"`
+	Rebuilds           uint64  `json:"rebuilds"`
+	Refusals           uint64  `json:"refusals"`
+	OutboxDropped      uint64  `json:"outbox_dropped"`
+	HeldDropped        uint64  `json:"held_dropped"`
+	InboxDropped       uint64  `json:"inbox_dropped"`
+	Unanswered         uint64  `json:"unanswered"`
+	RoundTrips         uint64  `json:"round_trips"`
+	LastRoundTripAt    *string `json:"last_round_trip_at"`
+	LastRoundTripMS    *int64  `json:"last_round_trip_ms"`
+	SilentFor          *uint64 `json:"silent_for"`
+}
+
+var sessionStates = []string{"unpaired", "handshaking", "established", "confirmed", "stale"}
+
+func decodeStatus(t *testing.T, text string) statusFields {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.DisallowUnknownFields()
+	var st statusFields
+	if err := dec.Decode(&st); err != nil {
+		t.Fatalf("GET /status %q: %v", text, err)
+	}
+	if !slices.Contains(sessionStates, st.State) {
+		t.Fatalf("state %q", st.State)
+	}
+	return st
+}
+
+func (b *vaultBed) status(t *testing.T) statusFields {
+	t.Helper()
+	return decodeStatus(t, b.expect(t, http.MethodGet, "/status", "", http.StatusOK))
 }
 
 func (b *vaultBed) card(t *testing.T) e2e.Card {
@@ -226,15 +328,16 @@ func (b *vaultBed) expect(t *testing.T, method, path, body string, want int) str
 // with -vault no line names a card, a role, a block, a password or the state
 // of the session: every line is one of these or a line of the circuit
 var vaultLineKinds = []string{
-	"vault opened", "vault written", "contact pinned", "contact card changed, refusing",
+	"vault opened", "vault written", "contact pinned", "contact card changed, refusing", "shutting down", lineNoStart,
 	lineNoVolume, lineMailbox, lineContact, lineCorrupt, lineMemory, lineIO,
 	notWritten + "write", notWritten + "link", notWritten + "sync", notWritten + "memory",
+	notPinned + "memory", notPinned + "closed", notPinned + "io",
 }
 
 func checkVaultLines(t *testing.T, out string) {
 	t.Helper()
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if line == "" || slices.Contains(vaultLineKinds, line) || strings.HasPrefix(line, "circuit ") {
+		if line == "" || slices.Contains(vaultLineKinds, line) || circuitLine(line) {
 			continue
 		}
 		t.Errorf("a line outside the -vault classes: %q", line)
@@ -578,13 +681,23 @@ func TestVaultInitWithACardWritesAtOnce(t *testing.T) {
 	peer := newPeerID(t, p, testMailbox)
 	failing := func() (conversation.Circuit, error) { return nil, errEntryRefuses }
 	b := newVaultBed(t, p, path, testMailbox, failing, nil)
-	b.expect(t, http.MethodPut, "/vault/init", "pw\n"+peer.card.String()+"\n", http.StatusServiceUnavailable)
+	text := b.expect(t, http.MethodPut, "/vault/init", "pw\n"+peer.card.String()+"\n", http.StatusServiceUnavailable)
+	if want := notStarted + "circuit, " + onDisk + "\n"; text != want {
+		t.Fatalf("body %q, want %q", text, want)
+	}
+	if code := b.exitCode(t); code != 1 {
+		t.Fatalf("exit code %d", code)
+	}
 	if !exists(path) {
 		t.Fatal("no file after the chain failed")
 	}
 	if want := []string{"vault opened", "vault written"}; !slices.Equal(b.vaultLines(), want) {
 		t.Fatalf("lines %q, want %q", b.vaultLines(), want)
 	}
+	if !strings.Contains(b.out.String(), "refusing to build the circuit: ") {
+		t.Fatalf("no line of the chain:\n%s", b.out.String())
+	}
+	b.leaving(t)
 	again := newVaultBed(t, p, path, testMailbox, nil, nil)
 	again.expect(t, http.MethodPut, "/vault/unlock", "pw\n", http.StatusNoContent)
 	again.expect(t, http.MethodPut, "/contact", peer.card.String(), http.StatusNoContent)
@@ -654,34 +767,57 @@ func TestVaultFailedWriteIsRepeated(t *testing.T) {
 		})
 	}
 
-	// a failure after the link spends the draft: the file goes and the pin
-	// holds for the process only
-	t.Run("sync", func(t *testing.T) {
-		path := vaultPath(t)
-		prev := writeDraft
-		t.Cleanup(func() { writeDraft = prev })
-		writeDraft = func(d *vault.Draft, path string, fill vault.Fill) error {
-			if err := d.Write(path, fill); err != nil {
-				t.Fatal(err)
+	// a failure after the link spends the draft and leaves the file as it is:
+	// the same card again is the same 500 without another attempt, and the tmp
+	// a failed settle leaves goes with the Clean of the next start
+	for _, c := range []struct{ name, init string }{{"sync", "pw\n\n"}, {"sync of the first block", "pw\n%s\n"}} {
+		t.Run(c.name, func(t *testing.T) {
+			path := vaultPath(t)
+			peer := newPeerID(t, p, testMailbox)
+			attempts := failSettle(t)
+			b := newVaultBed(t, p, path, testMailbox, nil, nil)
+			if strings.Contains(c.init, "%s") {
+				text := b.expect(t, http.MethodPut, "/vault/init", fmt.Sprintf(c.init, peer.card.String()), http.StatusInternalServerError)
+				if text != notWritten+"sync\n" {
+					t.Fatalf("body %q", text)
+				}
+			} else {
+				b.expect(t, http.MethodPut, "/vault/init", c.init, http.StatusNoContent)
+				if text := b.expect(t, http.MethodPut, "/contact", peer.card.String(), http.StatusInternalServerError); text != notWritten+"sync\n" {
+					t.Fatalf("body %q", text)
+				}
 			}
-			return fmt.Errorf("%w, but %w", vault.ErrWritten, errors.New("sync failed"))
-		}
-		b := newVaultBed(t, p, path, testMailbox, nil, nil)
-		b.expect(t, http.MethodPut, "/vault/init", "pw\n\n", http.StatusNoContent)
-		peer := newPeerID(t, p, testMailbox)
-		b.expect(t, http.MethodPut, "/contact", peer.card.String(), http.StatusInternalServerError)
-		if exists(path) || exists(path+".tmp") {
-			t.Fatal("the file of a spent draft is left")
-		}
-		writeDraft = prev
-		b.expect(t, http.MethodPut, "/contact", peer.card.String(), http.StatusNoContent)
-		if exists(path) || strings.Contains(b.out.String(), "vault written") {
-			t.Fatal("a spent draft was written")
-		}
-		if want := []string{"vault opened", notWritten + "sync", "contact pinned"}; !slices.Equal(b.vaultLines(), want) {
-			t.Fatalf("lines %q, want %q", b.vaultLines(), want)
-		}
-	})
+			own := b.card(t)
+			written := fileBytes(t, path)
+			if !exists(path + ".tmp") {
+				t.Fatal("no tmp left by the settle")
+			}
+			if text := b.expect(t, http.MethodPut, "/contact", peer.card.String(), http.StatusInternalServerError); text != notWritten+"sync\n" {
+				t.Fatalf("the same card again: %q", text)
+			}
+			if n := attempts.Load(); n != 1 {
+				t.Fatalf("%d writes", n)
+			}
+			if st := b.status(t); st.Container != containerUnsettled {
+				t.Fatalf("container %q", st.Container)
+			}
+			if want := []string{"vault opened", notWritten + "sync", "contact pinned"}; !slices.Equal(b.vaultLines(), want) {
+				t.Fatalf("lines %q, want %q", b.vaultLines(), want)
+			}
+			b.expect(t, http.MethodPut, "/contact", newPeerID(t, p, testMailbox).card.String(), http.StatusConflict)
+			if !bytes.Equal(fileBytes(t, path), written) {
+				t.Fatal("the client changed a file it linked")
+			}
+			if err := vault.Clean(path); err != nil || exists(path+".tmp") {
+				t.Fatalf("the Clean of the next start: %v", err)
+			}
+			again := newVaultBed(t, p, path, testMailbox, nil, nil)
+			again.expect(t, http.MethodPut, "/vault/unlock", "pw\n", http.StatusNoContent)
+			if !bytes.Equal(again.card(t).Bytes(), own.Bytes()) {
+				t.Fatal("another identity in the file")
+			}
+		})
+	}
 
 	// another card while the write waits stops the client and writes nothing
 	t.Run("another card", func(t *testing.T) {
@@ -725,41 +861,398 @@ func TestVaultFirstPinRefusesABadKey(t *testing.T) {
 	}
 }
 
-// GET /status carries the counters of the minute line and the round trips
+// GET /status carries the counters of the minute line, the round trips and
+// the state of the file, under the names and types PR5 reads
 func TestVaultStatus(t *testing.T) {
 	p, _ := cheap(t)
 	b := newVaultBed(t, p, vaultPath(t), testMailbox, nil, nil)
 	b.expect(t, http.MethodPut, "/vault/init", "pw\n\n", http.StatusNoContent)
-	decode := func() map[string]any {
-		t.Helper()
-		var m map[string]any
-		if err := json.Unmarshal([]byte(b.expect(t, http.MethodGet, "/status", "", http.StatusOK)), &m); err != nil {
-			t.Fatal(err)
-		}
-		return m
-	}
-	m := decode()
-	if m["state"] != "unpaired" || m["round_trips"] != 0.0 || m["silent_for"] != nil || m["last_round_trip"] != nil {
-		t.Fatalf("before the pin: %v", m)
-	}
-	for _, key := range []string{"requests", "puts", "put_refused", "window_full", "hits", "sent", "received", "dummies_sent",
-		"dummies_received", "copies", "late", "lost", "window", "bad", "bad_replies", "handshakes", "refused_handshakes",
-		"replayed_handshakes", "stale", "rebuilds", "refusals", "outbox_dropped", "held_dropped", "inbox_dropped", "unanswered"} {
-		if _, ok := m[key]; !ok {
-			t.Errorf("no %s in %v", key, m)
-		}
+	st := b.status(t)
+	if st.State != "unpaired" || st.Container != containerDraft || st.RoundTrips != 0 ||
+		st.LastRoundTripAt != nil || st.LastRoundTripMS != nil || st.SilentFor != nil {
+		t.Fatalf("before the pin: %+v", st)
 	}
 	b.expect(t, http.MethodPut, "/contact", newPeerID(t, p, testMailbox).card.String(), http.StatusNoContent)
 	l := b.live(t)
-	at := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 11, 26, 12, 0, 0, 700_000_000, time.UTC)
 	l.tk.lastAt.Store(at.UnixNano())
-	l.tk.lastTook.Store(int64(1500 * time.Millisecond))
+	l.tk.lastTook.Store(int64(1500*time.Millisecond + 400*time.Microsecond))
 	l.tk.trips.Add(2)
-	m = decode()
-	if m["state"] == "unpaired" || m["round_trips"] != 2.0 || m["last_round_trip"] != "1.5s" ||
-		m["last_round_trip_at"] != at.Format(time.RFC3339Nano) || m["silent_for"] == nil {
-		t.Fatalf("after the pin: %v", m)
+	st = b.status(t)
+	if st.State == "unpaired" || st.Container != containerWritten || st.RoundTrips != 2 || st.SilentFor == nil ||
+		st.LastRoundTripMS == nil || *st.LastRoundTripMS != 1500 ||
+		st.LastRoundTripAt == nil || *st.LastRoundTripAt != "2026-11-26T12:00:00Z" {
+		t.Fatalf("after the pin: %+v", st)
 	}
+}
+
+// writes the container, then fails as a settle fails after the link: the tmp
+// stays as a second name of the file
+func failSettle(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	n := new(atomic.Int32)
+	prev := writeDraft
+	t.Cleanup(func() { writeDraft = prev })
+	writeDraft = func(d *vault.Draft, path string, fill vault.Fill) error {
+		n.Add(1)
+		if err := d.Write(path, fill); err != nil {
+			return err
+		}
+		if err := os.Link(path, path+".tmp"); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w, but %w", vault.ErrWritten, errors.New("vault: remove: test"))
+	}
+	return n
+}
+
+// the next write fails before the link, as a tmp it cannot create
+func failBeforeTheLink(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(path+".tmp", "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(path + ".tmp") })
+}
+
+// a pin that always fails as locked memory runs short
+type refusedPair struct{}
+
+func (refusedPair) Pair(e2e.Card) error { return fmt.Errorf("%w: test", secmem.ErrNotLocked) }
+
+func refusePins(*conversation.Conversation) pairing { return refusedPair{} }
+
+// with -vault a contact the volume fixed is the only card of the process,
+// and a client whose pin of it failed does not run on: an open answers 503
+// and exits, a running client answers 500 and exits
+func TestVaultFixedContact(t *testing.T) {
+	p, _ := cheap(t)
+
+	t.Run("unlock, the pin fails", func(t *testing.T) {
+		path := vaultPath(t)
+		mustCreate(t, p, path, volumeSpec{"pw", profile.New(p, testMailbox, cardOf(t, p, testMailbox))})
+		b := newVaultBed(t, p, path, testMailbox, nil, nil)
+		b.va.pairs = refusePins
+		text := b.expect(t, http.MethodPut, "/vault/unlock", "pw\n", http.StatusServiceUnavailable)
+		if want := notStarted + "pin, " + onDisk + "\n"; text != want {
+			t.Fatalf("body %q, want %q", text, want)
+		}
+		if code := b.exitCode(t); code != 1 {
+			t.Fatalf("exit code %d", code)
+		}
+		if want := []string{"vault opened", notPinned + "memory"}; !slices.Equal(b.vaultLines(), want) {
+			t.Fatalf("lines %q, want %q", b.vaultLines(), want)
+		}
+		if b.va.live.Load() != nil {
+			t.Fatal("a running client without its pin")
+		}
+		b.leaving(t)
+	})
+
+	t.Run("init with a card, the write and the pin fail", func(t *testing.T) {
+		path := vaultPath(t)
+		failBeforeTheLink(t, path)
+		b := newVaultBed(t, p, path, testMailbox, nil, nil)
+		b.va.pairs = refusePins
+		text := b.expect(t, http.MethodPut, "/vault/init", "pw\n"+newPeerID(t, p, testMailbox).card.String()+"\n", http.StatusServiceUnavailable)
+		if want := notStarted + "pin, " + noContainer + "\n"; text != want {
+			t.Fatalf("body %q, want %q", text, want)
+		}
+		if code := b.exitCode(t); code != 1 || exists(path) {
+			t.Fatalf("exit code %d, file %v", code, exists(path))
+		}
+		if want := []string{"vault opened", notWritten + "write", notPinned + "memory"}; !slices.Equal(b.vaultLines(), want) {
+			t.Fatalf("lines %q, want %q", b.vaultLines(), want)
+		}
+		b.leaving(t)
+	})
+
+	t.Run("a first PUT, the write and the pin fail", func(t *testing.T) {
+		path := vaultPath(t)
+		b := newVaultBed(t, p, path, testMailbox, nil, nil)
+		b.va.pairs = refusePins
+		b.expect(t, http.MethodPut, "/vault/init", "pw\n\n", http.StatusNoContent)
+		failBeforeTheLink(t, path)
+		if text := b.expect(t, http.MethodPut, "/contact", newPeerID(t, p, testMailbox).card.String(), http.StatusInternalServerError); text != notPinned+"memory\n" {
+			t.Fatalf("body %q", text)
+		}
+		if code := b.exitCode(t); code != 1 {
+			t.Fatalf("exit code %d", code)
+		}
+		if want := []string{"vault opened", notWritten + "write", notPinned + "memory"}; !slices.Equal(b.vaultLines(), want) {
+			t.Fatalf("lines %q, want %q", b.vaultLines(), want)
+		}
+		b.leaving(t)
+	})
+
+	t.Run("a first PUT, the write fails and the pin holds", func(t *testing.T) {
+		path := vaultPath(t)
+		b := newVaultBed(t, p, path, testMailbox, nil, nil)
+		b.expect(t, http.MethodPut, "/vault/init", "pw\n\n", http.StatusNoContent)
+		failBeforeTheLink(t, path)
+		x := newPeerID(t, p, testMailbox).card
+		b.expect(t, http.MethodPut, "/contact", x.String(), http.StatusInternalServerError)
+		b.expect(t, http.MethodPut, "/contact", newPeerID(t, p, testMailbox).card.String(), http.StatusConflict)
+		b.expect(t, http.MethodPut, "/contact", x.String(), http.StatusConflict)
+		if exists(path) || b.live(t).writer.pending() {
+			t.Fatal("the stop left a draft or a file")
+		}
+	})
+
+	// the content took the card while its write failed: the card is fixed
+	// before any pin, and a pin that failed after it lets no other card in
+	t.Run("another card while the pin is out", func(t *testing.T) {
+		path := vaultPath(t)
+		b := newVaultBed(t, p, path, testMailbox, nil, nil)
+		b.expect(t, http.MethodPut, "/vault/init", "pw\n\n", http.StatusNoContent)
+		l := b.live(t)
+		x := newPeerID(t, p, testMailbox).card
+		failBeforeTheLink(t, path)
+		if status, _, fixed := l.writer.first(x); status != http.StatusInternalServerError || !fixed {
+			t.Fatalf("the write: %d, fixed %v", status, fixed)
+		}
+		if out := l.ct.pinCard(x); out.status != http.StatusServiceUnavailable || out.text != leavingText {
+			t.Fatalf("the same card: %+v", out)
+		}
+		if out := l.ct.pinCard(newPeerID(t, p, testMailbox).card); !out.stop {
+			t.Fatalf("another card: %+v", out)
+		}
+	})
+}
+
+// every cell of the running states: a draft, a written file, a file whose
+// write did not settle, the stop of D-038 and an exit under way
+func TestVaultRequestMatrix(t *testing.T) {
+	p, _ := cheap(t)
+	x, y := newPeerID(t, p, testMailbox).card, newPeerID(t, p, testMailbox).card
+	other := newPeerID(t, provider(t, jcrypto.SuiteGOST), testMailbox).card
+	type cell struct {
+		method, path, body string
+		code               int
+	}
+	opens := func(code int) []cell {
+		return []cell{{http.MethodPut, "/vault/init", "pw2\n\n", code}, {http.MethodPut, "/vault/unlock", "pw\n", code}}
+	}
+	reads := func(code int) []cell {
+		return []cell{{http.MethodGet, "/card", "", code}, {http.MethodGet, "/status", "", code}}
+	}
+	for _, c := range []struct {
+		name  string
+		reach func(t *testing.T, b *vaultBed)
+		cells []cell
+	}{
+		{"draft", func(t *testing.T, b *vaultBed) {
+			b.expect(t, http.MethodPut, "/vault/init", "pw\n\n", http.StatusNoContent)
+		}, slices.Concat(opens(http.StatusConflict), reads(http.StatusOK),
+			[]cell{{http.MethodPut, "/contact", other.String(), http.StatusBadRequest}})},
+		{"written", func(t *testing.T, b *vaultBed) {
+			b.expect(t, http.MethodPut, "/vault/init", "pw\n\n", http.StatusNoContent)
+			b.expect(t, http.MethodPut, "/contact", x.String(), http.StatusNoContent)
+		}, slices.Concat(opens(http.StatusConflict), reads(http.StatusOK),
+			[]cell{{http.MethodPut, "/contact", x.String(), http.StatusNoContent}, {http.MethodPut, "/contact", y.String(), http.StatusConflict}})},
+		{"unsettled", func(t *testing.T, b *vaultBed) {
+			failSettle(t)
+			b.expect(t, http.MethodPut, "/vault/init", "pw\n\n", http.StatusNoContent)
+			b.expect(t, http.MethodPut, "/contact", x.String(), http.StatusInternalServerError)
+		}, slices.Concat(opens(http.StatusConflict), reads(http.StatusOK),
+			[]cell{{http.MethodPut, "/contact", x.String(), http.StatusInternalServerError}, {http.MethodPut, "/contact", y.String(), http.StatusConflict}})},
+		{"stopped", func(t *testing.T, b *vaultBed) {
+			b.expect(t, http.MethodPut, "/vault/init", "pw\n\n", http.StatusNoContent)
+			b.expect(t, http.MethodPut, "/contact", x.String(), http.StatusNoContent)
+			b.expect(t, http.MethodPut, "/contact", y.String(), http.StatusConflict)
+		}, slices.Concat(opens(http.StatusConflict), reads(http.StatusConflict),
+			[]cell{{http.MethodPut, "/contact", x.String(), http.StatusConflict}})},
+		{"leaving", func(t *testing.T, b *vaultBed) {
+			b.va.pairs = refusePins
+			b.expect(t, http.MethodPut, "/vault/init", "pw\n\n", http.StatusNoContent)
+			b.expect(t, http.MethodPut, "/contact", x.String(), http.StatusInternalServerError)
+		}, slices.Concat(opens(http.StatusServiceUnavailable), reads(http.StatusServiceUnavailable),
+			[]cell{{http.MethodPut, "/contact", x.String(), http.StatusServiceUnavailable}})},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := newVaultBed(t, p, vaultPath(t), testMailbox, nil, nil)
+			c.reach(t, b)
+			for _, cl := range c.cells {
+				b.expect(t, cl.method, cl.path, cl.body, cl.code)
+			}
+		})
+	}
+}
+
+// the open waits for the first chain: meanwhile the routes of the running
+// client say so, a second open is 429, and a SIGTERM ends the wait with an
+// answer that tells whether the file is on disk, and code 0
+func TestVaultOpening(t *testing.T) {
+	p, _ := cheap(t)
+	peer := newPeerID(t, p, testMailbox)
+	for _, c := range []struct {
+		name, body, where string
+		stop              bool
+	}{
+		{"built", "pw\n\n", "", false},
+		{"a stop without a container", "pw\n\n", noContainer, true},
+		{"a stop with the container on disk", "pw\n" + peer.card.String() + "\n", onDisk, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			entered, release := make(chan struct{}, 1), make(chan struct{})
+			first := func() (conversation.Circuit, error) {
+				entered <- struct{}{}
+				<-release
+				return &fakeCircuit{replies: make(chan []byte)}, nil
+			}
+			b := newVaultBed(t, p, vaultPath(t), testMailbox, first, nil)
+			var once sync.Once
+			free := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(free)
+			type answer struct {
+				code int
+				text string
+			}
+			result := make(chan answer, 1)
+			go func() {
+				code, text := b.call(t, http.MethodPut, "/vault/init", c.body)
+				result <- answer{code, text}
+			}()
+			<-entered
+			for _, req := range [][3]string{{http.MethodGet, "/card", ""}, {http.MethodGet, "/status", ""}, {http.MethodPut, "/contact", peer.card.String()}} {
+				if text := b.expect(t, req[0], req[1], req[2], http.StatusServiceUnavailable); text != openingText+"\n" {
+					t.Fatalf("%s %s: %q", req[0], req[1], text)
+				}
+			}
+			b.expect(t, http.MethodPut, "/vault/init", "pw2\n\n", http.StatusTooManyRequests)
+			b.expect(t, http.MethodPut, "/vault/unlock", "pw\n", http.StatusTooManyRequests)
+			if !c.stop {
+				free()
+				if got := <-result; got.code != http.StatusNoContent {
+					t.Fatalf("the init: %d %q", got.code, got.text)
+				}
+				b.expect(t, http.MethodGet, "/card", "", http.StatusOK)
+				return
+			}
+			b.stop <- os.Interrupt
+			got := <-result
+			if want := notStarted + "shutdown, " + c.where + "\n"; got.code != http.StatusServiceUnavailable || got.text != want {
+				t.Fatalf("the init: %d %q, want %q", got.code, got.text, want)
+			}
+			if code := b.exitCode(t); code != 0 {
+				t.Fatalf("exit code %d", code)
+			}
+			b.leaving(t)
+		})
+	}
+}
+
+// after the third 403 in a row an unlock waits 1 s, then twice as long after
+// every further 403 up to 64 s; a 400 or a 409 does not count, and a waiting
+// unlock stretches nothing
+func TestVaultUnlockPause(t *testing.T) {
+	p, stretches := cheap(t)
+	path := vaultPath(t)
+	elsewhere := addrOf("relay-6")
+	mustCreate(t, p, path, volumeSpec{"pw", profile.New(p, testMailbox, cardOf(t, p, testMailbox))},
+		volumeSpec{"pw2", profile.New(p, elsewhere, cardOf(t, p, elsewhere))})
+	b := newVaultBed(t, p, path, testMailbox, nil, nil)
+	var mu sync.Mutex
+	now := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	b.va.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	advance := func(d time.Duration) {
+		mu.Lock()
+		now = now.Add(d)
+		mu.Unlock()
+	}
+	refused := func() {
+		t.Helper()
+		b.expect(t, http.MethodPut, "/vault/unlock", "wrong\n", http.StatusForbidden)
+	}
+	waits := func() {
+		t.Helper()
+		n := stretches.Load()
+		if text := b.expect(t, http.MethodPut, "/vault/unlock", "pw\n", http.StatusTooManyRequests); text != pauseText+"\n" {
+			t.Fatalf("body %q", text)
+		}
+		if stretches.Load() != n {
+			t.Fatal("a stretch in the pause")
+		}
+	}
+	for range freeUnlocks {
+		refused()
+	}
+	waits()
+	advance(time.Second - time.Millisecond)
+	waits()
+	advance(time.Millisecond)
+	b.expect(t, http.MethodPut, "/vault/unlock", "", http.StatusBadRequest)
+	b.expect(t, http.MethodPut, "/vault/unlock", "pw2\n", http.StatusConflict)
+	b.expect(t, http.MethodPut, "/vault/unlock", "", http.StatusBadRequest)
+	for k := freeUnlocks + 1; k <= 10; k++ {
+		refused()
+		pause := min(time.Second<<(k-freeUnlocks), maxUnlockPause)
+		if k >= 9 && pause != 64*time.Second {
+			t.Fatalf("the pause after %d refusals: %v", k, pause)
+		}
+		advance(pause - time.Millisecond)
+		waits()
+		advance(time.Millisecond)
+	}
+	b.expect(t, http.MethodPut, "/vault/unlock", "pw\n", http.StatusNoContent)
+	if lines := strings.Count(b.out.String(), lineNoVolume+"\n"); lines != 10 {
+		t.Fatalf("%d lines of a refusal, want one per 403", lines)
+	}
+}
+
+// a body is taken only whole: one cut short, at the end of a block or
+// anywhere, is refused before any stretch, whatever its framing
+func TestVaultInitBodyArrivesWhole(t *testing.T) {
+	p, stretches := cheap(t)
+	b := newVaultBed(t, p, vaultPath(t), testMailbox, nil, nil)
+	second := "pw2\n" + newPeerID(t, p, testMailbox).card.String() + "\n"
+	for _, c := range []struct{ name, head, body string }{
+		{"a length the body does not reach", fmt.Sprintf("Content-Length: %d\r\n", len("pw\n\n"+second)), "pw\n\n"},
+		{"chunks without their end", "Transfer-Encoding: chunked\r\n", "4\r\npw\n\n\r\n"},
+	} {
+		code, text := rawPut(t, b.url, "/vault/init", c.head, c.body)
+		if code != http.StatusBadRequest || text != "the body did not arrive\n" {
+			t.Fatalf("%s: %d %q", c.name, code, text)
+		}
+	}
+	if stretches.Load() != 0 || b.state() != lockedNoFile || len(b.lines()) != 0 {
+		t.Fatalf("%d stretches, state %d, lines %q", stretches.Load(), b.state(), b.lines())
+	}
+	body := "pw\n\n" + second
+	code, text := rawPut(t, b.url, "/vault/init", "Transfer-Encoding: chunked\r\n", fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(body), body))
+	if code != http.StatusNoContent {
+		t.Fatalf("a whole chunked body: %d %q", code, text)
+	}
+}
+
+// a request written by hand, whose sending side closes after the body
+func rawPut(t *testing.T, url, path, head, body string) (int, string) {
+	t.Helper()
+	conn, err := net.Dial("tcp", strings.TrimPrefix(url, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "PUT %s HTTP/1.1\r\nHost: admin\r\n%s\r\n%s", path, head, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	text, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, string(text)
 }
 
 // records the output of every call that gives a secret
@@ -929,4 +1422,10 @@ func (w *draftWriter) pending() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.draft != nil
+}
+
+func cardOf(t *testing.T, p jcrypto.CryptoProvider, mailboxAddr string) *e2e.Card {
+	t.Helper()
+	c := newPeerID(t, p, mailboxAddr).card
+	return &c
 }
