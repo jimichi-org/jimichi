@@ -3,8 +3,9 @@
 English | [Русский](../ru/LIMITATIONS.md)
 
 - The testbed is a lab. In the cluster nodes are containers on one machine. The original correlation
-  series run all nodes and clients in one process over loopback; `lab/nodeview` launches its own
-  participants in separate processes on the same host. Network delay, loss and jitter are neither
+  series run all nodes and clients in one process over loopback; the node part of the perf set runs
+  one node in a child process of `lab/perf` on pinned CPUs of the same host; `lab/nodeview` launches
+  its own participants in separate processes on the same host. Network delay, loss and jitter are neither
   reproduced nor emulated; network emulation is planned
   ([#46](https://github.com/jimichi-org/jimichi/issues/46)). These are not independent operators.
 - One/two-node observation in `lab/nodeview` covers actual API buffers and metadata of the own

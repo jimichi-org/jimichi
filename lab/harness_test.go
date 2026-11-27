@@ -6,6 +6,7 @@ import (
 
 	"github.com/jimichi-org/jimichi/client"
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/relay"
 )
@@ -355,5 +356,141 @@ func TestExecuteWithoutLabelCellsHasNoLabels(t *testing.T) {
 	}
 	if run.Labels != nil {
 		t.Fatalf("labels %v without LabelCells", run.Labels)
+	}
+}
+
+func TestExecuteOneHop(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			run, err := Execute(Config{Hops: 1, Flows: 2, Duration: 300 * time.Millisecond, SendEvery: 20 * time.Millisecond, Suite: s, Seed: 5})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if len(run.Latency) == 0 || len(run.Exit) != 0 || run.RelayBroken != 0 || run.LocalRelays != 1 {
+				t.Fatalf("%d echoes, %d exit traces, %d broken, %d local relays; want echoes, no exit trace, none broken, one relay",
+					len(run.Latency), len(run.Exit), run.RelayBroken, run.LocalRelays)
+			}
+		})
+	}
+}
+
+// with a window of 2 no flow has more than 2 messages out, and every message
+// sent is either echoed or still out; full cells at three hops of c25519
+// carry 494 - 3*16 - 2 = 444 bytes
+func TestExecuteWindowBoundsOutstanding(t *testing.T) {
+	const flows = 3
+	run, err := Execute(Config{Hops: 3, Flows: flows, Duration: 300 * time.Millisecond, Window: 2, FullPayload: true, Seed: 6})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if run.Unanswered > 2*flows || run.Sent != len(run.Latency)+run.Unanswered || run.Sent == 0 {
+		t.Fatalf("%d sent, %d echoed, %d unanswered; want at most %d out and every message accounted for", run.Sent, len(run.Latency), run.Unanswered, 2*flows)
+	}
+	if len(run.Completed) != len(run.Latency) || len(run.EchoFlow) != len(run.Latency) {
+		t.Fatalf("%d completions and %d flows for %d echoes", len(run.Completed), len(run.EchoFlow), len(run.Latency))
+	}
+	for i := 1; i < len(run.Completed); i++ {
+		if run.EchoFlow[i] == run.EchoFlow[i-1] && run.Completed[i] < run.Completed[i-1] {
+			t.Fatalf("flow %d: completion %v after %v", run.EchoFlow[i], run.Completed[i], run.Completed[i-1])
+		}
+	}
+	if run.Payload != 444 {
+		t.Fatalf("payload %d, want 444", run.Payload)
+	}
+}
+
+func TestExecuteWindowZeroUnchanged(t *testing.T) {
+	run, err := Execute(Config{Hops: 2, Flows: 2, Duration: 200 * time.Millisecond, SendEvery: 20 * time.Millisecond, Seed: 7})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if run.Completed != nil || run.EchoFlow != nil {
+		t.Fatalf("without a window: %d completions and %d flows, want nil", len(run.Completed), len(run.EchoFlow))
+	}
+}
+
+func TestExecuteRefusesWindowWithCover(t *testing.T) {
+	for name, cfg := range map[string]Config{
+		"window 65":     {Window: 65},
+		"window -1":     {Window: -1},
+		"with cover":    {Window: 2, CoverEvery: 100 * time.Millisecond},
+		"constant rate": {Window: 2, Mode: client.ConstantRate, Rate: 50 * time.Millisecond},
+		"with labels":   {Window: 2, LabelCells: true},
+		"exit and mark": {Exit: &client.Node{}, Mark: &MarkConfig{}},
+		"full labels":   {FullPayload: true, LabelCells: true},
+	} {
+		if _, err := Execute(cfg); err == nil {
+			t.Errorf("%s: Execute accepted it", name)
+		}
+	}
+}
+
+func TestExecuteExternalExit(t *testing.T) {
+	p, err := suite.New(jcrypto.SuiteC25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit, err := StartNode(p, 0)
+	if err != nil {
+		t.Fatalf("StartNode: %v", err)
+	}
+	defer exit.Stop()
+	node := exit.Client()
+	for _, hops := range []int{1, 2} {
+		run, err := Execute(Config{Hops: hops, Flows: 2, Duration: 300 * time.Millisecond, SendEvery: 20 * time.Millisecond, Exit: &node, Seed: 8})
+		if err != nil {
+			t.Fatalf("hops %d: Execute: %v", hops, err)
+		}
+		if len(run.Latency) == 0 || run.LocalRelays != hops-1 {
+			t.Fatalf("hops %d: %d echoes, %d local relays", hops, len(run.Latency), run.LocalRelays)
+		}
+		if hops == 1 && run.KeysLocked {
+			t.Fatal("no local relay, yet KeysLocked")
+		}
+	}
+	if exit.Counters().Delivered == 0 {
+		t.Fatal("the external exit delivered nothing")
+	}
+}
+
+func TestOnWindowOrder(t *testing.T) {
+	var calls []bool
+	_, err := Execute(Config{Hops: 1, Flows: 1, Duration: 100 * time.Millisecond, Window: 1, Seed: 9, OnWindow: func(open bool) { calls = append(calls, open) }})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(calls) != 2 || !calls[0] || calls[1] {
+		t.Fatalf("OnWindow calls %v, want [true false]", calls)
+	}
+}
+
+func TestExecuteRestoresKeyMem(t *testing.T) {
+	before := secmem.CurrentPolicy()
+	nolock := secmem.Policy{OffHeap: true, DontDump: true, Zero: true}
+	if _, err := Execute(Config{Hops: 1, Flows: 1, Duration: 100 * time.Millisecond, SendEvery: 20 * time.Millisecond, KeyMem: &nolock, Seed: 10}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := secmem.CurrentPolicy(); got != before {
+		t.Fatalf("policy after the run %v, want %v", got, before)
+	}
+}
+
+func TestKeyMemRunsDoNotOverlap(t *testing.T) {
+	nolock := secmem.Policy{OffHeap: true, DontDump: true, Zero: true}
+	keyMemRun.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Execute(Config{Hops: 1, Flows: 1, Duration: 100 * time.Millisecond, SendEvery: 20 * time.Millisecond, KeyMem: &nolock, Seed: 11})
+		done <- err
+	}()
+	select {
+	case <-done:
+		keyMemRun.Unlock()
+		t.Fatal("a run with KeyMem went on while another held the policy")
+	case <-time.After(300 * time.Millisecond):
+	}
+	keyMemRun.Unlock()
+	if err := <-done; err != nil {
+		t.Fatalf("Execute: %v", err)
 	}
 }
