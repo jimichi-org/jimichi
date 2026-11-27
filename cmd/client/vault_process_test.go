@@ -228,15 +228,15 @@ func resumesAfterARestart(t *testing.T, s jcrypto.Suite) {
 	written := fileBytes(t, path)
 
 	trips := func(admin string) uint64 { return vaultStatus(t, admin).RoundTrips }
-	waitFor := func(what string, done func() bool) {
+	waitFor := func(what string, wait time.Duration, done func() bool) {
 		t.Helper()
-		for limit := time.Now().Add(maxWait); !done(); time.Sleep(50 * time.Millisecond) {
+		for limit := time.Now().Add(wait); !done(); time.Sleep(50 * time.Millisecond) {
 			if time.Now().After(limit) {
-				t.Fatalf("no %s in %v", what, maxWait)
+				t.Fatalf("no %s in %v", what, wait)
 			}
 		}
 	}
-	waitFor("round trips both ways", func() bool { return trips(adminA) >= 2 && roundTrips(b.out.String()) >= 2 })
+	waitFor("round trips both ways", maxWait, func() bool { return trips(adminA) >= 2 && roundTrips(b.out.String()) >= 2 })
 	if st := vaultStatus(t, adminA); st.LastRoundTripMS == nil || st.LastRoundTripAt == nil || st.SilentFor == nil ||
 		st.Container != containerWritten || (st.State != "established" && st.State != "confirmed") {
 		t.Fatalf("GET /status %+v", st)
@@ -256,7 +256,9 @@ func resumesAfterARestart(t *testing.T, s jcrypto.Suite) {
 		t.Fatalf("no pin from the volume before the answer:\n%s", again.out.String())
 	}
 	seen := roundTrips(b.out.String())
-	waitFor("the conversation after the restart", func() bool {
+	// when the other side is the initiator it hands the conversation over only
+	// after its stale timeout, so the recovery takes up to stale plus a handshake
+	waitFor("the conversation after the restart", stale+maxWait, func() bool {
 		return trips(adminA) >= 2 && roundTrips(b.out.String()) >= seen+2
 	})
 	mustCall(t, http.MethodPut, adminA+"/contact", textB, http.StatusNoContent)
