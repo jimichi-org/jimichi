@@ -2037,8 +2037,8 @@ well: a CryptoProvider and the noise.Static interface.
 Status: the packages vault and vault/profile, the commands `jimichi vault init` and `jimichi
 vault show` and the -peer client with a container (-vault, subsection "The -peer client with a
 container") are implemented. The set that measures the property (EXPERIMENT, block 5) is
-implemented, its series is not recorded yet. The testbed overlay with -vault is planned
-([#20](https://github.com/jimichi-org/jimichi/issues/20)).
+implemented, its series is not recorded yet. The testbed overlay with -vault and make vault-demo
+are implemented (section "Deployment").
 
 The container is a client file of a constant size with one or two volumes, each under its own
 password. A written volume holds the pin, that is the contact card, and nothing else. The file
@@ -2232,8 +2232,8 @@ is indistinguishable from it.
   the other relays stay at zero, which scripts/e2e.sh checks. There are no volumes, the root
   filesystem is read-only, the user is 65532, seccomp is RuntimeDefault and every capability is
   dropped; relays and clients keep only IPC_LOCK for mlock.
-- The clients use the Recreate strategy and the selector `{app: client, client: a|b}`; every
-  pod is a new identity. A full deployment, protocol rollout, suite switch or rollback requires
+- The clients use the Recreate strategy and the selector `{app: client, client: a|b}`; in
+  deploy/base every pod is a new identity. A full deployment, protocol rollout, suite switch or rollback requires
   a complete stop barrier; per-Deployment Recreate does not replace it. make deploy,
   scripts/redeploy.sh and direct scripts/e2e.sh invocation share this path.
 - Before workload mutation, preflight checks SUITE (only c25519 or gost), the local kind context,
@@ -2271,6 +2271,36 @@ is indistinguishable from it.
   lines and checks that neither container restarted meanwhile. Any failure starts the attempt over
   with a restart, and after three it exits 1. A restart of either client is a new identity, so
   enroll, deploy, start and e2e.sh run the introduction themselves.
+- deploy/vault, the testbed overlay: the same client-a and client-b as deploy/base, with `-vault
+  /vault/peer.vault`. The volume /vault lives on the PVCs vault-client-a and vault-client-b
+  (ReadWriteOnce, 1Mi, the default storage class, local-path in kind), the pods have fsGroup 65532
+  and a memory limit of 256Mi for the stretch of a password (Argon2id with 64 MiB in the c25519
+  suite); everything else is byte for byte as in deploy/base, which a test checks. No relay has a
+  volume in any manifest. The container file lies in the directory of the PV on the worker node of
+  the pod, inside the /var volume of the kind node (with Docker Desktop, the disk of its WSL2 VM);
+  the kubelet keeps the client logs there too, and they hold only lines of the kinds in the
+  subsection "The -peer client with a container". No key and no password is on the disk of the
+  node. The file goes with its PVC.
+- make vault-demo (scripts/vault.sh) shows the container on the development testbed and is not
+  part of CI. The script checks the context and the suite, removes the clients and the PVCs of an
+  earlier run, applies deploy/vault and checks that both clients start locked: GET /card and GET
+  /status answer 503 until a volume is open. Then an init of two volumes at client-a and of one at
+  client-b, the introduction through PUT /contact and a round trip of the conversation. A restart
+  of client-a with the password of the real volume gives the same card and the conversation
+  without a new introduction, and client-b does not restart meanwhile. A restart with the password
+  of the cover volume gives another identity, which stays silent and leaves client-b alone. The
+  file stays the same byte for byte, the log names no identity and shows the same kinds of line
+  with either volume. A wrong password is answered with 403 after one stretch, and the script
+  prints that time. At the end the script returns to deploy/base and introduces the clients again.
+  The demonstration does not show a plausible cover: the contact of the cover volume is the card of
+  a key nobody holds, and such a volume gives itself away by its silence (THREAT_MODEL).
+- The passwords of the demonstration are 24 random bytes in base64 in shell variables. They reach
+  no file, process argument, environment or here-string, go to curl only on its standard input,
+  and the script does not run with xtrace or allexport. The memory of bash, curl and kubectl on the
+  host is not locked and may go to pagefile.sys and hiberfil.sys (to swap on Linux); the passwords
+  are new on every run and mean nothing once the PVCs are gone. A failure or an interrupt returns
+  to deploy/base by itself, and exit code 3 means it could not. make redeploy does not remove the
+  PVCs of the overlay; make vault-demo removes them at its start and at its end.
 - The manifests hold no Secret at all: node keys are created in process memory and a node stores
   them nowhere else, in no Secret, volume or file. Only the secmem buffers are locked: the copies
   the libraries keep on the heap are not, and whether those reach swap depends on the host
