@@ -183,23 +183,27 @@ func vaultAtTheMinimum(t *testing.T, s jcrypto.Suite) bool {
 	vaultArgs := append([]string{"-vault", path}, talk...)
 
 	a := bed.start(t, "a", vaultEnv, vaultArgs...)
-	b := bed.start(t, "b", env, talk...)
 	adminA := a.locked(t)
 	mustCall(t, http.MethodPut, adminA+"/vault/init", vaultPassword+"\n\n"+decoyPassword+"\n"+decoy.String()+"\n", http.StatusNoContent)
 	cardA := vaultCard(t, adminA)
-	textB, _ := b.card(t, bed.p)
+	b, textB := peerAbove(t, bed, cardA, env, talk)
 	if code, text := httpCall(t, http.MethodPut, adminA+"/contact", textB); code != http.StatusInternalServerError || text != notWritten+"write\n" {
 		t.Fatalf("the first write: %d %q", code, text)
 	}
-	mustCall(t, http.MethodPut, "http://"+b.admin(t)+"/contact", cardA.String(), http.StatusNoContent)
-	// the repeat of the write during the handshake is the peak of a draft
+	// the initiator's handshake starts at the pin and waits for kk2, which b
+	// cannot send before its own pin: the repeat of the write now is the peak
+	// of a draft
 	if st := vaultStatus(t, adminA); st.State != "handshaking" {
-		t.Logf("the write repeats in the state %s", st.State)
+		t.Fatalf("the write repeats in the state %s", st.State)
 	}
 	mustCall(t, http.MethodPut, adminA+"/contact", textB, http.StatusNoContent)
+	if st := vaultStatus(t, adminA); st.State != "handshaking" || st.Container != containerWritten {
+		t.Fatalf("after the repeat: %+v", st)
+	}
 	if n := strings.Count(a.out.String(), " vault written\n"); n != 1 {
 		t.Fatalf("%d writes:\n%s", n, a.out.String())
 	}
+	mustCall(t, http.MethodPut, "http://"+b.admin(t)+"/contact", cardA.String(), http.StatusNoContent)
 	if !secondChecksAsInitiator(t, bed.p, path, decoyPassword, decoy) {
 		a.terminate(t)
 		return false
@@ -237,6 +241,26 @@ func vaultAtTheMinimum(t *testing.T, s jcrypto.Suite) bool {
 	short(a)
 	short(b)
 	return true
+}
+
+// a client b whose key is above the one of own, so that own takes the
+// initiator's side; each try is even odds
+func peerAbove(t *testing.T, bed *peerBed, own e2e.Card, env, args []string) (*peerProc, string) {
+	t.Helper()
+	for range 24 {
+		b := bed.start(t, "b", env, args...)
+		text, _ := b.card(t, bed.p)
+		card, err := e2e.ParseCard(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Compare(own.Static, card.Static) < 0 {
+			return b, text
+		}
+		b.terminate(t)
+	}
+	t.Fatal("no client with a key above the one of the vault")
+	return nil, ""
 }
 
 // a card whose key starts with 0xff, so that a volume holding it as its

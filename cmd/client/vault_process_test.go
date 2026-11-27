@@ -192,9 +192,10 @@ func TestVaultClientStart(t *testing.T) {
 
 // a -vault client talks with a client of RAM only, exits and comes back
 // locked; the unlock gives the same card, pins the contact without a PUT, and
-// the conversation resumes while the other client sees no other card. The
-// file is written once, and no line names a card, a role, the session or a
-// round trip. Both suites, on the cheap stretch
+// the conversation resumes while the other client sees no other card, and a
+// third card stops it. The file is written once and stays as it is, and no
+// line names a card, a role, the session or a round trip. Both suites, on the
+// cheap stretch
 func TestVaultClientResumesAfterARestart(t *testing.T) {
 	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
 		t.Run(s.String(), func(t *testing.T) { resumesAfterARestart(t, s) })
@@ -266,7 +267,16 @@ func resumesAfterARestart(t *testing.T, s jcrypto.Suite) {
 		t.Fatalf("the other client saw another card:\n%s", b.out.String())
 	}
 	mustCall(t, http.MethodGet, "http://"+b.admin(t)+"/card", "", http.StatusOK)
-	checkVaultOutput(t, again, append(cardSecrets(cardA, cardB), vaultPassword)...)
+	// the pin restored by the unlock is the only card: another one stops the
+	// client and leaves the file as it is
+	foreign := newPeerID(t, bed.p, bed.addrs[2]).card
+	mustCall(t, http.MethodPut, adminA+"/contact", foreign.String(), http.StatusConflict)
+	again.await(t, "the stop", func(out string) bool { return strings.Contains(out, " contact card changed, refusing\n") })
+	mustCall(t, http.MethodGet, adminA+"/status", "", http.StatusConflict)
+	if !bytes.Equal(fileBytes(t, path), written) {
+		t.Fatal("the file changed after the stop")
+	}
+	checkVaultOutput(t, again, append(cardSecrets(cardA, cardB, foreign), vaultPassword)...)
 	again.stop(t)
 }
 
@@ -401,7 +411,7 @@ func TestVaultClientDecoyLooksTheSame(t *testing.T) {
 	}
 }
 
-// an exit by D-040, three refused replies, comes back locked, and the unlock
+// an exit after three refused replies, code 3, comes back locked, and the unlock
 // gives the identity of the first run
 func TestVaultClientExitComesBackLocked(t *testing.T) {
 	p := provider(t, jcrypto.SuiteC25519)
