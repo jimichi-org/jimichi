@@ -849,41 +849,62 @@ queue and the pin. Without -vault everything is as above.
 
 Refused with code 2: -vault without -peer, or a directory of the file that does not exist. Code 1
 before the listener: a file at the path that is not a regular file of 8224 bytes (`the vault file
-is not a vault`).
+is not a vault`), a failed Lstat (`the vault file cannot be read`) or a leftover of a creation that
+cannot be removed (`the leftover of a vault creation could not be removed`).
 
 Start order with -vault:
 
 1. The key memory policy, the dump prevention, RLIMIT_MEMLOCK of at least 96 KiB; the suite, the
    flags, the anchor, as above.
-2. vault.Clean removes a `<path>.tmp` that a creation killed before its link left behind.
+2. vault.Clean removes a `<path>.tmp` that a creation killed before its link left behind, or a
+   write that did not end after its link.
 3. The admin listener: `admin listening on <address>`, then `vault locked`. No card_hash line and
    no network request.
-4. The client waits for PUT /vault/init (no file) or PUT /vault/unlock (the file exists). SIGTERM in
-   the locked state: code 0.
-5. The identity and F derived from the key of the volume, the own card built from them:
-   `vault opened`.
-6. The first circuit and the conversation, as above.
-7. Unlock: the contact card of the volume is pinned on the path of PUT /contact, `contact pinned`.
-   Init: the draft of the container lives until its write.
+4. The client waits for PUT /vault/init (no file) or PUT /vault/unlock (the file exists). SIGTERM:
+   code 0.
+5. The open of the volume: the identity and F derived from the key of the volume, the own card
+   built from them, `vault opened`.
+6. The first circuit is built in a goroutine of its own, and the client waits for it or for
+   SIGTERM; then the conversation.
+7. A contact the volume fixed is pinned (`contact pinned`), and only then the answer to the init
+   or the unlock goes out.
 
-States: locked without a file, locked with a file, opening (an init or an unlock in flight up to
-the pin), running without a write (a draft), running, stopped (D-038).
+States:
 
-| Request | Locked, no file | Locked, file | Opening | Running, not written | Running | Stopped |
+| State | When |
+|---|---|
+| locked, no file | a start without a file |
+| locked, file | a start with a file of 8224 bytes |
+| opening | an init or an unlock opened a volume, no answer yet |
+| running, draft | the init succeeded, the container is not written |
+| running, written | the write succeeded, or the client was opened by an unlock |
+| running, unsettled | the write reached the link but did not end (class `sync`) |
+| stopped | another card after the contact was fixed (D-038) |
+| leaving | the answer after which the process exits has gone out |
+
+| Request | Locked, no file | Locked, file | Opening | Draft | Written | Unsettled |
 |---|---|---|---|---|---|---|
-| PUT /vault/init | body below; Prepare; 204 once the conversation runs | 409 | 429 | 409 | 409 | 409 |
-| PUT /vault/unlock | 409 | Open, Parse, Fit, the contact's key; 204 once the contact is pinned | 429 | 409 | 409 | 409 |
-| GET /card | 503 | 503 | 503 | the own card | the own card | 409 |
-| PUT /contact | 503 | 503 | 503 | the checks of PUT /contact, Draft.Write with WithContact, then the pin | the same card 204, another one 409 and the stop | 409 |
-| GET /status | 503 | 503 | 503 | JSON below | JSON below | 409 |
+| PUT /vault/init | body below | 409 | 429 | 409 | 409 | 409 |
+| PUT /vault/unlock | 409 | body below; 429 in the pause | 429 | 409 | 409 | 409 |
+| GET /card | 503 | 503 | 503 `the volume is opening` | the own card | the own card | the own card |
+| PUT /contact | 503 | 503 | 503 `the volume is opening` | the write below | the pinned card 204, another one 409 and the stop | the pinned card 500 `vault: not written: sync`, another one 409 and the stop |
+| GET /status | 503 | 503 | 503 `the volume is opening` | JSON below | JSON below | JSON below |
+
+In the stopped state every request gets 409 by D-038, while leaving 503 `shutting down`. The texts
+of the 4xx and 5xx answers are fixed classes and never the text of an error: the vault errors name
+the path. A body over the bound gets 413.
 
 The body of PUT /vault/init, at most 2 KiB:
 
 ```
 body  = block [ block ]
-block = password LF card LF          a line ends in LF or CR LF
+block = password LF card LF          every line, the last one too, ends in LF or CR LF
 ```
 
+- A body is taken only whole: the read ends at a clean end of the stream, and with a
+  Content-Length the byte count equals it; otherwise 400 `the body did not arrive` before any
+  stretch. A body cut short at the end of a block therefore does not read as one volume. The body
+  is sent as it is (curl --data-binary, not -d).
 - A password is 1 to 256 bytes without NUL and CR, copied into secmem at once.
 - The card line may be empty only in the first block: the contact of that volume comes with PUT
   /contact. The second block's card is required.
@@ -893,90 +914,176 @@ block = password LF card LF          a line ends in LF or CR LF
 - After the stretch, on the identity of each volume: the key of the card passes a trial agreement
   and is not the own key or queue; otherwise 400 `the key of the card does not pass`, without a
   block number.
-- A card in the first block is written at once, before the first circuit: a client that exits
-  there keeps its container.
+- The rule that a contact belongs to one volume is checked only within one body: after Prepare the
+  process keeps nothing of the second volume (LIMITATIONS).
+- A card in the first block fixes the contact and is written at once, before the first circuit: a
+  client that exits there keeps its container.
+- For two volumes `jimichi vault init` outside the pod is the recommended path: the password of the
+  second volume sent with an init through the admin port passes through the kube API and the
+  memory of the pod (CRYPTO, "Known gaps").
 
-The body of PUT /vault/unlock is one password line by the same rules; anything else is 400.
+The body of PUT /vault/unlock is one password line by the same rules and the same read; anything
+else is 400.
 
-The answers of PUT /vault/unlock other than 204; after each the client stays locked, every key of
-the attempt released, and the body is also the line of the log:
+The refusals before a volume opens; after each the client stays locked, every key of the attempt
+released, and the body is also the line of the log (except for 400):
 
 | Code | Body and line | Cause |
 |---|---|---|
-| 403 | `vault: no volume opens with this password` | ErrNoVolume, which a volume of another suite gives as well |
-| 409 | `vault: the volume does not fit this client: mailbox` | the mailbox of the volume's contact is not -mailbox |
-| 409 | `vault: the volume does not fit this client: contact` | the contact's key does not pass the check of conv.Pair, run before the first circuit |
-| 409 | `vault: the volume is corrupt` | ErrCorrupt (also a scalar or an F of zeroes) and a content the profile refuses |
-| 500 | `vault: not opened: memory` | a secmem error (mmap, mlock) |
-| 500 | `vault: not opened: io` | a read error, or the file changed after the start |
+| 403 | `vault: no volume opens with this password` | unlock: ErrNoVolume, which a volume of another suite gives as well |
+| 409 | `vault: the volume does not fit this client: mailbox` | unlock: the mailbox of the volume's contact is not -mailbox |
+| 409 | `vault: the volume does not fit this client: contact` | unlock: the contact's key does not pass the check of conv.Pair, run before the first circuit |
+| 409 | `vault: the volume is corrupt` | unlock: ErrCorrupt (also a scalar or an F of zeroes) and a content the profile refuses |
+| 500 | `vault: not opened: memory` | init and unlock: a secmem error (mmap, mlock) |
+| 500 | `vault: not opened: io` | init and unlock: a read error, the file changed after the start, anything else |
 
-A failed init answers 500 with the same two classes and stays locked without a file. One init or
-unlock at a time: another one in flight gets 429. A body over the bound gets 413. If after the
-volume opens the first circuit is not built or the conversation does not start, the answer is 503,
-the process exits with code 1 and comes back locked.
+The outcomes after a volume opened:
 
-Guessing passwords through the admin port is bounded only by one operation at a time and by the
-cost of PasswordKey for each guess: the port listens on the loopback of the pod, and access to it
-already equals control of the pod.
+| Outcome | Answer | Then |
+|---|---|---|
+| unlock, the circuit, the conversation and the pin succeeded | 204 | running, written |
+| init without a card in the first block, the circuit and the conversation succeeded | 204 | running, draft |
+| init with a card in the first block, the write and the pin succeeded | 204 | running, written |
+| the same, the write did not reach the link (`write`, `link`, `memory`) | 500 `vault: not written: <class>` | running, draft, pinned; PUT /contact with the same card repeats the write |
+| the same, the write reached the link and did not end | 500 `vault: not written: sync` | running, unsettled, pinned |
+| the first circuit is not built | 503 `vault: not started: circuit, <C>` | exit, code 1 |
+| the conversation did not start | 503 `vault: not started: conversation, <C>` | exit, code 1 |
+| the pin of the contact of the volume or of the first block failed | 503 `vault: not started: pin, <C>` | exit, code 1 |
+| SIGTERM while opening | 503 `vault: not started: shutdown, <C>` | exit, code 0 |
 
-The write of the container:
+`<C>` is `the container is on disk` when a file is at the path (always for an unlock, for an init
+once its write reached the link), otherwise `no container`. The operator's next step is therefore
+plain: after the restart an unlock or an init. An answer after which the process exits is written
+before the listener closes (Shutdown within 2 s). One init or unlock at a time: another one in
+flight gets 429.
 
-- The first PUT /contact of a client without a write runs the checks of PUT /contact, then
-  Draft.Write with WithContact, then the pin. The write comes before the pairing, so the trial
-  session of WithContact and the session of the conversation never hold locked pages at once.
-  The log gives `vault written` and then `contact pinned`.
-- A failed write answers 500 `vault: not written: <class>` with a line of the same text, and the
-  pin holds for the process. The classes: `write` (before the link: the tmp, its write and sync, the
-  seal), `link` (the link, or a file that appeared at the path), `sync` (after the link: the read
-  back or the sync of the directory), `memory` (a secmem error).
-- The same card again repeats the write with the content fixed by the first attempt, and only a
-  write that succeeded logs `vault written`. After `sync` the draft is spent: the file and the tmp
-  are removed, as `jimichi vault init` does, and a restart finds no container.
+The time of an open: the answer waits for the first circuit, and the mirror of the entry takes up
+to 30 attempts of 5 s each with a pause of 1 s, about 180 s, plus the dial and the link handshakes,
+about 200 s in all. The client of the request sets a timeout of at least 300 s; SIGTERM ends the
+wait.
+
+The unlock pause: after the third 403 in a row every PUT /vault/unlock until the pause ends gets
+429 `wait before the next unlock`, with no stretch and no line in the log. The pause is 2^(k-3) s
+after the k-th 403, at most 64 s. The answers 400, 409, 500 and 429 do not reset the count; only a
+restart of the process does. Guessing passwords through the admin port is bounded by the cost of
+PasswordKey, one operation at a time and this pause; whoever can restart the pod resets the count
+(LIMITATIONS).
+
+The fixed contact:
+
+- A contact is fixed when it is read from the volume (unlock), comes as the card of the first
+  block of an init, or the first PUT /contact filled the draft with it. It is the only card of the
+  process: another one gets 409 and stops the client, the file does not change, and this holds even
+  before the pin returned.
+- With -vault only the fixed contact is pinned. A pin that fails while opening gives 503 `vault:
+  not started: pin, <C>`; in PUT /contact the answer is 500 `vault: not pinned:
+  <memory|closed|io>` with a line of the same text, then every request gets 503 `shutting down` and
+  the process exits: memory and io with code 1, closed with the code of the end of the
+  conversation (1 or 3). No running client has a contact that is fixed but not pinned. The answer
+  `the conversation has ended` is not used with -vault.
+- When the write did not reach the link before such an exit, a restart finds no file and an init
+  gives a new identity, though the contact may hold the earlier card from GET /card already. This
+  is the same consequence as that of any restart before the write.
+
+The write of the container (the first PUT /contact of a draft):
+
+- The checks of PUT /contact (the suite, the mailbox, the own card), then Draft.Write with
+  WithContact, then the pin. The write comes before the pairing, so the trial session of WithContact
+  and the session of the conversation never hold locked pages at once. The log gives `vault
+  written` and then `contact pinned`.
+- A key that does not pass the trial agreement: 400 `the key of the card does not pass`, the
+  contact is not fixed. A failure before the fill succeeded (a secmem error in the trial session,
+  for one): 500 `vault: not written: <class>`, the contact is not fixed.
+- The fill succeeded: the contact is fixed. A failed write answers 500 `vault: not written:
+  <class>` with a line of the same text, after the pin.
+
+| Class | Cause | Draft | File | The same card again |
+|---|---|---|---|---|
+| `write` | before the link: the tmp, its write and sync, the seal | alive | none | writes again, the content fixed by the first attempt |
+| `link` | the link, or a file that appeared at the path | alive | none | writes again |
+| `memory` | a secmem error | alive | none | writes again |
+| `sync` | after the link: the removal of the tmp, the sync of the directory or the read back | spent | stays | 500 `vault: not written: sync`, no new attempt and no line |
+
+- Only a write that succeeded logs `vault written`, once in the life of a container.
+- The client never removes or changes a file that reached the link: the contact may hold the card
+  of its identity already, and with -vault that pin is for good. vault.Clean removes a leftover
+  tmp at the next start.
+- After `sync` GET /status gives `container` = `unsettled`. The client cannot tell a failed sync
+  from a read back that differs. The next unlock after a restart opens the same identity or gives
+  403 or 409. The operator should check each volume of a copy of the file (`jimichi vault show`
+  with each password); if a volume does not open, both sides need a new container.
 - Another card while the write waits: 409 and the stop, the draft is released and nothing is
-  written. After the write the file never changes: the stop leaves it as it is.
+  written.
 
-GET /status, JSON: `state` (unpaired, handshaking, established, confirmed, stale), the counters of
-the minute line under its names, `round_trips`, `last_round_trip_at` (RFC 3339) and
-`last_round_trip` once a reply came, `silent_for` in seconds since the pin or the last record of the
-contact that opened.
+GET /status, JSON:
 
-The log with -vault:
+| Field | Type | Value |
+|---|---|---|
+| state | string | `unpaired`, `handshaking`, `established`, `confirmed`, `stale`; `unpaired` before the pin |
+| container | string | `draft`, `written`, `unsettled` |
+| the counters of the minute line | integer | under its names: requests, puts, ..., unanswered |
+| round_trips | integer | the number of round trips |
+| last_round_trip_at | string | RFC 3339 UTC to the second; absent before the first round trip |
+| last_round_trip_ms | integer | the length of the last round trip, ms; absent before the first round trip |
+| silent_for | integer | seconds since the pin or the last record of the contact that opened; absent before the pin |
 
-| Without -vault | With -vault |
+The log with -vault, every kind of line:
+
+| Line | When |
 |---|---|
-| `card_hash=<hash>` at start | none; `admin listening on <address>`, `vault locked`, then `vault opened` |
-| | `vault written`, once in the life of a container |
-| `contact pinned card_hash=<hash> role=<role>` | `contact pinned` |
-| the minute line, `e2e round trip in <time>`, `e2e peer not reachable for <time>, pinned card_hash=<hash>` | none; the same values in GET /status |
-| `contact card changed, refusing: pinned card_hash=<hash>` | `contact card changed, refusing` |
-| | the refusal lines of unlock, init and the write above |
-| the lines of the circuit, `shutting down`, `conversation ended: <cause>`, the warnings | unchanged |
+| the lines of the memory policy, the dump prevention, memlock, the -auth warning | as without -vault |
+| `the leftover of a vault creation could not be removed`, `the vault file cannot be read`, `the vault file is not a vault` | start, code 1 |
+| `admin: <error>` | an error of the listener: it names the address, not the identity |
+| `admin listening on <address>`, `vault locked` | the locked start |
+| `vault opened` | a volume opened |
+| the refusal lines before an open (403, 409, 500) | the same text as the body of the answer |
+| `refusing to build the circuit: <class>`, `circuit of ...`, the rebuild lines | as without -vault |
+| `the conversation did not start` | the conversation did not start |
+| `contact pinned` | the pin |
+| `vault written` | once in the life of a container |
+| `vault: not written: <write\|link\|memory\|sync>` | a failed attempt to write; the repeated answer after `sync` logs no line |
+| `vault: not pinned: <memory\|closed\|io>` | a pin that failed |
+| `contact card changed, refusing` | the stop of D-038 |
+| `conversation ended: <cause>`, `shutting down` | as without -vault |
 
-No line names the region, the number of volumes, a password, a card hash, the role or the state of
-the conversation. A run with the decoy volume and a run with the real one give the same kinds of
-lines; the times of the lines are visible (LIMITATIONS). The operator takes the own card from GET
-/card or `jimichi vault show`.
+There is no `card_hash=`, `role=`, minute line, `e2e round trip in` or `e2e peer not reachable`:
+GET /status gives the same values. No line names the region, the number of volumes, a password, a
+card hash, the role or the state of the conversation; only the operator sees the block number in a
+400 answer. A run with the decoy volume and a run with the real one give the same kinds of lines;
+the times of the lines are visible (LIMITATIONS). The operator takes the own card from GET /card or
+`jimichi vault show`.
 
 Restart and exit:
 
-- Any exit (SIGTERM, codes 1 and 3 of D-040, a refused first circuit, OOM, a node rollout) leads to
-  a locked start: the orchestrator restarts the process and the conversation waits for the
-  operator's unlock. The client fails closed.
+- Any exit (SIGTERM, codes 1 and 3 of D-040, the answers `not started` and `not pinned`, OOM, a
+  node rollout) leads to a locked start: the orchestrator restarts the process and the
+  conversation waits for the operator's unlock. The client fails closed.
 - Before the write a restart loses the new profile: init again, a new identity.
 - The stopped state is not kept in the file: after a restart the unlock restores the original pin,
   and another card stops the client again. Leaving that contact takes a new container.
-- Recovery after a restart follows the session rules (subsection "Conversation"): a restarted
-  initiator's kk1 is refused by the confirmed session of the contact until that one goes stale
-  (90 s), and the next kk1 comes after the handshake timeout of 60 s; a restarted responder waits
-  for the initiator to go stale and start over. About 4 min at worst. Records of the old session in
-  the queue do not open and count as bad. An old kk1 replayed to a restarted responder opens again,
-  since the identity is the same, but gives a session that is never confirmed (CRYPTO, "KK
-  handshake").
+- Recovery follows the session rules (subsection "Conversation"), about 4 min at worst, counted
+  from the first circuit of the restarted side after the unlock, with the default -handshake-timeout
+  of 60 s and stale bound of 90 s. A restarted initiator waits for the confirmed session of the
+  contact to go stale (90 s) and for one more handshake timeout (60 s) plus the delivery, about
+  150 s; a restarted responder waits for the initiator to go stale and start over. Records of the
+  old session in the queue do not open and count as bad. An old kk1 replayed to a restarted
+  responder opens again, since the identity is the same, but gives a session that is never
+  confirmed; a mailbox that replays old kk1s after every fresh one delays the recovery for as long
+  as it does so (CRYPTO, "KK handshake").
 
-Locked memory (one page a secmem buffer): an unlock holds at most about 7 pages before any
-circuit, an init of two volumes at most 16; running without a write adds the draft's key and buffer
-to the 19 pages above, and a repeated write the two pages of its read back, 23 at most. The 96 KiB
-bound (24 pages) stays.
+Locked memory (one page a secmem buffer, counted from the code; the bound is checked by a test
+under a real RLIMIT_MEMLOCK on both suites):
+
+| Peak, pages at most | X25519 | GOST |
+|---|---|---|
+| unlock, the check of the contact | 7 | 8 |
+| init of two volumes | 16 | 17 |
+| running, written | 19 | 20 |
+| running, draft, the first PUT /contact | 19 | 20 |
+| running, draft, a repeated write during the handshake | 23 | 24 |
+
+GOST is one page higher at each point of a handshake: its MixKey holds its input and its output at
+once. The 96 KiB bound (24 pages) stays, and the GOST peak meets it with no room to spare.
 
 ## Circuit setup
 

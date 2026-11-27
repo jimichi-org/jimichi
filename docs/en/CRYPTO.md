@@ -678,7 +678,11 @@ them:
   records as long as it likes, answers kk2 and enters an unconfirmed session. This reveals no key:
   the data keys need se = DH(s_I, e_R), and the initiator's ephemeral key of that kk1 is long
   erased. An unconfirmed responder seals no real records, and a fresh kk1 of the initiator replaces
-  the unconfirmed session, so the recovery takes as long as without the replay.
+  the unconfirmed session, so the recovery takes as long as without the replay while the mailbox is
+  not active. A mailbox that slips stored kk1s in after every fresh one keeps the responder
+  unconfirmed for as long as it does so: the responder refuses a kk1 only under a confirmed session
+  that is not stale. This is a denial of service of the same class as dropping records at the same
+  mailbox; it reveals no key and no record.
 
 ### Hash ratchet
 
@@ -717,8 +721,8 @@ inner   = flags (bit 0: dummy, the rest 0) | u16be(length) | body | zeroes, 371 
 |---|---|---|---|
 | client identity key (static agreement key) | GenerateEphemeral at start; with -vault DerivePair from the volume key at every init or unlock (section "Container") | secmem | until the process ends |
 | fetch capability F | crypto/rand; with -vault DeriveKey `vault/fetch` from the volume key | secmem; a copy in every request on the client heap and in the clear at the mailbox | until the -peer client process ends |
-| volume password (-vault) | the body of PUT /vault/init or /vault/unlock | secmem; a copy in the read buffer of the net/http connection ("Known gaps") | until the end of Prepare or Open |
-| k_s and the volume buffer of a draft (-vault) | Prepare at init | secmem | until the write of the container or the stop |
+| volume password (-vault) | the body of PUT /vault/init or /vault/unlock | secmem; a copy in the read buffer of the net/http connection and in the body buffer of cmd/client ("Known gaps") | in secmem until the end of Prepare or Open at the caller, not only until PasswordKey; the body buffer is cleared once copied into secmem |
+| k_s and the volume buffer of a draft (-vault) | Prepare at init | secmem | until the write of the container, a write that reached the link without ending, or the stop |
 | buffer of the opened volume (-vault) | Open at unlock | secmem | until Parse, which copies the contact card out |
 | one-time key of the card check | GenerateEphemeral | secmem | one agreement when a session is made |
 | e_I | GenerateEphemeral | secmem | until kk2 or a new handshake: the wait for kk1 to be stored plus 60 s |
@@ -1078,7 +1082,14 @@ The bodies of PUT /vault/init and PUT /vault/unlock on the admin port of the -pe
 -vault: net/http reads them through the bufio buffer of the connection, which is neither locked
 nor wiped and lives until the heap memory is reused. cmd/client reads a body into one buffer of a
 fixed size, so no growing read leaves copies behind, copies each password into secmem and, with
-zeroing on, clears that buffer after the operation.
+zeroing on, clears that buffer right after the copy.
+
+An init with two blocks through the admin port carries the password of the second volume through
+the port-forward (the kube API, the kubelet), these buffers and the heap of a long-lived process
+that never runs the second volume, and possibly through the swap of the node. The claim about the
+second volume therefore holds for a -peer client only with a generated password of the second
+volume and says nothing about copies on a running device. The recommended path for two volumes:
+`jimichi vault init` outside the pod, and only the unlock over the network.
 
 QueueID(F) leaves F outside secmem in the code of this work too: crypto.NewContext builds the
 transcript `mailbox/queue` with F on the heap and does not zero it, and the hash state holds it
