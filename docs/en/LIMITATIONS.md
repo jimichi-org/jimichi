@@ -420,15 +420,18 @@ English | [Русский](../ru/LIMITATIONS.md)
   circuits per TTL or N open circuits with one request per TTL, for up to 24 h (ARCHITECTURE,
   "Store"); such queues stand in the way of new pairs. Quotas are planned
   ([#84](https://github.com/jimichi-org/jimichi/issues/84)).
-- The identity and the pin of a -peer client live only in process memory: a restart of either
-  client gives a new identity and needs a new introduction (scripts/introduce.sh). The client
-  container is implemented, while the -peer client with it (-vault), whose identity survives a
-  restart, is planned ([#20](https://github.com/jimichi-org/jimichi/issues/20)). The stopped state
+- Without -vault the identity and the pin of a -peer client live only in process memory: a
+  restart of either client gives a new identity and needs a new introduction
+  (scripts/introduce.sh). With -vault the identity and the pin survive a restart, but the client
+  comes back locked (the item on the -peer client with a container); the testbed still runs its
+  clients without it ([#20](https://github.com/jimichi-org/jimichi/issues/20)). The stopped state
   after a foreign card is ended only by the operator.
 - The introduction trusts the kube API: whoever has pods/log and pods/portforward on the client
   pods can pin any card before the first pin or after a restart of the client. This is the same
   root of trust as certificate issuance. A script, not people, compares the card hashes
-  ([#90](https://github.com/jimichi-org/jimichi/issues/90)).
+  ([#90](https://github.com/jimichi-org/jimichi/issues/90)). With -vault there is no card hash in
+  the log, so pods/portforward alone is enough to pin a card before the first pin, and that card
+  stays in the container for its whole life, until a new container is made.
 - The body of a record is at most 368 bytes, the text of a testbed message at most 363; there is
   no fragmentation ([#68](https://github.com/jimichi-org/jimichi/issues/68)). There are no groups
   and no multiple devices ([#98](https://github.com/jimichi-org/jimichi/issues/98),
@@ -698,12 +701,46 @@ English | [Русский](../ru/LIMITATIONS.md)
   overlapping runs on one path make the creation fail; there is no lock.
 - The single write: changing the contact means a new container, a new identity and a new
   introduction; the contact card of a second volume is needed already at creation.
-- The -peer client with a container (-vault) is planned, and it will have limits of its own: a
-  constant F is a constant queue by which the mailbox will link all runs with that container
-  ([#84](https://github.com/jimichi-org/jimichi/issues/84),
-  [#87](https://github.com/jimichi-org/jimichi/issues/87)); a restart for any reason will leave
-  the client locked until the operator opens the volume; log lines carry no identity values, but
-  their times will show the starts and the openings.
+- The -peer client with a container (-vault, ARCHITECTURE, "The -peer client with a container")
+  is implemented, with limits of its own:
+  - a constant F is a constant queue by which the mailbox links all runs with that container
+    ([#84](https://github.com/jimichi-org/jimichi/issues/84),
+    [#87](https://github.com/jimichi-org/jimichi/issues/87));
+  - a restart for any reason leaves the client locked until the operator opens the volume; after
+    the unlock the conversation recovers in about 4 min at worst, counted from the first circuit
+    of the restarted side, and a mailbox that replays old kk1s to a restarted responder delays the
+    recovery for as long as it does so while revealing nothing (the same denial of service as
+    dropping records);
+  - before the write a restart loses the new profile, though the contact may hold its card
+    already;
+  - log lines carry no identity values, and the decoy volume and the real one give the same kinds
+    of lines, but the times of the lines in the process logs on the node's disk show the starts,
+    the openings and the work of the circuits;
+  - an init with two blocks takes one more PasswordKey stretch and a longer body than an init
+    with one block, so whoever sees when the request arrives (the port-forward) reads the number
+    of volumes from the length of the request and the time of `vault opened`; an unlock does not
+    differ, it stretches once whatever the volume. This is one more reason for `jimichi vault
+    init` outside the pod;
+  - the passwords reach the admin port in a request body, which net/http buffers outside secmem
+    (CRYPTO, "Known gaps");
+  - an init with two blocks carries the password of the second volume through the port-forward
+    (the kube API, the kubelet), the net/http buffers and the heap of a process that never runs
+    that volume, and possibly through the swap of the node; the claim about the second volume
+    holds for a -peer client only with a generated password of the second volume and says nothing
+    about copies on a running device. The recommended path for two volumes: `jimichi vault init`
+    outside the pod, the file in the pod's storage, and only the unlock over the network;
+  - guessing passwords without the file is open to whoever holds the right pods/portforward on the
+    client's pod; its speed is bounded by the cost of PasswordKey, one operation at a time and the
+    unlock pause, about one guess in 64 s after nine refusals; a restart of the process (the right
+    pods/delete or a failure) resets the count. Against a generated password guessing is of no
+    use; a guessed password of the second volume opens and runs it in that pod;
+  - the rule that a contact belongs to one volume is checked only within the body of an init: a
+    contact card of the second volume sent later with PUT /contact to the first volume is accepted,
+    since after Prepare the client keeps nothing of the second volume;
+  - a write that reached the link and did not end (class `sync`) leaves the file as it is. The
+    client cannot tell a failed sync from a read back that differs, so the second volume may turn
+    out corrupt with no signal of its own; the operator should check each volume of a copy of the
+    file.
 - A running client: copies of the password, the Argon2id matrix and the PBKDF2 state on the heap
   ([#36](https://github.com/jimichi-org/jimichi/issues/36),
   [#37](https://github.com/jimichi-org/jimichi/issues/37),
