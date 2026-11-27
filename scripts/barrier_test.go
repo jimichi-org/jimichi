@@ -217,6 +217,20 @@ func TestDeploymentBarrierStopsOwnedClientsBeforeRelays(t *testing.T) {
 	}
 }
 
+// the scheduler writes the binding of a pod whose claim waits for its first
+// consumer, as with the volumes of deploy/vault; it reconciles nothing
+func TestDeploymentBarrierTakesThePodsTheSchedulerBound(t *testing.T) {
+	before, relays := baseInventory()
+	before = strings.Replace(before, "|p-client-b|client|b||ReplicaSet,client-b-rs,r-client-b,true;|kubelet;|", "|p-client-b|client|b||ReplicaSet,client-b-rs,r-client-b,true;|kube-controller-manager;kube-scheduler;kubelet;|", 1)
+	if !strings.Contains(before, "kube-scheduler;") {
+		t.Fatal("no pod with the manager kube-scheduler")
+	}
+	status, out, _ := runBarrier(t, before, relays, "")
+	if status != 0 || !strings.Contains(out, "deployment barrier complete") {
+		t.Fatalf("status %d, output %s", status, out)
+	}
+}
+
 func TestDeploymentBarrierPreflightRefusesWithoutMutation(t *testing.T) {
 	before, relays := baseInventory()
 	for _, c := range []struct {

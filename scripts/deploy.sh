@@ -75,7 +75,7 @@ check_inventory() {
       IFS=';' read -r -a manager_list <<<"$managers"
       for manager in "${manager_list[@]}"; do
         case "$manager" in
-          ''|kubectl|kubectl-client-side-apply|kubectl-rollout|kubectl-set|kube-controller-manager|kubelet) ;;
+          ''|kubectl|kubectl-client-side-apply|kubectl-rollout|kubectl-set|kube-controller-manager|kube-scheduler|kubelet) ;;
           *) echo "external reconciliation manager $manager on $kind/$name" >&2; return 1 ;;
         esac
       done
