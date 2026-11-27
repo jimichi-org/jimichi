@@ -9,4 +9,4 @@ func Allowed() []int { return nil }
 
 func Topology(int) (Topo, error) { return Topo{}, ErrNoAffinity }
 
-func masksOK([]int) bool { return false }
+func MasksOK([]int) bool { return false }

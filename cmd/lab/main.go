@@ -22,6 +22,7 @@ import (
 	"github.com/jimichi-org/jimichi/lab/keymem"
 	"github.com/jimichi-org/jimichi/lab/metrics"
 	"github.com/jimichi-org/jimichi/lab/nodeview"
+	"github.com/jimichi-org/jimichi/lab/perf"
 )
 
 // one row per run and observation window; the configuration travels with the
@@ -167,6 +168,9 @@ func command(args []string, stdout, stderr io.Writer) int {
 	if handled, code := keymem.MaybeRunChild(args); handled {
 		return code
 	}
+	if handled, code := perf.MaybeRunChild(args); handled {
+		return code
+	}
 	fs := flag.NewFlagSet("lab", flag.ContinueOnError)
 	var parseOutput bytes.Buffer
 	fs.SetOutput(&parseOutput)
@@ -177,7 +181,7 @@ func command(args []string, stdout, stderr io.Writer) int {
 	binList := fs.String("bins", "100ms", "comma-separated observation windows, each scored on the same runs")
 	repeats := fs.Int("repeats", 1, "runs per configuration")
 	out := fs.String("out", "artifacts", "directory for the json report")
-	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, mark: active timing marks with sham controls and survival, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic, cover: payload against cover cells at the entry, immediate with cover against constant rate, keymem: cooperative object exposure with both policies and every endpoint fixed, vault: block 5, the second area of a container against one-volume files with its controls, trace, integrity and cost, compromise: registered one/two-node views and trust cases, collude: registered residual linking, mailbox: registered request/record distinction")
+	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, mark: active timing marks with sham controls and survival, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic, deny: a recipient forges a conversation of the end-to-end layer, no traffic, cover: payload against cover cells at the entry, immediate with cover against constant rate, keymem: cooperative object exposure with both policies and every endpoint fixed, vault: block 5, the second area of a container against one-volume files with its controls, trace, integrity and cost, compromise: registered one/two-node views and trust cases, collude: registered residual linking, mailbox: registered request/record distinction, perf: block 6, latency per hop, chain capacity and a node on pinned CPUs on both suites, bench: block 6, reads go test -bench calls of relay and wire")
 	markReplay := fs.String("mark-replay", "", "mark set: replay a mark-v1 observation JSONL without truth")
 	rev := fs.String("rev", "unknown", "code revision recorded in every row")
 	seed := fs.Int64("seed", 1, "base seed; every repeat derives its own from it")
@@ -197,6 +201,19 @@ func command(args []string, stdout, stderr io.Writer) int {
 	peer := fs.Bool("peer", false, "compromise structural only: validate its peer subset")
 	containers := fs.Int("containers", 300, "vault set: one-volume and as many two-volume containers")
 	resamples := fs.Int("resamples", 10000, "vault set: bootstrap resamples of every interval")
+	perfParts := fs.String("perf-parts", "latency,chain,node", "perf set: parts to run; node needs linux")
+	perfKeymem := fs.String("perf-keymem", "all,nolock", "perf set: key memory levels, linux only")
+	perfCores := fs.String("perf-cores", "1,2,4", "perf set: node CPUs of the node part")
+	perfCircuits := fs.String("perf-circuits", "1,2,4", "perf set: circuits per node CPU, the ladder of the node part")
+	perfFlows := fs.String("perf-flows", "4,8,16,32,64", "perf set: flows, the ladder of the chain part")
+	perfInflight := fs.Int("perf-inflight", 8, "perf set: messages a flow keeps without an echo, 1..64")
+	perfWarmup := fs.Duration("perf-warmup", 2*time.Second, "perf set: start of the measured window after it opens")
+	perfPlateau := fs.Float64("perf-plateau", 0.05, "perf set: tolerance of the plateau of the last ladder step")
+	perfMargin := fs.Float64("perf-margin", 0.05, "perf set: margin of the mlock equivalence around 1")
+	perfMaxForeign := fs.Float64("perf-max-foreign", 0.25, "perf set: foreign cores on the run's CPUs that make it noisy")
+	benchIn := fs.String("bench-in", "", "bench set: directory of call-<k>.txt files, one go test call each")
+	benchGrace := fs.Duration("bench-grace", 22*time.Minute, "bench set: time a node holds two onion keys per rotation")
+	benchRotate := fs.Duration("bench-rotate", time.Hour, "bench set: onion key rotation period")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, _ = io.Copy(stderr, &parseOutput)
@@ -211,6 +228,16 @@ func command(args []string, stdout, stderr io.Writer) int {
 	}
 	explicit := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	for name := range explicit {
+		if strings.HasPrefix(name, "perf-") && *set != "perf" {
+			fmt.Fprintf(stderr, "-%s requires -set perf\n", name)
+			return 2
+		}
+		if strings.HasPrefix(name, "bench-") && *set != "bench" {
+			fmt.Fprintf(stderr, "-%s requires -set bench\n", name)
+			return 2
+		}
+	}
 	if isNodeviewSet(*set) {
 		return nodeviewCommand(nodeviewFlags{set: *set, phase: *nodePhase, plan: *nodePlan, peer: *peer, suite: *suiteName, seed: *seed, revision: *rev, out: *out, explicit: explicit, positional: fs.NArg()}, stdout, stderr)
 	}
@@ -230,6 +257,26 @@ func command(args []string, stdout, stderr io.Writer) int {
 	}
 	if *set == "vault" {
 		return vaultCommand(vaultFlags{suite: *suiteName, seed: *seed, containers: *containers, resamples: *resamples, revision: *rev, out: *out, explicit: explicit, positional: fs.NArg()}, stdout, stderr)
+	}
+	if *set == "perf" {
+		f := perfFlags{explicit: explicit, positional: fs.NArg(), parts: *perfParts, keymem: *perfKeymem, cores: *perfCores,
+			circuits: *perfCircuits, ladder: *perfFlows, inflight: *perfInflight, warmup: *perfWarmup, duration: *duration,
+			flows: *flows, send: *send, plateau: *perfPlateau, margin: *perfMargin, maxForeign: *perfMaxForeign,
+			claims: *claims, repeats: *repeats, seed: *seed, rev: *rev, out: *out}
+		// the perf set has defaults of its own for the flags it shares
+		if !explicit["duration"] {
+			f.duration = 10 * time.Second
+		}
+		if !explicit["flows"] {
+			f.flows = 4
+		}
+		if !explicit["send"] {
+			f.send = 20 * time.Millisecond
+		}
+		return perfCommand(f, stdout, stderr)
+	}
+	if *set == "bench" {
+		return benchCommand(benchFlags{explicit: explicit, positional: fs.NArg(), in: *benchIn, grace: *benchGrace, rotate: *benchRotate, rev: *rev, out: *out}, stdout, stderr)
 	}
 	if *markReplay != "" {
 		fmt.Fprintln(stderr, "-mark-replay requires -set mark")

@@ -38,7 +38,7 @@ func threads() ([]int, error) {
 
 // every thread of the process onto cpus. A thread made later takes the mask of
 // the thread that made it, which clone gives on linux; that is checked through
-// masksOK at every snapshot, not taken on trust. The pass repeats until it
+// MasksOK at every snapshot, not taken on trust. The pass repeats until it
 // changes nothing, since the runtime may start a thread while it runs
 func Pin(cpus []int) (bool, error) {
 	if len(cpus) == 0 {
@@ -71,14 +71,14 @@ func Pin(cpus []int) (bool, error) {
 			changed = true
 		}
 		if !changed {
-			return masksOK(cpus), nil
+			return MasksOK(cpus), nil
 		}
 	}
-	return masksOK(cpus), nil
+	return MasksOK(cpus), nil
 }
 
 // whether every thread of the process runs on exactly cpus
-func masksOK(cpus []int) bool {
+func MasksOK(cpus []int) bool {
 	set := cpuSet(cpus)
 	tids, err := threads()
 	if err != nil || len(tids) == 0 {

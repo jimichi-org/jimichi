@@ -87,7 +87,7 @@ func runChild(stdin io.Reader, stdout io.Writer) int {
 	defer node.Stop()
 	snap := func() Snapshot {
 		cpu, _ := ProcessCPU()
-		ok := len(cfg.CPUs) > 0 && masksOK(cfg.CPUs)
+		ok := len(cfg.CPUs) > 0 && MasksOK(cfg.CPUs)
 		return Snapshot{Counters: node.Counters(), CPUNs: int64(cpu), MonoNs: int64(time.Since(start)), AffinityOK: ok, GOMAXPROCS: runtime.GOMAXPROCS(0)}
 	}
 	addr := node.Client()
