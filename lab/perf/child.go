@@ -64,6 +64,11 @@ func runChild(stdin io.Reader, stdout io.Writer) int {
 	if err := secmem.SetPolicy(policy); err != nil {
 		return 2
 	}
+	dumpable, err := harden()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "perf child: harden: %v\n", err)
+		return 1
+	}
 	affinity := false
 	if len(cfg.CPUs) > 0 {
 		ok, err := Pin(cfg.CPUs)
@@ -91,7 +96,7 @@ func runChild(stdin io.Reader, stdout io.Writer) int {
 		return Snapshot{Counters: node.Counters(), CPUNs: int64(cpu), MonoNs: int64(time.Since(start)), AffinityOK: ok, GOMAXPROCS: runtime.GOMAXPROCS(0)}
 	}
 	addr := node.Client()
-	ready := Ready{Addr: addr.Addr, Pub: addr.StaticPub, Locked: node.KeyLocked(), CPUs: cfg.CPUs, GOMAXPROCS: runtime.GOMAXPROCS(0), AffinityOK: affinity}
+	ready := Ready{Addr: addr.Addr, Pub: addr.StaticPub, Locked: node.KeyLocked(), CPUs: cfg.CPUs, GOMAXPROCS: runtime.GOMAXPROCS(0), AffinityOK: affinity, Dumpable: dumpable}
 	if b, err := secmem.MemlockBudget(); err == nil {
 		ready.MemlockBudget = &b
 	}
@@ -116,6 +121,16 @@ func runChild(stdin io.Reader, stdout io.Writer) int {
 	return 0
 }
 
+// GOTRACEBACK, GODEBUG, GOGC and GOMEMLIMIT of the parent do not reach the
+// measured node; windows needs SYSTEMROOT for its sockets
+func childEnv() []string {
+	env := []string{"PATH=" + os.Getenv("PATH"), "GOTRACEBACK=none"}
+	if runtime.GOOS == "windows" {
+		env = append(env, "SYSTEMROOT="+os.Getenv("SYSTEMROOT"))
+	}
+	return env
+}
+
 // the parent's handle on a running child
 type Child struct {
 	cancel context.CancelFunc
@@ -124,6 +139,8 @@ type Child struct {
 	ready  Ready
 	stderr *limitedBuffer
 	waited chan error
+	done   chan struct{}
+	stop   sync.Once
 	closed bool
 }
 
@@ -157,6 +174,7 @@ func Spawn(ctx context.Context, cfg ChildConfig) (*Child, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(ctx, exe, childArg)
 	cmd.Dir = cfg.Dir
+	cmd.Env = childEnv()
 	stderr := &limitedBuffer{}
 	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
@@ -173,11 +191,15 @@ func Spawn(ctx context.Context, cfg ChildConfig) (*Child, error) {
 		cancel()
 		return nil, err
 	}
-	c := &Child{cancel: cancel, stdin: stdin, lines: make(chan []byte, 4), stderr: stderr, waited: make(chan error, 1)}
+	c := &Child{cancel: cancel, stdin: stdin, lines: make(chan []byte, 4), stderr: stderr, waited: make(chan error, 1), done: make(chan struct{})}
 	go func() {
 		out := bufio.NewScanner(stdout)
+		// lines nobody waits for are read and dropped, so Wait always runs
 		for out.Scan() {
-			c.lines <- bytes.Clone(out.Bytes())
+			select {
+			case c.lines <- bytes.Clone(out.Bytes()):
+			case <-c.done:
+			}
 		}
 		close(c.lines)
 		c.waited <- cmd.Wait()
@@ -196,6 +218,7 @@ func Spawn(ctx context.Context, cfg ChildConfig) (*Child, error) {
 // ends the child at once, for a run that failed
 func (c *Child) Kill() {
 	c.closed = true
+	c.stop.Do(func() { close(c.done) })
 	c.cancel()
 	_ = c.stdin.Close()
 }
@@ -242,6 +265,7 @@ func (c *Child) Close() (Snapshot, error) {
 	c.closed = true
 	_ = c.stdin.Close()
 	err := c.answer(&s)
+	c.stop.Do(func() { close(c.done) })
 	timer := time.NewTimer(answerTimeout)
 	defer timer.Stop()
 	select {

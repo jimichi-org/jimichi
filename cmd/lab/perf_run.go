@@ -103,6 +103,7 @@ type perfNode struct {
 	L3Group        string   `json:"l3_group"`
 	AffinityOK     bool     `json:"affinity_ok"`
 	NodeLocked     bool     `json:"node_locked"`
+	NodeDumpable   *int     `json:"node_dumpable"`
 	NodeGOMAXPROCS int      `json:"node_gomaxprocs"`
 	NodeWindowS    *float64 `json:"node_window_s"`
 	SnapSkewUs     *float64 `json:"snap_skew_us"`
@@ -125,8 +126,9 @@ type perfGoodput struct {
 func intp(v int) *int { return &v }
 
 // a run whose circuit closed, or where a relay limit acted, lost something the
-// configuration did not; a noisy run shared its CPUs; a warmup run is only a
-// warmup; a node run off its CPUs measured another machine
+// configuration did not; a noisy run shared its CPUs, and a series run whose
+// host load was never read may have; a warmup run is only a warmup; a node run
+// off its CPUs measured another machine
 func (r perfRow) broken() bool {
 	return r.RelayBrokenCircuits > 0 || r.BrokenFlows > 0 || slices.Contains(r.FlowClosed, true)
 }
@@ -137,8 +139,10 @@ func (r perfRow) limited() bool {
 
 func (r perfRow) unpinned() bool { return r.perfNode != nil && !r.AffinityOK }
 
+func (r perfRow) unchecked() bool { return r.SeriesEligible && !r.NoiseChecked }
+
 func (r perfRow) clean() bool {
-	return !r.Warmup && !r.broken() && !r.limited() && !r.Noisy && !r.unpinned()
+	return !r.Warmup && !r.broken() && !r.limited() && !r.Noisy && !r.unchecked() && !r.unpinned()
 }
 
 type perfEnv struct {
@@ -424,7 +428,7 @@ func runPerfCell(p perfPlan, env perfEnv, c perfCell, r int) (perfRow, error) {
 		cells := last.child.Counters.Delivered - first.child.Counters.Delivered
 		n := &perfNode{Cores: c.cores, PerCore: c.circuits, Circuits: c.circuits * c.cores,
 			NodeCPUs: nodeCPUs, NodeSiblings: p.topo.Siblings, LoadCPUs: p.topo.Load, TopologyKnown: p.topo.Known, L3Group: p.topo.L3Group,
-			NodeLocked: child.Ready().Locked, NodeGOMAXPROCS: last.child.GOMAXPROCS, NodeWindowS: seconds(t),
+			NodeLocked: child.Ready().Locked, NodeDumpable: child.Ready().Dumpable, NodeGOMAXPROCS: last.child.GOMAXPROCS, NodeWindowS: seconds(t),
 			SnapSkewUs: opt(float64(max(first.skew, last.skew)) / float64(time.Microsecond)), NodeDelivered: cells,
 			Step: c.step}
 		// the child must have run on its CPUs in every reading, and the parent on

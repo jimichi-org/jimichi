@@ -37,6 +37,9 @@ func TestChildPinsAndReports(t *testing.T) {
 	if !ready.AffinityOK || ready.GOMAXPROCS != 1 || !slices.Equal(ready.CPUs, []int{cpu}) {
 		t.Fatalf("ready %+v, want affinity on cpu %d and gomaxprocs 1", ready, cpu)
 	}
+	if ready.Dumpable == nil || *ready.Dumpable != 0 {
+		t.Fatalf("ready dumpable %v, want 0: the child holds relay keys", ready.Dumpable)
+	}
 	before, err := child.Snap()
 	if err != nil {
 		t.Fatalf("Snap: %v", err)
@@ -79,13 +82,28 @@ func TestChildLockedUnderAll(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: Spawn: %v", c.level, err)
 		}
-		locked := child.Ready().Locked
+		locked, dumpable := child.Ready().Locked, child.Ready().Dumpable
 		if _, err := child.Close(); err != nil {
 			t.Fatalf("%s: Close: %v", c.level, err)
 		}
-		if locked != c.locked {
-			t.Fatalf("%s: locked %v, want %v", c.level, locked, c.locked)
+		if locked != c.locked || dumpable == nil || *dumpable != 0 {
+			t.Fatalf("%s: locked %v, dumpable %v, want locked %v and dumpable 0", c.level, locked, dumpable, c.locked)
 		}
+	}
+}
+
+// both levels harden the child, so they differ only in Lock
+func TestChildIsNotDumpable(t *testing.T) {
+	child, err := Spawn(context.Background(), ChildConfig{Suite: jcrypto.SuiteC25519, KeyMem: "nolock", Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer child.Kill()
+	if d := child.Ready().Dumpable; d == nil || *d != 0 {
+		t.Fatalf("dumpable %v, want 0", d)
+	}
+	if _, err := child.Close(); err != nil {
+		t.Fatalf("Close: %v; %s", err, child.Stderr())
 	}
 }
 

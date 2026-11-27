@@ -284,6 +284,54 @@ func TestPerfSummaryKnownAnswer(t *testing.T) {
 		}
 	})
 
+	t.Run("cost only when saturated", func(t *testing.T) {
+		// c25519 c 100 and gost c 300 in every run, both ladders flat at k 1, 2.
+		// node_cpu majority at k 2 on both {node_cpu, node_cpu, other}: c ratio
+		// over repeats 0 and 1 is 300/100 = 3, cost of c25519 median 100 over 2
+		// runs; generator majority {node_cpu, generator, generator}: repeat 0
+		// still pairs, yet the ratio and the cost are null, reason unsaturated
+		for _, tc := range []struct {
+			bounds []string
+			ratio  *float64
+			runs   int
+			reason string
+		}{
+			{[]string{"node_cpu", "node_cpu", "other"}, fp(3), 2, ""},
+			{[]string{"node_cpu", "generator", "generator"}, nil, 1, "unsaturated"},
+		} {
+			var rows []perfRow
+			for r, b := range tc.bounds {
+				for _, k := range []int{1, 2} {
+					rows = append(rows,
+						synthRow(rowSpec{part: "node", suite: c, keymem: "heap", repeat: r, a: 1, b: k, value: 100, bound: b}),
+						synthRow(rowSpec{part: "node", suite: g, keymem: "heap", repeat: r, a: 1, b: k, value: 300, bound: b}))
+				}
+			}
+			s := summarisePerf(rows, testPlan([]string{"node"}, []string{"heap"}, nil, []int{1}, []int{1, 2}, 2))
+			found := false
+			for _, e := range s.Suites {
+				if e.Metric != "node_core_ns_per_cell" {
+					continue
+				}
+				found = true
+				if (e.Ratio.Median == nil) != (tc.ratio == nil) || tc.ratio != nil && !near(*e.Ratio.Median, *tc.ratio) || e.Pairs != tc.runs || e.Reason != tc.reason {
+					t.Fatalf("classes %v: c ratio %+v, want median %v over %d pairs, reason %q", tc.bounds, e, tc.ratio, tc.runs, tc.reason)
+				}
+			}
+			if !found {
+				t.Fatalf("classes %v: no c ratio", tc.bounds)
+			}
+			for _, k := range s.Cost {
+				if k.Suite != c {
+					continue
+				}
+				if k.Runs != tc.runs || k.Reason != tc.reason || (k.Cost.Median == nil) != (tc.ratio == nil) || tc.ratio != nil && *k.Cost.Median != 100 {
+					t.Fatalf("classes %v: cost %+v, want %d runs, reason %q", tc.bounds, k, tc.runs, tc.reason)
+				}
+			}
+		}
+	})
+
 	t.Run("scaling", func(t *testing.T) {
 		// T(1) {10000, 11000}, T(4) {36000, 33000}: E = 36000/40000 = 0.9 and
 		// 33000/44000 = 0.75, median 0.825, no interval at 2 pairs
@@ -301,7 +349,7 @@ func TestPerfSummaryKnownAnswer(t *testing.T) {
 		s := summarisePerf(rows, testPlan([]string{"node"}, []string{"heap"}, nil, []int{1, 4}, []int{1, 2}, 4))
 		for _, e := range s.Scaling {
 			if e.Suite == c && e.Cores == 4 {
-				if e.Pairs != 2 || !near(*e.Efficiency.Median, 0.825) || e.Efficiency.Low != nil || e.Reason != "" {
+				if e.Pairs != 2 || e.DroppedPairs != 0 || !near(*e.Efficiency.Median, 0.825) || e.Efficiency.Low != nil || e.Reason != "" {
 					t.Fatalf("scaling %+v, want 2 pairs, median 0.825", e)
 				}
 				return
@@ -321,15 +369,22 @@ func TestPerfSummaryKnownAnswer(t *testing.T) {
 			rows = append(rows, synthRow(rowSpec{part: "chain", suite: c, keymem: "heap", repeat: r, a: 2, value: 1000 + 1000*fc, foreign: fp(fc), noisy: fc > 0.25}))
 		}
 		rows = append(rows, synthRow(rowSpec{part: "chain", suite: c, keymem: "heap", a: 2, value: 1e9, warmup: true}))
+		// a linux run whose host load was never read is not clean either
+		unread := synthRow(rowSpec{part: "chain", suite: c, keymem: "heap", repeat: 3, a: 2, value: 1e6})
+		unread.SeriesEligible = true
+		rows = append(rows, unread)
 		s := summarisePerf(rows, testPlan([]string{"chain"}, []string{"heap"}, []int{1, 2}, nil, nil, 2))
 		x := satOf(s, "chain", c)
 		if x.ForeignTrend == nil || !near(*x.ForeignTrend, 0.06) {
 			t.Fatalf("foreign trend %v, want 0.06", x.ForeignTrend)
 		}
+		if !slices.Equal(x.LadderClean, []int{3, 2}) {
+			t.Fatalf("ladder_clean_runs %v, want [3 2]", x.LadderClean)
+		}
 		for _, l := range s.Lines {
 			if l.Part == "chain" && l.Suite == c && *l.Flows == 2 {
 				// clean values 1100 and 1120: median 1110
-				if l.NoisyRuns != 1 || l.Runs != 3 || l.WarmupRuns != 1 || l.CleanRuns != 2 || !near(*l.Metrics["throughput_msgs_per_s"].Median, 1110) {
+				if l.NoisyRuns != 1 || l.Unchecked != 1 || l.Runs != 4 || l.WarmupRuns != 1 || l.CleanRuns != 2 || !near(*l.Metrics["throughput_msgs_per_s"].Median, 1110) {
 					t.Fatalf("line %+v", l)
 				}
 				return

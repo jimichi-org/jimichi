@@ -50,5 +50,8 @@ func TestPerfNodeFromTheCommandLine(t *testing.T) {
 		if r["affinity_ok"] != true || r["bound"] == "" || r["bound"] == nil {
 			t.Fatalf("row affinity %v, bound %v", r["affinity_ok"], r["bound"])
 		}
+		if r["node_dumpable"] != 0.0 || r["noise_checked"] != true {
+			t.Fatalf("row node_dumpable %v, noise_checked %v: want a hardened child and a read host load", r["node_dumpable"], r["noise_checked"])
+		}
 	}
 }

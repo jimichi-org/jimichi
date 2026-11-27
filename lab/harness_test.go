@@ -474,3 +474,23 @@ func TestExecuteRestoresKeyMem(t *testing.T) {
 		t.Fatalf("policy after the run %v, want %v", got, before)
 	}
 }
+
+func TestKeyMemRunsDoNotOverlap(t *testing.T) {
+	nolock := secmem.Policy{OffHeap: true, DontDump: true, Zero: true}
+	keyMemRun.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Execute(Config{Hops: 1, Flows: 1, Duration: 100 * time.Millisecond, SendEvery: 20 * time.Millisecond, KeyMem: &nolock, Seed: 11})
+		done <- err
+	}()
+	select {
+	case <-done:
+		keyMemRun.Unlock()
+		t.Fatal("a run with KeyMem went on while another held the policy")
+	case <-time.After(300 * time.Millisecond):
+	}
+	keyMemRun.Unlock()
+	if err := <-done; err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}

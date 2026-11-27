@@ -34,6 +34,8 @@ type Ready struct {
 	CPUs          []int   `json:"cpus"`
 	GOMAXPROCS    int     `json:"gomaxprocs"`
 	AffinityOK    bool    `json:"affinity_ok"`
+	// PR_GET_DUMPABLE after hardening; null off linux
+	Dumpable *int `json:"dumpable"`
 }
 
 type Snapshot struct {

@@ -64,6 +64,7 @@ type perfLine struct {
 	BrokenRuns   int               `json:"broken_runs"`
 	LimitedRuns  int               `json:"limited_runs"`
 	NoisyRuns    int               `json:"noisy_runs"`
+	Unchecked    int               `json:"noise_unchecked_runs"`
 	UnpinnedRuns int               `json:"unpinned_runs"`
 	WarmupRuns   int               `json:"warmup_runs"`
 	CleanRuns    int               `json:"clean_runs"`
@@ -83,6 +84,7 @@ type perfSaturation struct {
 	Hops          *int       `json:"hops,omitempty"`
 	Cores         *int       `json:"cores,omitempty"`
 	LadderMedians []*float64 `json:"ladder_medians"`
+	LadderClean   []int      `json:"ladder_clean_runs"`
 	Plateau       bool       `json:"plateau"`
 	PlateauReason string     `json:"plateau_reason"`
 	Sat           *float64   `json:"sat"`
@@ -109,6 +111,7 @@ type perfCost struct {
 	Cores  int    `json:"cores"`
 	Runs   int    `json:"runs"`
 	Cost   perfCI `json:"core_ns_per_cell"`
+	Reason string `json:"reason"`
 }
 
 type perfIncrement struct {
@@ -123,12 +126,13 @@ type perfIncrement struct {
 }
 
 type perfScaling struct {
-	Suite      string `json:"suite"`
-	KeyMem     string `json:"keymem"`
-	Cores      int    `json:"cores"`
-	Pairs      int    `json:"pairs"`
-	Efficiency perfCI `json:"efficiency"`
-	Reason     string `json:"reason"`
+	Suite        string `json:"suite"`
+	KeyMem       string `json:"keymem"`
+	Cores        int    `json:"cores"`
+	Pairs        int    `json:"pairs"`
+	DroppedPairs int    `json:"dropped_pairs"`
+	Efficiency   perfCI `json:"efficiency"`
+	Reason       string `json:"reason"`
 }
 
 type perfKeyMem struct {
@@ -331,6 +335,9 @@ func summarisePerf(rows []perfRow, p perfPlan) perfSummary {
 			if r.Noisy {
 				line.NoisyRuns++
 			}
+			if r.unchecked() {
+				line.Unchecked++
+			}
 			if r.unpinned() {
 				line.UnpinnedRuns++
 			}
@@ -395,10 +402,11 @@ func summarisePerf(rows []perfRow, p perfPlan) perfSummary {
 						metric = "node_cells_per_s"
 					}
 					medians := make([]float64, len(ladder))
-					out := perfSaturation{Part: part, Suite: k.suite, KeyMem: level, LadderMedians: make([]*float64, len(ladder))}
+					out := perfSaturation{Part: part, Suite: k.suite, KeyMem: level, LadderMedians: make([]*float64, len(ladder)), LadderClean: make([]int, len(ladder))}
 					for i, c := range ladder {
-						medians[i] = median(cleanValues(c.rows(rows), metric))
-						out.LadderMedians[i] = opt(medians[i])
+						v := cleanValues(c.rows(rows), metric)
+						medians[i] = median(v)
+						out.LadderMedians[i], out.LadderClean[i] = opt(medians[i]), len(v)
 					}
 					out.Plateau, out.PlateauReason = metrics.Plateau(medians, p.plateau)
 					last := ladder[len(ladder)-1]
@@ -489,12 +497,17 @@ func summarisePerf(rows []perfRow, p perfPlan) perfSummary {
 					g, c := lastStep(part, gost, level, n), lastStep(part, c25519, level, n)
 					ci, pairs, dropped := ratio(g.clean(rows), c.clean(rows), "node_cells_per_s", nil)
 					e := perfSuiteCmp{Part: part, Metric: "node_cells_per_s", Level: "cores=" + strconv.Itoa(n), KeyMem: level, Pairs: pairs, DroppedPairs: dropped, Ratio: ci}
-					if !nodeSat[satKey{gost, level, n}] || !nodeSat[satKey{c25519, level, n}] {
+					saturated := nodeSat[satKey{gost, level, n}] && nodeSat[satKey{c25519, level, n}]
+					if !saturated {
 						e.Ratio, e.Reason = perfCI{}, "unsaturated"
 					}
 					s.Suites = append(s.Suites, e)
 					ci, pairs, dropped = ratio(g.clean(rows), c.clean(rows), "node_core_ns_per_cell", nodeCPUBound)
-					s.Suites = append(s.Suites, perfSuiteCmp{Part: part, Metric: "node_core_ns_per_cell", Level: "cores=" + strconv.Itoa(n), KeyMem: level, Pairs: pairs, DroppedPairs: dropped, Ratio: ci})
+					e = perfSuiteCmp{Part: part, Metric: "node_core_ns_per_cell", Level: "cores=" + strconv.Itoa(n), KeyMem: level, Pairs: pairs, DroppedPairs: dropped, Ratio: ci}
+					if !saturated {
+						e.Ratio, e.Reason = perfCI{}, "unsaturated"
+					}
+					s.Suites = append(s.Suites, e)
 				}
 			}
 		}
@@ -512,7 +525,11 @@ func summarisePerf(rows []perfRow, p perfPlan) perfSummary {
 							}
 						}
 					}
-					s.Cost = append(s.Cost, perfCost{Suite: su.String(), KeyMem: level, Cores: n, Runs: len(v), Cost: ciOf(v, perfLevel)})
+					out := perfCost{Suite: su.String(), KeyMem: level, Cores: n, Runs: len(v), Cost: ciOf(v, perfLevel)}
+					if !nodeSat[satKey{su.String(), level, n}] {
+						out.Cost, out.Reason = perfCI{}, "unsaturated"
+					}
+					s.Cost = append(s.Cost, out)
 				}
 				if slices.Contains(p.cores, 1) {
 					one := lastStep("node", su.String(), level, 1)
@@ -520,14 +537,14 @@ func summarisePerf(rows []perfRow, p perfPlan) perfSummary {
 						if n == 1 {
 							continue
 						}
-						x, y, _ := pairUp(lastStep("node", su.String(), level, n).clean(rows), one.clean(rows), "node_cells_per_s", nodeCPUBound)
+						x, y, missing := pairUp(lastStep("node", su.String(), level, n).clean(rows), one.clean(rows), "node_cells_per_s", nodeCPUBound)
 						var e []float64
 						for i := range x {
 							if v := metrics.Scaling(y[i], x[i], n); !math.IsNaN(v) {
 								e = append(e, v)
 							}
 						}
-						out := perfScaling{Suite: su.String(), KeyMem: level, Cores: n, Pairs: len(e), Efficiency: ciOf(e, perfLevel)}
+						out := perfScaling{Suite: su.String(), KeyMem: level, Cores: n, Pairs: len(e), DroppedPairs: missing + len(x) - len(e), Efficiency: ciOf(e, perfLevel)}
 						if !nodeSat[satKey{su.String(), level, n}] || !nodeSat[satKey{su.String(), level, 1}] {
 							out.Efficiency, out.Reason = perfCI{}, "unsaturated"
 						}
@@ -623,7 +640,13 @@ func printPerf(w io.Writer, s perfSummary) {
 			show(ci.Median, "%.1f"), show(ci.Low, "%.1f"), show(ci.High, "%.1f"))
 	}
 	for _, sat := range s.Saturation {
-		fmt.Fprintf(w, "saturation %s %s %s: plateau %v %s, sat %s, reason %q\n", sat.Part, sat.Suite, sat.KeyMem, sat.Plateau, sat.PlateauReason, show(sat.Sat, "%.1f"), sat.Reason)
+		at := ""
+		if sat.Cores != nil {
+			at = fmt.Sprintf(" n=%d", *sat.Cores)
+		} else if sat.Hops != nil {
+			at = fmt.Sprintf(" hops=%d", *sat.Hops)
+		}
+		fmt.Fprintf(w, "saturation %s %s %s%s: plateau %v %s, sat %s, reason %q\n", sat.Part, sat.Suite, sat.KeyMem, at, sat.Plateau, sat.PlateauReason, show(sat.Sat, "%.1f"), sat.Reason)
 	}
 	for _, k := range s.KeyMem {
 		fmt.Fprintf(w, "keymem %s %s %s: %d pairs, verdict %q %s\n", k.Part, k.Suite, k.Level, k.Pairs, k.Verdict, k.Reason)

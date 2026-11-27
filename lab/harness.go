@@ -41,7 +41,9 @@ type Config struct {
 	Window int
 	// every message fills its cell, the client's MaxPayload
 	FullPayload bool
-	// set before any key of the run and restored on return; nil keeps the policy
+	// set before any key of the run and restored on return; nil keeps the
+	// policy; it is process wide, so runs with KeyMem never overlap, and nothing
+	// else in the process should make keys meanwhile
 	KeyMem *secmem.Policy
 	// the last node of the chain runs elsewhere; Execute starts Hops-1 relays
 	Exit *client.Node
@@ -49,6 +51,8 @@ type Config struct {
 	// the window deadline is already fixed when it runs
 	OnWindow func(open bool)
 }
+
+var keyMemRun sync.Mutex
 
 // the client drops a reply when 64 wait unread, and an echo dropped there
 // would never return its credit
@@ -166,6 +170,8 @@ func Execute(cfg Config) (*Run, error) {
 		return nil, err
 	}
 	if cfg.KeyMem != nil {
+		keyMemRun.Lock()
+		defer keyMemRun.Unlock()
 		prev := secmem.CurrentPolicy()
 		if err := secmem.SetPolicy(*cfg.KeyMem); err != nil {
 			return nil, err

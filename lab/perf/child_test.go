@@ -2,6 +2,9 @@ package perf
 
 import (
 	"context"
+	"os"
+	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -42,6 +45,18 @@ func TestChildServesAChainOfOneNode(t *testing.T) {
 	}
 	if after.MonoNs <= before.MonoNs || final.MonoNs < after.MonoNs || after.CPUNs < before.CPUNs {
 		t.Fatalf("clocks %d, %d, %d and cpu %d, %d: want growth", before.MonoNs, after.MonoNs, final.MonoNs, before.CPUNs, after.CPUNs)
+	}
+}
+
+func TestChildEnvIsMinimal(t *testing.T) {
+	t.Setenv("GOTRACEBACK", "crash")
+	t.Setenv("GOGC", "off")
+	want := []string{"PATH=" + os.Getenv("PATH"), "GOTRACEBACK=none"}
+	if runtime.GOOS == "windows" {
+		want = append(want, "SYSTEMROOT="+os.Getenv("SYSTEMROOT"))
+	}
+	if got := childEnv(); !slices.Equal(got, want) {
+		t.Fatalf("childEnv = %q, want %q", got, want)
 	}
 }
 
