@@ -36,6 +36,40 @@ type Config struct {
 	// Run.Labels; relays always get the bare provider
 	LabelCells bool
 	Mark       *MarkConfig
+	// with a positive window each flow keeps at most Window messages without an echo and
+	// sends the next on an echo; SendEvery is ignored. At most 64: the client buffers 64 replies
+	Window int
+	// every message fills its cell, the client's MaxPayload
+	FullPayload bool
+	// set before any key of the run and restored on return; nil keeps the policy
+	KeyMem *secmem.Policy
+	// the last node of the chain runs elsewhere; Execute starts Hops-1 relays
+	Exit *client.Node
+	// called once when the window opens and once after the flows stop; must not block,
+	// the window deadline is already fixed when it runs
+	OnWindow func(open bool)
+}
+
+// the client drops a reply when 64 wait unread, and an echo dropped there
+// would never return its credit
+const maxWindow = 64
+
+func (c Config) check() error {
+	switch {
+	case c.Window < 0 || c.Window > maxWindow:
+		return fmt.Errorf("lab: window %d outside 0..%d", c.Window, maxWindow)
+	// cover and a fixed schedule drop messages silently, and a dropped message
+	// would hold its credit for good
+	case c.Window > 0 && (c.Mark != nil || c.LabelCells || c.Mode == client.ConstantRate || c.CoverEvery > 0):
+		return fmt.Errorf("lab: a window does not combine with marks, labels, a constant rate or cover")
+	case c.Exit != nil && c.Mark != nil:
+		return fmt.Errorf("lab: an external exit does not combine with marks")
+	case c.FullPayload && c.LabelCells:
+		return fmt.Errorf("lab: full payload does not combine with labels")
+	case c.Hops < 1:
+		return fmt.Errorf("lab: %d hops", c.Hops)
+	}
+	return nil
 }
 
 func (c Config) withDefaults() Config {
@@ -104,6 +138,16 @@ type Run struct {
 	// client is closed and no cell can follow
 	Labels []*Labels
 	Mark   *MarkResult
+	// with Config.Window, when each echo came back on the trace clock and its
+	// flow, at the index of its latency; nil without a window
+	Completed []time.Duration
+	EchoFlow  []int
+	// bytes handed to the client per message
+	Payload int
+	// relays this process ran, and whether the static key of every one of them
+	// was locked; false when there is none
+	LocalRelays int
+	KeysLocked  bool
 }
 
 type node struct {
@@ -118,6 +162,16 @@ type node struct {
 // Execute runs one configuration end to end and returns what the adversary saw
 func Execute(cfg Config) (*Run, error) {
 	cfg = cfg.withDefaults()
+	if err := cfg.check(); err != nil {
+		return nil, err
+	}
+	if cfg.KeyMem != nil {
+		prev := secmem.CurrentPolicy()
+		if err := secmem.SetPolicy(*cfg.KeyMem); err != nil {
+			return nil, err
+		}
+		defer func() { _ = secmem.SetPolicy(prev) }()
+	}
 	if cfg.Mark != nil {
 		return executeMarked(cfg, defaultMarkPlan())
 	}
@@ -178,6 +232,9 @@ func Execute(cfg Config) (*Run, error) {
 		}
 	}()
 	for i := cfg.Hops - 1; i >= 0; i-- {
+		if i == cfg.Hops-1 && cfg.Exit != nil {
+			continue
+		}
 		observed := i == cfg.Hops-2
 		n, err := startNode(provider, cfg.RelayPeriod, observed, lastHopDial)
 		if err != nil {
@@ -188,6 +245,10 @@ func Execute(cfg Config) (*Run, error) {
 
 	chain := make([]client.Node, cfg.Hops)
 	for i, n := range nodes {
+		if n == nil {
+			chain[i] = *cfg.Exit
+			continue
+		}
 		chain[i] = client.Node{Addr: n.addr, StaticPub: n.pub}
 	}
 
@@ -286,30 +347,71 @@ func Execute(cfg Config) (*Run, error) {
 		_ = waitFor(exitSetUp, 5*time.Second)
 	}
 
-	latency := newLatency(clients, start)
+	if cfg.FullPayload {
+		cfg.Payload = clients[0].MaxPayload()
+	}
+	var (
+		latency  *latencyCollector
+		windowed *windowCollector
+	)
+	if cfg.Window > 0 {
+		windowed = newWindowCollector(clients, start, cfg.Window)
+	} else {
+		latency = newLatency(clients, start)
+	}
 	// the last client started its schedule a moment ago, so a window opening
 	// now would sit in phase with it and not with the others
 	if schedule > 0 {
 		time.Sleep(time.Duration(phases.Int63n(int64(schedule))))
 	}
 	origin := openWindow(func() time.Duration { return time.Since(start) }, lastSetup())
-	sent := runFlows(cfg, clients, latency, start.Add(origin+cfg.Duration))
+	if cfg.OnWindow != nil {
+		cfg.OnWindow(true)
+	}
+	var sent int
+	if windowed != nil {
+		sent = runWindowFlows(cfg, clients, windowed, start.Add(origin+cfg.Duration))
+	} else {
+		sent = runFlows(cfg, clients, latency, start.Add(origin+cfg.Duration))
+	}
+	if cfg.OnWindow != nil {
+		cfg.OnWindow(false)
+	}
+	pending := func() int {
+		if windowed != nil {
+			return windowed.pending()
+		}
+		return latency.pending()
+	}
 
 	// a fixed drain would cut the latency tail of a slow schedule; a message
 	// lost on the way never answers, so the wait is bounded by the configuration
 	drain := 300*time.Millisecond + time.Duration(4*cfg.Hops)*(cfg.Rate+cfg.RelayPeriod+cfg.Jitter)
-	_ = waitFor(func() bool { return latency.pending() == 0 }, drain)
+	_ = waitFor(func() bool { return pending() == 0 }, drain)
 
-	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples(), Origin: origin, Unanswered: latency.pending(), Closures: latency.closures(), Labels: labels}
+	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Origin: origin, Labels: labels, Payload: max(cfg.Payload, flowField+seqField)}
+	if windowed != nil {
+		run.Latency, run.Completed, run.EchoFlow = windowed.samples()
+		run.Unanswered, run.Closures = windowed.pending(), windowed.closures()
+	} else {
+		run.Latency, run.Unanswered, run.Closures = latency.samples(), latency.pending(), latency.closures()
+	}
 	for _, c := range clients {
 		run.Dropped += c.Dropped()
 		if c.Broken() {
 			run.BrokenFlows++
 		}
 	}
+	run.KeysLocked = true
 	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		run.LocalRelays++
+		run.KeysLocked = run.KeysLocked && n.priv.Locked()
 		run.addRelay(n.relay.Stats().Snapshot())
 	}
+	run.KeysLocked = run.KeysLocked && run.LocalRelays > 0
 	exitMu.Lock()
 	run.Exit = exitTraces
 	run.ExitBack = exitBack
@@ -483,6 +585,158 @@ func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector, d
 				latency.mark(flow, seq)
 				if err := c.Send(payload); err != nil {
 					latency.unmark(flow, seq)
+					return
+				}
+				local++
+			}
+		}(i, c)
+	}
+	wg.Wait()
+	return sent
+}
+
+// the closed loop of a window: each flow has its own lock and state, so no
+// flow waits on another's echoes, and a matched echo hands its flow one credit
+// back
+type windowCollector struct {
+	start  time.Time
+	flows  []*windowFlow
+	credit []chan struct{}
+}
+
+type windowFlow struct {
+	mu        sync.Mutex
+	sent      map[uint64]time.Time
+	latency   []time.Duration
+	completed []time.Duration
+	closed    Closure
+}
+
+func newWindowCollector(clients []*client.Client, start time.Time, window int) *windowCollector {
+	w := &windowCollector{start: start, flows: make([]*windowFlow, len(clients)), credit: make([]chan struct{}, len(clients))}
+	for i, c := range clients {
+		f := &windowFlow{sent: make(map[uint64]time.Time)}
+		w.flows[i] = f
+		w.credit[i] = make(chan struct{}, window)
+		for range window {
+			w.credit[i] <- struct{}{}
+		}
+		go func(f *windowFlow, credit chan struct{}, c *client.Client) {
+			for reply := range c.Replies() {
+				if len(reply) < flowField+seqField {
+					continue
+				}
+				seq := binary.BigEndian.Uint64(reply[flowField : flowField+seqField])
+				f.mu.Lock()
+				at, ok := f.sent[seq]
+				if ok {
+					f.latency = append(f.latency, time.Since(at))
+					f.completed = append(f.completed, time.Since(start))
+					delete(f.sent, seq)
+				}
+				f.mu.Unlock()
+				if ok {
+					select {
+					case credit <- struct{}{}:
+					default:
+					}
+				}
+			}
+			f.mu.Lock()
+			f.closed = Closure{Closed: true, At: time.Since(start)}
+			f.mu.Unlock()
+		}(f, w.credit[i], c)
+	}
+	return w
+}
+
+func (w *windowCollector) mark(flow int, seq uint64) {
+	f := w.flows[flow]
+	f.mu.Lock()
+	f.sent[seq] = time.Now()
+	f.mu.Unlock()
+}
+
+func (w *windowCollector) unmark(flow int, seq uint64) {
+	f := w.flows[flow]
+	f.mu.Lock()
+	delete(f.sent, seq)
+	f.mu.Unlock()
+	select {
+	case w.credit[flow] <- struct{}{}:
+	default:
+	}
+}
+
+func (w *windowCollector) pending() int {
+	n := 0
+	for _, f := range w.flows {
+		f.mu.Lock()
+		n += len(f.sent)
+		f.mu.Unlock()
+	}
+	return n
+}
+
+// flow by flow in the order of their numbers
+func (w *windowCollector) samples() (latency, completed []time.Duration, flows []int) {
+	latency, completed, flows = []time.Duration{}, []time.Duration{}, []int{}
+	for i, f := range w.flows {
+		f.mu.Lock()
+		latency = append(latency, f.latency...)
+		completed = append(completed, f.completed...)
+		for range f.latency {
+			flows = append(flows, i)
+		}
+		f.mu.Unlock()
+	}
+	return latency, completed, flows
+}
+
+func (w *windowCollector) closures() []Closure {
+	out := make([]Closure, len(w.flows))
+	for i, f := range w.flows {
+		f.mu.Lock()
+		out[i] = f.closed
+		f.mu.Unlock()
+	}
+	return out
+}
+
+// a message leaves as soon as its flow holds a credit, so the chain is kept
+// as busy as the window lets it; sending stops where the window closes
+func runWindowFlows(cfg Config, clients []*client.Client, w *windowCollector, deadline time.Time) int {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	sent := 0
+	for i, c := range clients {
+		wg.Add(1)
+		go func(flow int, c *client.Client) {
+			defer wg.Done()
+			timer := time.NewTimer(time.Until(deadline))
+			defer timer.Stop()
+			payload := make([]byte, max(cfg.Payload, flowField+seqField))
+			binary.BigEndian.PutUint16(payload[:flowField], uint16(flow))
+			local := 0
+			defer func() {
+				mu.Lock()
+				sent += local
+				mu.Unlock()
+			}()
+			for {
+				select {
+				case <-w.credit[flow]:
+				case <-timer.C:
+					return
+				}
+				if !time.Now().Before(deadline) {
+					return
+				}
+				seq := uint64(local)
+				binary.BigEndian.PutUint64(payload[flowField:flowField+seqField], seq)
+				w.mark(flow, seq)
+				if err := c.Send(payload); err != nil {
+					w.unmark(flow, seq)
 					return
 				}
 				local++

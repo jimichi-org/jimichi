@@ -26,6 +26,8 @@ const (
 	StreamNodeBootstrap
 	StreamNodePower
 	StreamNodeAnonymous
+	StreamPerfOrder
+	StreamPerfPower
 )
 
 // Derive mixes the parts into the seed with splitmix64, so neighbouring seeds,
