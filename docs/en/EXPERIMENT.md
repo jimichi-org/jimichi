@@ -1512,12 +1512,12 @@ comparison will be made: the conditions differ, and that will be stated.
    in evaluated Object payloads does not establish erasure. Broader memory/disk/history scenarios
    remain unmeasured ([#192](https://github.com/jimichi-org/jimichi/issues/192)); known library
    copies remain listed in [CRYPTO](CRYPTO.md), "Known gaps".
-5. The container: `jimichi vault init`
-   and `jimichi vault show`, one password opens the decoy volume and another the second
-   volume; the distinguisher, controls and trace of block 5 (`cmd/lab -set vault`) are
-   implemented, the series is not recorded yet ([#214](https://github.com/jimichi-org/jimichi/issues/214)).
-   An AUC near 0.5 refutes only the features of the block. Statistical batteries such as NIST STS are no evidence about a hidden volume: they show
-   only that the ciphertext has no statistical structure.
+5. The container: `jimichi vault init` and `jimichi vault show`, one password opens the decoy
+   volume and another the second volume; the distinguisher, controls and trace of block 5
+   (`cmd/lab -set vault`) are implemented, the series is not recorded yet
+   ([#214](https://github.com/jimichi-org/jimichi/issues/214)). An AUC near 0.5 refutes only the
+   features of the block. Statistical batteries such as NIST STS are no evidence about a hidden
+   volume: they show only that the ciphertext has no statistical structure.
 6. The cost table: GOST against X25519 from the benchmarks and round-trip latency for chains of
    two and three nodes; the rest of block 6 is planned
    ([#118](https://github.com/jimichi-org/jimichi/issues/118)).

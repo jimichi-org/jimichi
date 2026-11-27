@@ -2280,7 +2280,8 @@ is indistinguishable from it.
   the pod, inside the /var volume of the kind node (with Docker Desktop, the disk of its WSL2 VM);
   the kubelet keeps the client logs there too, and they hold only lines of the kinds in the
   subsection "The -peer client with a container". No key and no password is on the disk of the
-  node. The file goes with its PVC.
+  node. Deleting the PVC removes the file without overwriting it: its ciphertext may stay in free
+  blocks of the node disk.
 - make vault-demo (scripts/vault.sh) shows the container on the development testbed and is not
   part of CI. The script checks the context and the suite, removes the clients and the PVCs of an
   earlier run, applies deploy/vault and checks that both clients start locked: GET /card and GET
@@ -2296,11 +2297,15 @@ is indistinguishable from it.
   a key nobody holds, and such a volume gives itself away by its silence (THREAT_MODEL).
 - The passwords of the demonstration are 24 random bytes in base64 in shell variables. They reach
   no file, process argument, environment or here-string, go to curl only on its standard input,
-  and the script does not run with xtrace or allexport. The memory of bash, curl and kubectl on the
-  host is not locked and may go to pagefile.sys and hiberfil.sys (to swap on Linux); the passwords
-  are new on every run and mean nothing once the PVCs are gone. A failure or an interrupt returns
-  to deploy/base by itself, and exit code 3 means it could not. make redeploy does not remove the
-  PVCs of the overlay; make vault-demo removes them at its start and at its end.
+  and the script does not run with xtrace or allexport. curl runs with `-q --noproxy '*'`: it reads
+  no ~/.curlrc and no proxy variable, and the body goes straight to the loopback port of the
+  forward. The memory of bash, curl and kubectl on the host is not locked and may go to
+  pagefile.sys and hiberfil.sys (to swap on Linux); the passwords are new on every run and open
+  only the volumes of that run, whose identities are used nowhere else. A failure or an interrupt
+  returns to deploy/base by itself. Exit codes: 0 success, 1 a check failed, 130 or 143 an
+  interrupt, and in these three cases deploy/base is back; 2 a precondition failed and the testbed
+  is untouched; 3 deploy/base could not be restored. make redeploy does not remove the PVCs of the
+  overlay; make vault-demo removes them at its start and at its end.
 - The manifests hold no Secret at all: node keys are created in process memory and a node stores
   them nowhere else, in no Secret, volume or file. Only the secmem buffers are locked: the copies
   the libraries keep on the heap are not, and whether those reach swap depends on the host
