@@ -175,7 +175,8 @@ func newVaultBed(t *testing.T, p jcrypto.CryptoProvider, path, mailboxAddr strin
 	}()
 	t.Cleanup(func() {
 		srv.Close()
-		b.va.drain()
+		b.va.close()
+		b.va.ops.Wait()
 		<-done
 		for _, l := range b.lives {
 			l.release()
@@ -247,7 +248,7 @@ func (b *vaultBed) leaving(t *testing.T) {
 	}
 }
 
-// what GET /status answers, field by field: PR5 reads these names and types
+// what GET /status answers, field by field: an operator script reads these names and types
 type statusFields struct {
 	State              string  `json:"state"`
 	Container          string  `json:"container"`
@@ -624,6 +625,35 @@ func TestVaultOneOperationAtATime(t *testing.T) {
 	b.expect(t, http.MethodPut, "/vault/init", "pw2\n\n", http.StatusConflict)
 }
 
+// a stop that comes in the stretch of an init with a card writes no
+// container after it
+func TestVaultStopInTheStretchWritesNothing(t *testing.T) {
+	base, _ := cheap(t)
+	p := blockingStretch{cheapStretch: base, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	path := vaultPath(t)
+	b := newVaultBed(t, p, path, testMailbox, nil, nil)
+	peer := newPeerID(t, base, testMailbox)
+	type answer struct {
+		code int
+		text string
+	}
+	result := make(chan answer, 1)
+	go func() {
+		code, text := b.call(t, http.MethodPut, "/vault/init", "pw\n"+peer.card.String()+"\n")
+		result <- answer{code, text}
+	}()
+	<-p.entered
+	b.va.close()
+	close(p.release)
+	got := <-result
+	if want := notStarted + "shutdown, " + noContainer + "\n"; got.code != http.StatusServiceUnavailable || got.text != want {
+		t.Fatalf("the init: %d %q, want %q", got.code, got.text, want)
+	}
+	if exists(path) || strings.Contains(b.out.String(), "vault written") {
+		t.Fatal("a container written after the stop")
+	}
+}
+
 // the first PUT /contact writes the container once, before the pin; the same
 // card again changes nothing, another one stops the client and leaves the file
 // as it is
@@ -862,7 +892,7 @@ func TestVaultFirstPinRefusesABadKey(t *testing.T) {
 }
 
 // GET /status carries the counters of the minute line, the round trips and
-// the state of the file, under the names and types PR5 reads
+// the state of the file, under the names and types an operator script reads
 func TestVaultStatus(t *testing.T) {
 	p, _ := cheap(t)
 	b := newVaultBed(t, p, vaultPath(t), testMailbox, nil, nil)
@@ -1021,7 +1051,7 @@ func TestVaultFixedContact(t *testing.T) {
 }
 
 // every cell of the running states: a draft, a written file, a file whose
-// write did not settle, the stop of D-038 and an exit under way
+// write did not settle, the stop after another card and an exit under way
 func TestVaultRequestMatrix(t *testing.T) {
 	p, _ := cheap(t)
 	x, y := newPeerID(t, p, testMailbox).card, newPeerID(t, p, testMailbox).card
@@ -1081,7 +1111,8 @@ func TestVaultRequestMatrix(t *testing.T) {
 
 // the open waits for the first chain: meanwhile the routes of the running
 // client say so, a second open is 429, and a SIGTERM ends the wait with an
-// answer that tells whether the file is on disk, and code 0
+// answer that tells whether the file is on disk, and code 0; a chain that
+// comes soon after the stop is closed before the exit
 func TestVaultOpening(t *testing.T) {
 	p, _ := cheap(t)
 	peer := newPeerID(t, p, testMailbox)
@@ -1095,10 +1126,11 @@ func TestVaultOpening(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			entered, release := make(chan struct{}, 1), make(chan struct{})
+			circ := &closedCircuit{fakeCircuit: fakeCircuit{replies: make(chan []byte)}}
 			first := func() (conversation.Circuit, error) {
 				entered <- struct{}{}
 				<-release
-				return &fakeCircuit{replies: make(chan []byte)}, nil
+				return circ, nil
 			}
 			b := newVaultBed(t, p, vaultPath(t), testMailbox, first, nil)
 			var once sync.Once
@@ -1134,8 +1166,12 @@ func TestVaultOpening(t *testing.T) {
 			if want := notStarted + "shutdown, " + c.where + "\n"; got.code != http.StatusServiceUnavailable || got.text != want {
 				t.Fatalf("the init: %d %q, want %q", got.code, got.text, want)
 			}
+			free()
 			if code := b.exitCode(t); code != 0 {
 				t.Fatalf("exit code %d", code)
+			}
+			if !circ.closed.Load() {
+				t.Fatal("the chain built after the stop is still open")
 			}
 			b.leaving(t)
 		})
@@ -1188,12 +1224,10 @@ func TestVaultUnlockPause(t *testing.T) {
 	b.expect(t, http.MethodPut, "/vault/unlock", "", http.StatusBadRequest)
 	b.expect(t, http.MethodPut, "/vault/unlock", "pw2\n", http.StatusConflict)
 	b.expect(t, http.MethodPut, "/vault/unlock", "", http.StatusBadRequest)
-	for k := freeUnlocks + 1; k <= 10; k++ {
+	// the pauses after the fourth to the tenth refusal in a row
+	for _, s := range []time.Duration{2, 4, 8, 16, 32, 64, 64} {
 		refused()
-		pause := min(time.Second<<(k-freeUnlocks), maxUnlockPause)
-		if k >= 9 && pause != 64*time.Second {
-			t.Fatalf("the pause after %d refusals: %v", k, pause)
-		}
+		pause := s * time.Second
 		advance(pause - time.Millisecond)
 		waits()
 		advance(time.Millisecond)
@@ -1410,6 +1444,16 @@ func TestVaultSessionKeysNeverReachTheVolume(t *testing.T) {
 			t.Fatalf("a secret of %d bytes is in the container", len(s))
 		}
 	}
+}
+
+type closedCircuit struct {
+	fakeCircuit
+	closed atomic.Bool
+}
+
+func (c *closedCircuit) Close() error {
+	c.closed.Store(true)
+	return nil
 }
 
 func (b *vaultBed) state() vaultState {

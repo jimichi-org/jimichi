@@ -96,7 +96,8 @@ type peerSetup struct {
 }
 
 // runs the -peer mode until a signal or the end of the conversation and
-// returns the exit code; every key is released by the time it returns
+// returns the exit code; every key is released by the time it returns, but
+// for a first -vault chain still being dialled answerFor after a stop
 func runPeer(f peerFlags, logger *log.Logger, stop <-chan os.Signal) int {
 	set, code := prelude(f, logger)
 	if set == nil {
