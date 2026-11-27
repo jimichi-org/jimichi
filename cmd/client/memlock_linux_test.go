@@ -216,9 +216,9 @@ func vaultAtTheMinimum(t *testing.T, s jcrypto.Suite) bool {
 			t.Fatalf("%s ran short of locked memory:\n%s", pr.name, out)
 		}
 	}
-	talked := func(admin string, from int) {
+	talked := func(admin string, from int, wait time.Duration) {
 		t.Helper()
-		for limit := time.Now().Add(maxWait); ; time.Sleep(50 * time.Millisecond) {
+		for limit := time.Now().Add(wait); ; time.Sleep(50 * time.Millisecond) {
 			if vaultStatus(t, admin).RoundTrips >= 3 && roundTrips(b.out.String()) >= from+3 {
 				return
 			}
@@ -228,7 +228,7 @@ func vaultAtTheMinimum(t *testing.T, s jcrypto.Suite) bool {
 			}
 		}
 	}
-	talked(adminA, 0)
+	talked(adminA, 0, maxWait)
 	short(a)
 	short(b)
 	a.terminate(t)
@@ -236,7 +236,9 @@ func vaultAtTheMinimum(t *testing.T, s jcrypto.Suite) bool {
 	a = bed.start(t, "a again", vaultEnv, vaultArgs...)
 	adminA = a.locked(t)
 	mustCall(t, http.MethodPut, adminA+"/vault/unlock", vaultPassword+"\n", http.StatusNoContent)
-	talked(adminA, roundTrips(b.out.String()))
+	// the other side refuses the fresh kk1 while its confirmed session lasts,
+	// so the recovery takes up to its stale timeout plus a handshake
+	talked(adminA, roundTrips(b.out.String()), stale+maxWait)
 	time.Sleep(200 * time.Millisecond)
 	short(a)
 	short(b)
