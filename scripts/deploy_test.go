@@ -442,3 +442,35 @@ func TestNoRelayHasAVolume(t *testing.T) {
 		t.Errorf("%d relay deployments under deploy/, want five", relays)
 	}
 }
+
+// the demonstration with -vault runs on the testbed of a developer only
+func TestVaultDemoStaysOutOfCI(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	makefile := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	target := regexp.MustCompile(`(?m)^vault-demo:\n((?:\t[^\n]*\n)+)`).FindStringSubmatch(makefile)
+	if target == nil || target[1] != "\tbash scripts/vault.sh\n" {
+		t.Errorf("Makefile: want the target vault-demo with the one recipe line bash scripts/vault.sh, got %q", target)
+	}
+	phony := regexp.MustCompile(`(?m)^\.PHONY:(.*)$`).FindStringSubmatch(makefile)
+	if phony == nil || !slices.Contains(strings.Fields(phony[1]), "vault-demo") {
+		t.Error("Makefile: vault-demo is not .PHONY")
+	}
+	workflows, err := filepath.Glob(filepath.Join("..", ".github", "workflows", "*"))
+	if err != nil || len(workflows) == 0 {
+		t.Fatalf("no CI workflows: %v", err)
+	}
+	for _, file := range workflows {
+		text, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, word := range []string{"vault-demo", "vault.sh", "deploy/vault"} {
+			if strings.Contains(string(text), word) {
+				t.Errorf("%s mentions %s: the demonstration is not part of CI", filepath.Base(file), word)
+			}
+		}
+	}
+}
