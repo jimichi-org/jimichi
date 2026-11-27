@@ -137,6 +137,7 @@ esac
 
 // the admin ports behind the forwards, 19501 for client-a and 19502 for
 // client-b. Every body is kept in $STAND/body.<n>, listed in $STAND/bodies.
+// INTERRUPT sends TERM to vault.sh on its first init.
 // NOT_STARTED makes that many unlocks with the real password answer not
 // started and restart the container; CARD_DIFFERS gives another card after an
 // unlock with the real password; IDENTITY_LINE, RELAY_LINE and EXTRA_WRITTEN
@@ -181,6 +182,10 @@ opened() {
   line "vault opened"
   line "circuit of 3 hops among 5 listed nodes to the mailbox, request period 200ms"
 }
+if [ -n "${INTERRUPT:-}" ] && [ "$method $path" = "PUT /vault/init" ]; then
+  while [ ! -s "$STAND/main" ]; do sleep 0.1; done
+  kill -TERM "$(cat "$STAND/main")"
+fi
 case "$method $path" in
   "GET /card")
     if [ -z "$vol" ]; then reply 503 "locked: no volume is open"$'\n'
@@ -300,6 +305,11 @@ echo "introduce JIMICHI=$JIMICHI RESTART=$RESTART" >>"$STAND/order"
 printf '2026/11/27 12:00:02 e2e round trip in 1ms\n' >>"$STAND/a.$(cat "$STAND/a.gen").$(cat "$STAND/a.restarts").log"
 `
 
+// rm leaves the directory vault.sh made under TMPDIR for the scan of its files
+const vaultKeepTemp = `for last; do :; done
+if [ -d "$last" ] && [ "$(cd "$last/.." && pwd -P)" = "$(cd "$TMPDIR" && pwd -P)" ]; then exit 0; fi
+`
+
 type vaultRun struct {
 	status         int
 	stdout, stderr string
@@ -348,7 +358,11 @@ func vaultDemo(t *testing.T, args []string, env ...string) vaultRun {
 		}
 	}
 	for _, tool := range vaultTools {
-		write(tool, "exec '"+posixPath(t, shell, tool)+"' \"$@\"\n")
+		text := "exec '" + posixPath(t, shell, tool) + "' \"$@\"\n"
+		if tool == "rm" {
+			text = vaultKeepTemp + text
+		}
+		write(tool, text)
 	}
 	for name, text := range map[string]string{
 		"kubectl": vaultKubectl, "curl": vaultCurl, "docker": vaultDocker, "jimichi": vaultJimichi, "introduce-stub": vaultIntroduce,
@@ -374,9 +388,28 @@ func vaultDemo(t *testing.T, args []string, env ...string) vaultRun {
 			t.Fatal(err)
 		}
 	}
+	if !slices.Contains(env, "FROM=elsewhere") {
+		for _, f := range []string{"deploy/vault/client.yaml", "deploy/base/client.yaml"} {
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(work, f)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(work, f), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if slices.Contains(env, "CURLRC=yes") {
+		rc := "trace-ascii = \"" + filepath.ToSlash(filepath.Join(home, "trace")) + "\"\nproxy = \"http://127.0.0.1:9\"\n"
+		if err := os.WriteFile(filepath.Join(home, ".curlrc"), []byte(rc), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	calls := filepath.Join(stand, "calls")
 	jimichi := posix(t, shell, filepath.Join(bin, "jimichi"))
 	cmd := exec.Command(shell, append(args, script(t, "vault.sh"))...)
+	if slices.Contains(env, "INTERRUPT=yes") {
+		cmd = exec.Command(shell, "-c", `bash "$0" & echo $! >"$STAND/main"; wait $!`, script(t, "vault.sh"))
+	}
 	cmd.Dir = work
 	for _, kv := range os.Environ() {
 		name, _, _ := strings.Cut(kv, "=")
@@ -560,11 +593,13 @@ func TestVaultDemoKeepsPasswordsOffArgumentsAndDisk(t *testing.T) {
 			t.Errorf("password %d is in the output", i+1)
 		}
 	}
+	scanned := map[string]bool{}
 	for _, dir := range r.dirs {
 		err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return err
 			}
+			scanned[d.Name()] = true
 			raw, err := os.ReadFile(path)
 			if err != nil {
 				return err
@@ -579,6 +614,57 @@ func TestVaultDemoKeepsPasswordsOffArgumentsAndDisk(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+	if !scanned["client-a.log"] || !scanned["client-b.log"] {
+		t.Errorf("the scan did not see the files vault.sh wrote under TMPDIR: %v", scanned)
+	}
+}
+
+func TestVaultDemoSendsTheAdminRequestsStraightToLoopback(t *testing.T) {
+	skipShort(t)
+	t.Parallel()
+	r := vaultDemo(t, nil, "CURLRC=yes", "http_proxy=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
+		"ALL_PROXY=http://127.0.0.1:9", "no_proxy=", "NO_PROXY=")
+	if r.status != 0 {
+		t.Fatalf("status %d, want 0:\n%s", r.status, r.stderr)
+	}
+	n := 0
+	for _, line := range strings.Split(r.calls, "\n") {
+		if strings.HasPrefix(line, "=== curl") {
+			n++
+			if !strings.HasPrefix(line, "=== curl -q --noproxy * ") {
+				t.Errorf("curl reads ~/.curlrc or the proxy variables: %s", line)
+			}
+		}
+	}
+	if n == 0 || !strings.Contains(strings.ToLower(r.calls), "declare -x http_proxy=") {
+		t.Fatalf("%d calls of curl, want them recorded with the proxy in the environment", n)
+	}
+}
+
+func TestVaultDemoRunsFromTheRootOfTheRepository(t *testing.T) {
+	skipShort(t)
+	t.Parallel()
+	r := vaultDemo(t, nil, "FROM=elsewhere")
+	if r.status != 2 || !strings.Contains(r.stderr, "vault.sh needs deploy/vault/client.yaml: run it from the root of the repository") {
+		t.Fatalf("status %d, want 2:\n%s", r.status, r.stderr)
+	}
+	if got := r.file(t, "order"); got != "" {
+		t.Errorf("the testbed changed:\n%s", got)
+	}
+}
+
+func TestVaultDemoRestoresBaseAfterAnInterrupt(t *testing.T) {
+	skipShort(t)
+	t.Parallel()
+	r := vaultDemo(t, nil, "INTERRUPT=yes")
+	if r.status != 143 || strings.Contains(r.stderr, "stand left without base clients") {
+		t.Fatalf("status %d, want 143 with deploy/base restored:\n%s", r.status, r.stderr)
+	}
+	order := r.order(t)
+	if !inOrder(order, []string{"curl PUT /vault/init client-a", "delete pvc vault-client-a", "delete pvc vault-client-b", "apply base"}) ||
+		!strings.HasPrefix(order[len(order)-1], "docker test ! -e") || strings.Contains(r.file(t, "order"), "curl PUT /vault/init client-b") {
+		t.Errorf("deploy/base not restored after the interrupt:\n%s", strings.Join(order, "\n"))
 	}
 }
 
@@ -731,7 +817,7 @@ func TestVaultScriptExpandsPasswordsOnlyIntoCurl(t *testing.T) {
 	}
 	var (
 		drawn    = regexp.MustCompile(`^(pw_real|pw_cover|pw_b|pw_wrong)=\$\(head -c 24 /dev/urandom \| base64\)$`)
-		piped    = regexp.MustCompile(`^\s*(?:[a-z-]+\) )?out=\$\(printf '[^']*'(?: "\$(?:pw_real|pw_cover|pw_b|pw_wrong|card_cover)")+ \| curl [^|$]*(?:"\$[A-Z_]+"[^|$]*)*--data-binary @- "\$url"\) \|\|$`)
+		piped    = regexp.MustCompile(`^\s*(?:[a-z-]+\) )?out=\$\(printf '[^']*'(?: "\$(?:pw_real|pw_cover|pw_b|pw_wrong|card_cover)")+ \| curl -q --noproxy '\*' [^|$]*(?:"\$[A-Z_]+"[^|$]*)*--data-binary @- "\$url"\) \|\|$`)
 		unset    = regexp.MustCompile(`^\s*unset pw_real pw_cover pw_b pw_wrong$`)
 		mentions = regexp.MustCompile(`pw_[a-z]+`)
 	)
@@ -751,6 +837,10 @@ func TestVaultScriptExpandsPasswordsOnlyIntoCurl(t *testing.T) {
 		default:
 			t.Errorf("a password outside printf into curl: %s", line)
 		}
+	}
+	joined := strings.Join(code, "\n")
+	if all, safe := strings.Count(joined, "curl -"), strings.Count(joined, "curl -q --noproxy '*' -"); all == 0 || all != safe {
+		t.Errorf("%d of %d curl calls start with -q --noproxy '*'", safe, all)
 	}
 	if len(drawnNames) != 4 {
 		t.Errorf("passwords drawn %v, want pw_real, pw_cover, pw_b and pw_wrong", drawnNames)

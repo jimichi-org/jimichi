@@ -5,7 +5,8 @@
 # the conversation, a restart with the password of the cover volume that opens
 # another identity, the file the same byte for byte, a log that names no
 # identity, then deploy/base again. Exit 0 success, 1 a check failed, 2 a
-# precondition failed and the testbed is untouched, 3 deploy/base not restored
+# precondition failed and the testbed is untouched, 130 or 143 an interrupt,
+# 3 deploy/base not restored; after 1, 130 and 143 deploy/base is back
 case $- in *x*|*a*) echo "vault.sh refuses to run with xtrace or allexport: the passwords would leak" >&2; exit 2 ;; esac
 set -euo pipefail
 set +o xtrace +o allexport
@@ -31,6 +32,7 @@ FILE_STATE='^regular file\|600\|65532\|65532\|1\|8224\|[0-9]+$'
 OVERLAY=deploy/vault/client.yaml
 BASE=deploy/base/client.yaml
 CLIENTS=(client-a client-b)
+RUN_KINDS="admin circuit locked novolume opened pinned"
 NOTICE="stand left without base clients: run make redeploy, then kubectl -n jimichi delete pvc vault-client-a vault-client-b"
 
 # the kinds of line a client with -vault prints; relay kinds come from the
@@ -76,7 +78,10 @@ fail() {
 }
 
 preflight() {
-  local tool
+  local tool file
+  for file in "$OVERLAY" "$BASE" "$INTRODUCE"; do
+    [ -f "$file" ] || { echo "vault.sh needs $file: run it from the root of the repository" >&2; return 1; }
+  done
   for tool in kubectl curl docker base64 sha256sum; do
     command -v "$tool" >/dev/null || { echo "vault.sh needs $tool" >&2; return 1; }
   done
@@ -112,14 +117,14 @@ answer() {
 
 admin() {
   local client="$1" method="$2" path="$3" out
-  out=$(curl -sS --max-time "$ADMIN_WAIT" -w '\n%{http_code}' -X "$method" "http://127.0.0.1:${port[$client]}$path") ||
+  out=$(curl -q --noproxy '*' -sS --max-time "$ADMIN_WAIT" -w '\n%{http_code}' -X "$method" "http://127.0.0.1:${port[$client]}$path") ||
     fail "$client: $method $path did not get an answer"
   answer "$out"
 }
 
 put_contact() {
   local client="$1" card="$2" out
-  out=$(printf '%s' "$card" | curl -sS --max-time "$ADMIN_WAIT" -w '\n%{http_code}' -X PUT --data-binary @- "http://127.0.0.1:${port[$client]}/contact") ||
+  out=$(printf '%s' "$card" | curl -q --noproxy '*' -sS --max-time "$ADMIN_WAIT" -w '\n%{http_code}' -X PUT --data-binary @- "http://127.0.0.1:${port[$client]}/contact") ||
     fail "$client: PUT /contact did not get an answer"
   answer "$out"
 }
@@ -127,9 +132,9 @@ put_contact() {
 init() {
   local client="$1" out url="http://127.0.0.1:${port[$1]}/vault/init"
   case "$client" in
-    client-a) out=$(printf '%s\n\n%s\n%s\n' "$pw_real" "$pw_cover" "$card_cover" | curl -sS --max-time "$VAULT_OPEN_WAIT" -w '\n%{http_code} %{time_total}' -X PUT --data-binary @- "$url") ||
+    client-a) out=$(printf '%s\n\n%s\n%s\n' "$pw_real" "$pw_cover" "$card_cover" | curl -q --noproxy '*' -sS --max-time "$VAULT_OPEN_WAIT" -w '\n%{http_code} %{time_total}' -X PUT --data-binary @- "$url") ||
       fail "$client: PUT /vault/init did not get an answer" ;;
-    client-b) out=$(printf '%s\n\n' "$pw_b" | curl -sS --max-time "$VAULT_OPEN_WAIT" -w '\n%{http_code} %{time_total}' -X PUT --data-binary @- "$url") ||
+    client-b) out=$(printf '%s\n\n' "$pw_b" | curl -q --noproxy '*' -sS --max-time "$VAULT_OPEN_WAIT" -w '\n%{http_code} %{time_total}' -X PUT --data-binary @- "$url") ||
       fail "$client: PUT /vault/init did not get an answer" ;;
   esac
   answer "$out"
@@ -139,11 +144,11 @@ init() {
 unlock() {
   local client="$1" which="$2" out url="http://127.0.0.1:${port[$1]}/vault/unlock"
   case "$which" in
-    real) out=$(printf '%s\n' "$pw_real" | curl -sS --max-time "$VAULT_OPEN_WAIT" -w '\n%{http_code} %{time_total}' -X PUT --data-binary @- "$url") ||
+    real) out=$(printf '%s\n' "$pw_real" | curl -q --noproxy '*' -sS --max-time "$VAULT_OPEN_WAIT" -w '\n%{http_code} %{time_total}' -X PUT --data-binary @- "$url") ||
       fail "$client: PUT /vault/unlock did not get an answer" ;;
-    cover) out=$(printf '%s\n' "$pw_cover" | curl -sS --max-time "$VAULT_OPEN_WAIT" -w '\n%{http_code} %{time_total}' -X PUT --data-binary @- "$url") ||
+    cover) out=$(printf '%s\n' "$pw_cover" | curl -q --noproxy '*' -sS --max-time "$VAULT_OPEN_WAIT" -w '\n%{http_code} %{time_total}' -X PUT --data-binary @- "$url") ||
       fail "$client: PUT /vault/unlock did not get an answer" ;;
-    wrong) out=$(printf '%s\n' "$pw_wrong" | curl -sS --max-time "$WRONG_WAIT" -w '\n%{http_code} %{time_total}' -X PUT --data-binary @- "$url") ||
+    wrong) out=$(printf '%s\n' "$pw_wrong" | curl -q --noproxy '*' -sS --max-time "$WRONG_WAIT" -w '\n%{http_code} %{time_total}' -X PUT --data-binary @- "$url") ||
       fail "$client: PUT /vault/unlock did not get an answer" ;;
   esac
   answer "$out"
@@ -198,12 +203,25 @@ still_locked() {
   [ "$code" = 503 ] || fail "$1: GET /status answered $code while locked, want 503"
 }
 
-await_locked() {
-  local client="$1"
-  pod[$client]=$(current_pod "$client") || fail "$client: no running pod"
-  since[$client]=$(started_at "${pod[$client]}")
+# the start of the current container, once the kubelet reports it running
+container_start() {
+  local client="$1" deadline=$((SECONDS + VAULT_POD_WAIT))
+  while :; do
+    since[$client]=$(started_at "${pod[$client]}")
+    [ -z "${since[$client]}" ] || break
+    [ "$SECONDS" -lt "$deadline" ] || fail "$client: ${pod[$client]} has no running container within ${VAULT_POD_WAIT}s"
+    sleep "$VAULT_PAUSE"
+  done
   restarts[$client]=$(restarts_of "${pod[$client]}")
+}
+
+await_locked() {
+  local client="$1" deadline=$((SECONDS + VAULT_POD_WAIT))
+  until pod[$client]=$(current_pod "$client"); do
+    [ "$SECONDS" -lt "$deadline" ] || fail "$client: no running pod within ${VAULT_POD_WAIT}s"
+  done
   locked_start "$client"
+  container_start "$client"
   forward "$client"
   still_locked "$client"
 }
@@ -228,9 +246,8 @@ restarted() {
   done
   unforward "$client"
   capture "$client" "$run" --previous
-  since[$client]=$(started_at "${pod[$client]}")
-  restarts[$client]="$now"
   locked_start "$client"
+  container_start "$client"
   forward "$client"
 }
 
@@ -451,7 +468,11 @@ on_exit() {
     echo "$NOTICE" >&2
     exit 3
   fi
-  [ "$status" -eq 0 ] || exit 1
+  case "$status" in
+    0) ;;
+    130|143) exit "$status" ;;
+    *) exit 1 ;;
+  esac
   say "deploy/base restored, $SECONDS s in all"
 }
 
@@ -612,6 +633,7 @@ done
 kinds_5=$(kinds "$(run_text 5)")
 kinds_6=$(kinds "$(run_text 6)")
 say "kinds of line, run 5: $kinds_5; run 6: $kinds_6"
+[ "$kinds_5" = "$RUN_KINDS" ] || fail "the kinds of line of run 5 are $kinds_5, want $RUN_KINDS"
 [ "$kinds_5" = "$kinds_6" ] || fail "the kinds of line differ between the real and the cover volume"
 for client in "${CLIENTS[@]}"; do
   same_file "$client"
