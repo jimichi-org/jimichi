@@ -429,7 +429,9 @@ English | [Русский](../ru/LIMITATIONS.md)
 - The introduction trusts the kube API: whoever has pods/log and pods/portforward on the client
   pods can pin any card before the first pin or after a restart of the client. This is the same
   root of trust as certificate issuance. A script, not people, compares the card hashes
-  ([#90](https://github.com/jimichi-org/jimichi/issues/90)).
+  ([#90](https://github.com/jimichi-org/jimichi/issues/90)). With -vault there is no card hash in
+  the log, so pods/portforward alone is enough to pin a card before the first pin, and that card
+  stays in the container for its whole life, until a new container is made.
 - The body of a record is at most 368 bytes, the text of a testbed message at most 363; there is
   no fragmentation ([#68](https://github.com/jimichi-org/jimichi/issues/68)). There are no groups
   and no multiple devices ([#98](https://github.com/jimichi-org/jimichi/issues/98),
@@ -714,6 +716,11 @@ English | [Русский](../ru/LIMITATIONS.md)
   - log lines carry no identity values, and the decoy volume and the real one give the same kinds
     of lines, but the times of the lines in the process logs on the node's disk show the starts,
     the openings and the work of the circuits;
+  - an init with two blocks takes one more PasswordKey stretch and a longer body than an init
+    with one block, so whoever sees when the request arrives (the port-forward) reads the number
+    of volumes from the length of the request and the time of `vault opened`; an unlock does not
+    differ, it stretches once whatever the volume. This is one more reason for `jimichi vault
+    init` outside the pod;
   - the passwords reach the admin port in a request body, which net/http buffers outside secmem
     (CRYPTO, "Known gaps");
   - an init with two blocks carries the password of the second volume through the port-forward

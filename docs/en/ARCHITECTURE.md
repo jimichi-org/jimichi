@@ -879,7 +879,7 @@ States:
 | running, draft | the init succeeded, the container is not written |
 | running, written | the write succeeded, or the client was opened by an unlock |
 | running, unsettled | the write reached the link but did not end (class `sync`) |
-| stopped | another card after the contact was fixed (D-038) |
+| stopped | another card after the contact was fixed |
 | leaving | the answer after which the process exits has gone out |
 
 | Request | Locked, no file | Locked, file | Opening | Draft | Written | Unsettled |
@@ -890,7 +890,7 @@ States:
 | PUT /contact | 503 | 503 | 503 `the volume is opening` | the write below | the pinned card 204, another one 409 and the stop | the pinned card 500 `vault: not written: sync`, another one 409 and the stop |
 | GET /status | 503 | 503 | 503 `the volume is opening` | JSON below | JSON below | JSON below |
 
-In the stopped state every request gets 409 by D-038, while leaving 503 `shutting down`. The texts
+In the stopped state every request gets 409, while leaving 503 `shutting down`. The texts
 of the 4xx and 5xx answers are fixed classes and never the text of an error: the vault errors name
 the path. A body over the bound gets 413.
 
@@ -956,6 +956,11 @@ once its write reached the link), otherwise `no container`. The operator's next 
 plain: after the restart an unlock or an init. An answer after which the process exits is written
 before the listener closes (Shutdown within 2 s). One init or unlock at a time: another one in
 flight gets 429.
+
+SIGTERM in the stretch of an init with a card writes no container after it: the init answers
+`shutdown, no container`. A stretch longer than the 2 s of Shutdown loses that answer, since the
+listener closes before it; the next start is locked without a file. A first circuit that is built
+within 2 s after SIGTERM is closed before the exit; a later one is left to the end of the process.
 
 The time of an open: the answer waits for the first circuit, and the mirror of the entry takes up
 to 30 attempts of 5 s each with a pause of 1 s, about 180 s, plus the dial and the link handshakes,
@@ -1043,7 +1048,7 @@ The log with -vault, every kind of line:
 | `vault written` | once in the life of a container |
 | `vault: not written: <write\|link\|memory\|sync>` | a failed attempt to write; the repeated answer after `sync` logs no line |
 | `vault: not pinned: <memory\|closed\|io>` | a pin that failed |
-| `contact card changed, refusing` | the stop of D-038 |
+| `contact card changed, refusing` | the stop after another card |
 | `conversation ended: <cause>`, `shutting down` | as without -vault |
 
 There is no `card_hash=`, `role=`, minute line, `e2e round trip in` or `e2e peer not reachable`:
@@ -1055,9 +1060,9 @@ the times of the lines are visible (LIMITATIONS). The operator takes the own car
 
 Restart and exit:
 
-- Any exit (SIGTERM, codes 1 and 3 of D-040, the answers `not started` and `not pinned`, OOM, a
-  node rollout) leads to a locked start: the orchestrator restarts the process and the
-  conversation waits for the operator's unlock. The client fails closed.
+- Any exit (SIGTERM, codes 1 and 3 of the conversation driver, the answers `not started` and
+  `not pinned`, OOM, a node rollout) leads to a locked start: the orchestrator restarts the
+  process and the conversation waits for the operator's unlock. The client fails closed.
 - Before the write a restart loses the new profile: init again, a new identity.
 - The stopped state is not kept in the file: after a restart the unlock restores the original pin,
   and another card stops the client again. Leaving that contact takes a new container.
