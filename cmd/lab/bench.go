@@ -40,8 +40,8 @@ type benchCall struct {
 
 var procsSuffix = regexp.MustCompile(`-(\d+)$`)
 
-// the -<procs> suffix is optional: go test leaves it out when GOMAXPROCS is 1.
-// No sub-benchmark of block 6 ends in -<digits>, so a trailing one is the
+// the -<procs> suffix is optional, go test leaves it out when GOMAXPROCS is 1;
+// no sub-benchmark of block 6 ends in -<digits>, so a trailing one is the
 // suffix
 func splitProcs(name string) (string, int) {
 	if m := procsSuffix.FindStringSubmatchIndex(name); m != nil {
@@ -165,7 +165,7 @@ type benchReport struct {
 	SuiteRatio   []benchRatio    `json:"suite_ratio"`
 	KeysRatio    []benchRatio    `json:"keys_ratio"`
 	MlockRatio   []benchRatio    `json:"mlock_ratio"`
-	Expected     []benchExpected `json:"expected_setup_ns"`
+	Expected     []benchExpected `json:"expected_setup"`
 }
 
 var callFile = regexp.MustCompile(`^call-([1-9][0-9]*)\.txt$`)
