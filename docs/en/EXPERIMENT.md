@@ -1094,12 +1094,12 @@ more than three layers into a setup cell, so the block has no level above three 
 |---|---|
 | Key agreement | go test -bench, nanoseconds per operation, GOST against X25519 |
 | Setup at a node | BenchmarkSetupAtNode (relay), `<suite>/keys=1/keymem=<level>`, `keys=2/layer=current` and `keys=2/layer=previous`: nanoseconds, bytes and allocations of one setup s_k with k live onion keys, that is the ring opening the layer under every live key, the hop key and the release of the cell key, with no link, extension or network; with an identity key; the cell of a one-node setup, the longest layer. With two keys the ring tries both to the end, and a wrong key fails only at the AEAD. Bytes and allocations count the Go heap only: secmem buffers off the heap are not in them |
-| Setup during the grace period | a model, not a measurement: s̄ = (1 - d) s_1 + d s_2, d = (TTL + Skew)/R; on the testbed TTL is 20 minutes, Skew 2 minutes, R 1 hour, d = 22/60. It holds when setups arrive evenly, and `-set bench` writes it with the label model_uniform_arrivals. The testbed clients build their circuits at start, so s̄ describes a node with even setups, not the testbed |
+| Setup during the grace period | a model, not a measurement: s̄ = (1 - d) s_1 + d s_2, d = (TTL + Skew)/R, s_2 the mean of the setup medians under the current and under the previous key, that is the setups of the grace period split evenly between the keys; on the testbed TTL is 20 minutes, Skew 2 minutes, R 1 hour, d = 22/60. It holds when setups arrive evenly, and `-set bench` writes it with the label model_uniform_arrivals. The testbed clients build their circuits at start, so s̄ describes a node with even setups, not the testbed |
 | Layer operations | nanoseconds, bytes and allocations per cell, by position: the client BenchmarkSeal `hops=1, 2, 3` with the full payload MaxPayload(h) and BenchmarkOpenExit `hops=3`; the entry and the middle BenchmarkPeel `pos=entry, middle`; the exit BenchmarkOpenLast and BenchmarkSealReply with a reply of 128 bytes; the middle and the entry on the way back BenchmarkWrap `pos=middle, entry`. Link encryption, system calls and node mutexes are not in it; the random refill inside Peel and Wrap is |
 | Latency by hop count | the latency part: 1, 2 and 3 nodes, immediate sending, nodes forwarding at once, `-flows` flows with exponential gaps of mean `-send`, every echo of the run; p50, p95, p99 of the run with the tail rule; the increment per hop Δ_r(h) = L_r(h) - L_r(h - 1) within the pair of one repeat, the median of the differences |
 | Chain throughput | the chain part: a chain of three nodes, every node and client in one process, a closed loop, no cover and no pinning; X = N/(D - w) messages per second from the echoes that arrived in the window, on a ladder of the number of flows F; U_proc = ΔCPU of the process / ((D - w) GOMAXPROCS). It is the capacity of the whole testbed process on the host, not a figure of a node |
 | Goodput | in the chain and node parts: G_mean = Σ_f N_f P / ((D - w) F) and G_min = min_f N_f P / (D - w) bytes per second per client, P = MaxPayload(h) bytes one way, an echo not counted a second time |
-| Node throughput | the node part, linux only: the exit of a one-node chain in a child process on n pinned logical CPUs, one per core and in one L3 group by the topology the OS sees, the SMT siblings of the node CPUs given to nobody; under a hypervisor these are guest vCPUs with no promise of physical cores, and the row writes virtualized. The load generator runs on other CPUs, k circuits per CPU. T cells forward per second, each with a reply, from the node's counters and clock; c = ΔCPU of the node / Δcells, core-nanoseconds per cell; the bottleneck class node_cpu, generator or other, other not telling the node from the generator; T_sat is given only with a plateau and a node_cpu majority; c is compared only at the saturated step among node_cpu runs; E_n = T(n)/(n T(1)) is descriptive, and the frequency and the shared resources of the processor are in it |
+| Node throughput | the node part, linux only: the exit of a one-node chain in a child process on n pinned logical CPUs, one per core and in one L3 group by the topology the OS sees, the SMT siblings of the node CPUs given to nobody; under a hypervisor these are guest vCPUs with no promise of physical cores, and the row writes virtualized. The load generator runs on other CPUs, k circuits per CPU. T cells forward per second, each with a reply, from the node's counters and clock; c = ΔCPU of the node / Δcells, core-nanoseconds per cell; the bottleneck class node_cpu, generator or other, other not telling the node from the generator; T_sat is given only with a plateau and a node_cpu majority; c is compared and summarised only at the saturated step K, that is with T_sat on every line of the comparison, among node_cpu runs, otherwise null with the reason unsaturated; E_n = T(n)/(n T(1)) is descriptive, over pairs of node_cpu runs at step K with T_sat on lines n and 1, the dropped pairs in dropped_pairs, and the frequency and the shared resources of the processor are in it |
 | Cost of mlock | the levels all (every memory measure) and nolock (the same measures without locking), which differ in locking alone; in the chain and latency parts the level holds for the whole testbed process, in the node part for the child node only, the generator never locks. The setup descriptively from the benchmarks; the cell by equivalence of the ratio all/nolock of X and T at the last step and of p50 at three hops, of X and T only when both levels saturate. No secmem buffer is on the path of a cell, which TestCellPathCreatesNoKey (wire) and TestEchoPathCreatesNoKey (relay, a live chain) check |
 | End-to-end layer | go test -bench, nanoseconds per KK handshake of both sides and per record of the hash ratchet, GOST against X25519 |
 | Key from a password | go test -bench (BenchmarkPasswordKey), wall and processor time per call, Argon2id against PBKDF2 with Streebog-512 |
@@ -1156,7 +1156,8 @@ run.
   is rising, declined (a fall at the last step is not saturation), short or undefined. The last
   step is taken, not the maximum: the maximum of noisy medians is biased upwards. In the node part
   T_sat is given only when the plateau is reached and a strict majority of the clean runs of step K
-  are of class node_cpu; otherwise the reason is generator or unattributed.
+  are of class node_cpu; otherwise the reason is generator or unattributed. The summary writes the
+  number of clean runs of every step (ladder_clean_runs).
 - Bottleneck class: U_node is the busy share of the node CPUs from /proc/stat (user, nice, system,
   irq, softirq), U_par the load of the generator CPUs; node_cpu when U_node >= 0.9, generator when
   U_node < 0.9 and U_par >= 0.9, other otherwise. other does not separate a node held by something
@@ -1175,7 +1176,12 @@ run.
   the summary writes foreign_trend, the median of foreign_cores at the last step minus that at the
   first, clean and noisy runs together. On the pilot on a quiet host foreign_trend must stay at most
   0.1 core on every saturation line, otherwise the formula and the threshold are revised before the
-  series. loadavg before and after is written and is no threshold.
+  series. loadavg before and after is written and is no threshold. A series run whose /proc/stat
+  was not read (noise_checked = false) is not clean, and the summary counts such runs
+  (noise_unchecked_runs). Without interrupt time accounting a softirq handled in the context of a
+  task lands in its system time by getrusage, and in /proc/stat in the softirq column, which busy
+  leaves out: own then exceeds busy, foreign_cores is 0 and hides foreign work up to that amount.
+  The pilot checks whether foreign_cores is 0 in every run of the chain part.
 - A CPU here is a logical CPU as the OS sees it. Under a hypervisor (WSL2, Docker Desktop, any VM)
   it is a guest vCPU: pinning holds a thread on a vCPU, not on a physical core, the hypervisor sets
   the SMT and L3 topology, and the host's work outside the guest is not visible. The row carries
@@ -1199,6 +1205,14 @@ run.
   ok line for both packages, with a FAIL line or missing any leaf is dropped whole (dropped_calls);
   pairs are built by call number. Within a call c25519 always goes first, and a linear drift within
   a call shifts the ratio.
+- The tail rule: a quantile q of a run is written only with at least ceil(10/(1 - q)) samples,
+  that is 20, 200 and 1000 for p50, p95 and p99, otherwise null; such a run stays out of the
+  median and the increments of that quantile. With the values set before the series a latency run
+  sends about 2000 messages (4 flows, D 10 s, a mean gap of 20 ms).
+- mlock claims: one per part and per n of the node part, on each suite; with the values set before
+  the series m = 2 (1 + 3 + 1) = 10 (chain, n 1, 2, 4, latency), and the interval level is
+  1 - 0.05/m. When a series runs as several invocations, `-claims` sets the m of the whole series,
+  at least the number of claims of the invocation.
 - Goodput at a constant client rate: the ceiling MaxPayload(h)/Rate by construction of the
   schedule, one cell per tick. This is a formula, not a measurement.
 - Values set before the series: the equivalence margin δ 0.05, tol 0.05, the class threshold 0.9,
@@ -1206,7 +1220,9 @@ run.
   4 CPUs, for latency 4 flows and a mean gap of 20 ms. The size of the series comes from a pilot of
   five repeats on the same revision and the same host: resampling the ratios of the pilot with the
   same interval of the median at the same level (repeats_for_power in the summary), at least 30
-  repeats. A pilot claim with the reason unsaturated first calls for a revised ladder. The series
+  repeats. The pilot ratios are divided by their median before resampling, so repeats_for_power is
+  the size at no effect with the spread of the pilot; at a true ratio other than 1 the power is
+  lower. A pilot claim with the reason unsaturated first calls for a revised ladder. The series
   runs on linux entirely, with the cluster stopped and no builds on the host; rows of other systems
   are marked series_eligible = false, and summaries of different systems are not mixed.
 
@@ -1399,8 +1415,9 @@ One convention for the full series of block 1
 ([#116](https://github.com/jimichi-org/jimichi/issues/116)), 3
 ([#117](https://github.com/jimichi-org/jimichi/issues/117)), 6 and 7. The procedures are implemented
 once in lab/metrics (stats.go) and checked by tests with hand-computed answers; the summary of block
-7 calls them (Wilcoxon, Holm, the quantile interval, equivalence), the summaries of the other blocks
-will call them with their series.
+7 calls them (Wilcoxon, Holm, the quantile interval, equivalence), the summary of block 6 the
+quantile interval and equivalence, the summaries of the other blocks will call them with their
+series.
 
 Procedures:
 
