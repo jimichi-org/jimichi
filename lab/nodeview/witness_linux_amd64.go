@@ -6,8 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
+	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -182,19 +185,19 @@ type hostStat struct {
 	ok                 bool
 }
 type taskWitness struct {
-	routes                [][3]uint8
-	relays                [5]relayWitness
-	relayCount            int
-	clients               []clientWitness
-	unanswered            uint64
-	recorded              bool
-	marked                bool
-	startNS, endNS        int64
-	startCPU, endCPU      uint64
-	host                  [2]hostStat
-	cgroup                [2]uint64
-	cgroupOK              bool
-	nproc, cpuLimitMillis int
+	routes           [][3]uint8
+	relays           [5]relayWitness
+	relayCount       int
+	clients          []clientWitness
+	unanswered       uint64
+	recorded         bool
+	marked           bool
+	startNS, endNS   int64
+	startCPU, endCPU uint64
+	host             [2]hostStat
+	cgroup           [2]uint64
+	cgroupOK         bool
+	cpu              cpuCgroup
 }
 
 type taskWitnessKey struct{}
@@ -208,8 +211,67 @@ func taskWitnessFrom(ctx context.Context) *taskWitness {
 	return w
 }
 
-func cgroupUsage() (uint64, bool) {
-	b, e := os.ReadFile("/sys/fs/cgroup/cpu.stat")
+type cpuCgroup struct {
+	dir         string
+	limitMillis uint64
+	limitKnown  bool
+}
+
+func processCPUCgroup() cpuCgroup {
+	membership, e1 := os.ReadFile("/proc/self/cgroup")
+	mounts, e2 := os.ReadFile("/proc/self/mountinfo")
+	if e1 != nil || e2 != nil {
+		return cpuCgroup{}
+	}
+	return resolveCPUCgroup(membership, mounts, os.ReadFile)
+}
+
+// a quota on any visible ancestor caps the process, so the limit is the minimum from leaf to mount
+func resolveCPUCgroup(membership, mounts []byte, read func(string) ([]byte, error)) cpuCgroup {
+	_, group, err := parseMemoryMembership(membership)
+	if err != nil || group.version != 2 {
+		return cpuCgroup{}
+	}
+	resolved, err := resolveMemoryMounts(mounts, group)
+	if err != nil {
+		return cpuCgroup{}
+	}
+	group = resolved[0]
+	leaf, err := memoryCgroupDirectory(group)
+	if err != nil {
+		return cpuCgroup{}
+	}
+	unknown := cpuCgroup{dir: leaf}
+	// without cpu in the unified hierarchy a quota may live in a v1 hierarchy this walk cannot see
+	controllers, err := read(path.Join(group.mount, "cgroup.controllers"))
+	if err != nil || !slices.Contains(strings.Fields(string(controllers)), "cpu") {
+		return unknown
+	}
+	out := cpuCgroup{dir: leaf, limitKnown: true}
+	for dir := leaf; ; dir = path.Dir(dir) {
+		b, err := read(path.Join(dir, "cpu.max"))
+		if err == nil {
+			millis, limited, ok := parseCPULimit(string(b))
+			if !ok {
+				return unknown
+			}
+			if limited && (out.limitMillis == 0 || millis < out.limitMillis) {
+				out.limitMillis = millis
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return unknown
+		}
+		if dir == group.mount {
+			return out
+		}
+	}
+}
+
+func cgroupUsage(dir string) (uint64, bool) {
+	if dir == "" {
+		return 0, false
+	}
+	b, e := os.ReadFile(path.Join(dir, "cpu.stat"))
 	if e != nil {
 		return 0, false
 	}
@@ -231,7 +293,8 @@ func (w *taskWitness) mark() {
 	w.marked = true
 	w.startNS, w.startCPU = monotonicNS(), selfCPU()
 	w.host[0] = readHostStat()
-	w.cgroup[0], w.cgroupOK = cgroupUsage()
+	w.cpu = processCPUCgroup()
+	w.cgroup[0], w.cgroupOK = cgroupUsage(w.cpu.dir)
 }
 
 func recordTaskWitness(ctx context.Context, f *fixture, clients []*ownedChild, routes [][3]uint8, row RunResult) {
@@ -242,7 +305,7 @@ func recordTaskWitness(ctx context.Context, f *fixture, clients []*ownedChild, r
 	w.endNS, w.endCPU = monotonicNS(), selfCPU()
 	w.host[1] = readHostStat()
 	var ok bool
-	w.cgroup[1], ok = cgroupUsage()
+	w.cgroup[1], ok = cgroupUsage(w.cpu.dir)
 	w.cgroupOK = w.cgroupOK && ok
 	w.routes = append(w.routes[:0], routes...)
 	w.relayCount = min(len(f.relays), len(w.relays))
@@ -287,25 +350,23 @@ func parseHostStat(text string) hostStat {
 	return hostStat{busy: total - v[3] - v[4], steal: v[7], total: total, ok: true}
 }
 
-func readCPULimit() (uint64, bool) {
-	b, e := os.ReadFile("/sys/fs/cgroup/cpu.max")
-	if e != nil {
-		return 0, false
-	}
-	return parseCPULimit(string(b))
-}
-
-func parseCPULimit(text string) (uint64, bool) {
+func parseCPULimit(text string) (millis uint64, limited, ok bool) {
 	f := strings.Fields(text)
-	if len(f) != 2 || f[0] == "max" {
-		return 0, false
+	if len(f) != 2 {
+		return 0, false, false
 	}
-	quota, e1 := strconv.ParseUint(f[0], 10, 64)
-	period, e2 := strconv.ParseUint(f[1], 10, 64)
-	if e1 != nil || e2 != nil || period == 0 || quota > math.MaxUint64/1000 {
-		return 0, false
+	period, e := strconv.ParseUint(f[1], 10, 64)
+	if e != nil || period == 0 {
+		return 0, false, false
 	}
-	return quota * 1000 / period, true
+	if f[0] == "max" {
+		return 0, false, true
+	}
+	quota, e := strconv.ParseUint(f[0], 10, 64)
+	if e != nil || quota > math.MaxUint64/1000 || quota*1000/period == 0 {
+		return 0, false, false
+	}
+	return quota * 1000 / period, true, true
 }
 
 func stealPPM(h [2]hostStat) (uint64, bool) {
@@ -337,7 +398,7 @@ func optional(v uint64, ok bool) string {
 	return strconv.FormatUint(v, 10)
 }
 
-func (w *taskWitness) lines(suite, name, exec, outcome string, nproc int, cpuLimitMillis uint64, gomaxprocs int) []string {
+func (w *taskWitness) lines(suite, name, exec, outcome string, nproc, gomaxprocs int) []string {
 	head := fmt.Sprintf("nodeview-witness v1 suite=%s case=%s exec=%s outcome=%s", suite, name, exec, outcome)
 	if !w.recorded {
 		return []string{head + " witness absent"}
@@ -364,15 +425,19 @@ func (w *taskWitness) lines(suite, name, exec, outcome string, nproc int, cpuLim
 			rebuiltNonzero++
 		}
 	}
-	limit := "none"
-	if cpuLimitMillis != 0 {
-		limit = strconv.FormatUint(cpuLimitMillis, 10)
+	limit, utilization := "unknown", "none"
+	if w.cpu.limitKnown {
+		limit = "none"
+		if w.cpu.limitMillis != 0 {
+			limit = strconv.FormatUint(w.cpu.limitMillis, 10)
+		}
+		utilization = strconv.FormatUint(utilizationPPM(children+controller, wall, nproc, w.cpu.limitMillis), 10)
 	}
 	cgroup := "none"
 	if w.cgroupOK && w.cgroup[1] >= w.cgroup[0] {
 		cgroup = strconv.FormatUint((w.cgroup[1]-w.cgroup[0])/1000, 10)
 	}
-	out := []string{fmt.Sprintf("%s rebuilt_total=%d unanswered=%d wall_ms=%d nproc=%d cpu_limit_millis=%s gomaxprocs=%d children_cpu_ms=%d controller_cpu_ms=%d utilization_ppm=%d host_steal_ppm=%s cgroup_cpu_ms=%s", head, rebuilt, w.unanswered, max(wall, 0)/1000000, nproc, limit, gomaxprocs, ms(children), ms(controller), utilizationPPM(children+controller, wall, nproc, cpuLimitMillis), optional(steal, stealOK), cgroup)}
+	out := []string{fmt.Sprintf("%s rebuilt_total=%d unanswered=%d wall_ms=%d nproc=%d cpu_limit_millis=%s gomaxprocs=%d children_cpu_ms=%d controller_cpu_ms=%d utilization_ppm=%s host_steal_ppm=%s cgroup_cpu_ms=%s", head, rebuilt, w.unanswered, max(wall, 0)/1000000, nproc, limit, gomaxprocs, ms(children), ms(controller), utilization, optional(steal, stealOK), cgroup)}
 	base, baseOK := routeConnections(w.routes, make([]uint64, len(w.routes)))
 	predicted, predictedOK := routeConnections(w.routes, perClient)
 	for i, r := range w.relays[:w.relayCount] {

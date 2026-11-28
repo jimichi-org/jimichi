@@ -31,8 +31,7 @@ func witnessTask(t *testing.T, ctx context.Context, suite, name string) (context
 		if t.Failed() {
 			outcome = "fail"
 		}
-		limit, _ := readCPULimit()
-		for _, line := range p.witness.lines(suite, name, p.exec, outcome, runtime.NumCPU(), limit, runtime.GOMAXPROCS(0)) {
+		for _, line := range p.witness.lines(suite, name, p.exec, outcome, runtime.NumCPU(), runtime.GOMAXPROCS(0)) {
 			t.Log(line)
 		}
 		clear(p.witness.routes)

@@ -9,6 +9,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"slices"
@@ -254,7 +255,7 @@ func TestTaskWitnessLines(t *testing.T) {
 	if got := utilizationPPM(3000000000, 1500000000, 32, 0); got != 62500 {
 		t.Fatal("utilization without quota", got)
 	}
-	w := &taskWitness{routes: [][3]uint8{{0, 1, 4}, {2, 3, 4}}, relayCount: 5, unanswered: 0, recorded: true, startNS: 1000000000, endNS: 2500000000, startCPU: 100000000, endCPU: 600000000, host: [2]hostStat{{total: 1000, steal: 10, ok: true}, {total: 2000, steal: 30, ok: true}}}
+	w := &taskWitness{routes: [][3]uint8{{0, 1, 4}, {2, 3, 4}}, relayCount: 5, unanswered: 0, recorded: true, startNS: 1000000000, endNS: 2500000000, startCPU: 100000000, endCPU: 600000000, host: [2]hostStat{{total: 1000, steal: 10, ok: true}, {total: 2000, steal: 30, ok: true}}, cpu: cpuCgroup{limitMillis: 2000, limitKnown: true}}
 	w.relays[0].summary[19] = 2
 	w.relays[0].cpuNS = 1000000000
 	w.relays[1].summary[19] = 2
@@ -269,7 +270,7 @@ func TestTaskWitnessLines(t *testing.T) {
 	w.clients = []clientWitness{{rebuilt: 0, cpuNS: 500000000}, {rebuilt: 0, cpuNS: 0}}
 	w.clients[1].tail.values[0], w.clients[1].tail.values[1], w.clients[1].tail.values[2] = 4, uint64(phaseLead), latchOffset(850000000, 1000000000)
 	w.clients[0].tail.values[3] = 2
-	lines := w.lines("gost", "trusted-admission", "ok", "pass", 32, 2000, 4)
+	lines := w.lines("gost", "trusted-admission", "ok", "pass", 32, 4)
 	// children 2.5 s + controller 0.5 s over 1.5 s on 2 cpus: 1e6 ppm; steal 20/1000
 	want := []string{
 		"nodeview-witness v1 suite=gost case=trusted-admission exec=ok outcome=pass rebuilt_total=0 unanswered=0 wall_ms=1500 nproc=32 cpu_limit_millis=2000 gomaxprocs=4 children_cpu_ms=2500 controller_cpu_ms=500 utilization_ppm=1000000 host_steal_ppm=20000 cgroup_cpu_ms=none",
@@ -288,7 +289,16 @@ func TestTaskWitnessLines(t *testing.T) {
 			}
 		}
 	}
-	absent := (&taskWitness{}).lines("c25519", "trusted-admission", "err", "fail", 4, 0, 4)
+	w.cpu = cpuCgroup{}
+	if head := w.lines("gost", "trusted-admission", "ok", "pass", 32, 4)[0]; !strings.Contains(head, " cpu_limit_millis=unknown gomaxprocs=4 ") || !strings.Contains(head, " utilization_ppm=none ") {
+		t.Fatal("unresolved quota printed as a figure", head)
+	}
+	w.cpu = cpuCgroup{limitKnown: true}
+	// no quota on the path: 3e9*1e6/(1.5e9*32) = 62500
+	if head := w.lines("gost", "trusted-admission", "ok", "pass", 32, 4)[0]; !strings.Contains(head, " cpu_limit_millis=none gomaxprocs=4 ") || !strings.Contains(head, " utilization_ppm=62500 ") {
+		t.Fatal("unlimited path", head)
+	}
+	absent := (&taskWitness{}).lines("c25519", "trusted-admission", "err", "fail", 4, 4)
 	if len(absent) != 1 || absent[0] != "nodeview-witness v1 suite=c25519 case=trusted-admission exec=err outcome=fail witness absent" {
 		t.Fatal(absent)
 	}
@@ -306,11 +316,16 @@ func TestHostStatParse(t *testing.T) {
 	if ppm, ok := stealPPM([2]hostStat{a, b}); !ok || ppm != 22222 {
 		t.Fatal(ppm)
 	}
-	if limit, ok := parseCPULimit("200000 100000\n"); !ok || limit != 2000 {
+	if limit, limited, ok := parseCPULimit("200000 100000\n"); !ok || !limited || limit != 2000 {
 		t.Fatal(limit)
 	}
-	if _, ok := parseCPULimit("max 100000\n"); ok {
+	if _, limited, ok := parseCPULimit("max 100000\n"); !ok || limited {
 		t.Fatal("max parsed as a limit")
+	}
+	for _, bad := range []string{"", "max", "200000 0", "x 100000", "1 100000"} {
+		if _, _, ok := parseCPULimit(bad); ok {
+			t.Fatal("malformed cpu.max accepted", bad)
+		}
 	}
 	if v, ok := parseCgroupUsage("usage_usec 1234\nuser_usec 1000\n"); !ok || v != 1234 {
 		t.Fatal(v)
@@ -363,5 +378,76 @@ func TestDialCounters(t *testing.T) {
 	}
 	if b.dials != (dialCounts{attempts: 2, failures: 1}) || b.dialsAfter != (dialCounts{attempts: 1, failures: 1}) {
 		t.Fatalf("%+v %+v", b.dials, b.dialsAfter)
+	}
+}
+
+func cpuCgroupFiles(files map[string]string) func(string) ([]byte, error) {
+	return func(name string) ([]byte, error) {
+		if v, ok := files[name]; ok {
+			return []byte(v), nil
+		}
+		return nil, fs.ErrNotExist
+	}
+}
+
+func TestResolveCPUCgroup(t *testing.T) {
+	mount := []byte("437 436 0:21 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n")
+	leaf := "/sys/fs/cgroup/docker/abc"
+	// docker --cgroupns host --cpus 2: the quota is on the leaf, the mount root has no cpu.max
+	host := map[string]string{
+		"/sys/fs/cgroup/cgroup.controllers": "cpuset cpu io memory pids\n",
+		"/sys/fs/cgroup/docker/cpu.max":     "max 100000\n",
+		leaf + "/cpu.max":                   "200000 100000\n",
+	}
+	got := resolveCPUCgroup([]byte("0::/docker/abc\n"), mount, cpuCgroupFiles(host))
+	if got != (cpuCgroup{dir: leaf, limitMillis: 2000, limitKnown: true}) {
+		t.Fatal("nested quota", got)
+	}
+	// R1-gost-cpus2: 66202 + 1741 ms of cpu over 35134 ms on min(32 cpus, 2000 millis), so
+	// 67943e6*1e6*1000/(35134e6*2000) = 966912; the old root-only read divided by 32 and printed 60432
+	if u := utilizationPPM(67943000000, 35134000000, 32, got.limitMillis); u != 966912 {
+		t.Fatal("R1 utilization", u)
+	}
+	if u := utilizationPPM(67943000000, 35134000000, 32, 0); u != 60432 {
+		t.Fatal("R1 utilization over nproc", u)
+	}
+	// an ancestor quota of 1.5 cpus below the leaf's 2 caps the process at 1500
+	host["/sys/fs/cgroup/docker/cpu.max"] = "150000 100000\n"
+	if got := resolveCPUCgroup([]byte("0::/docker/abc\n"), mount, cpuCgroupFiles(host)); got.limitMillis != 1500 || !got.limitKnown {
+		t.Fatal("ancestor quota", got)
+	}
+	// private cgroup namespace: the process is at the namespace root, its quota at the mount
+	private := map[string]string{
+		"/sys/fs/cgroup/cgroup.controllers": "cpu memory\n",
+		"/sys/fs/cgroup/cpu.max":            "400000 100000\n",
+	}
+	if got := resolveCPUCgroup([]byte("0::/\n"), mount, cpuCgroupFiles(private)); got != (cpuCgroup{dir: "/sys/fs/cgroup", limitMillis: 4000, limitKnown: true}) {
+		t.Fatal("namespace root", got)
+	}
+	runner := map[string]string{"/sys/fs/cgroup/cgroup.controllers": "cpu memory\n", "/sys/fs/cgroup/system.slice/cpu.max": "max 100000\n"}
+	if got := resolveCPUCgroup([]byte("0::/system.slice/runner.service\n"), mount, cpuCgroupFiles(runner)); got != (cpuCgroup{dir: "/sys/fs/cgroup/system.slice/runner.service", limitKnown: true}) {
+		t.Fatal("no quota", got)
+	}
+	for name, c := range map[string]struct {
+		membership string
+		files      map[string]string
+	}{
+		"v1 only":            {"4:cpu,cpuacct:/docker/abc\n", host},
+		"cpu not unified":    {"0::/docker/abc\n", map[string]string{"/sys/fs/cgroup/cgroup.controllers": "memory pids\n"}},
+		"malformed cpu.max":  {"0::/docker/abc\n", map[string]string{"/sys/fs/cgroup/cgroup.controllers": "cpu\n", leaf + "/cpu.max": "2 cpus\n"}},
+		"membership invalid": {"0::docker\n", host},
+	} {
+		if got := resolveCPUCgroup([]byte(c.membership), mount, cpuCgroupFiles(c.files)); got.limitKnown || got.limitMillis != 0 {
+			t.Fatal(name, got)
+		}
+	}
+	denied := func(name string) ([]byte, error) {
+		if name == leaf+"/cpu.max" {
+			return nil, fs.ErrPermission
+		}
+		return cpuCgroupFiles(host)(name)
+	}
+	if got := resolveCPUCgroup([]byte("0::/docker/abc\n"), mount, denied); got.limitKnown {
+		t.Fatal("unreadable cpu.max", got)
 	}
 }
