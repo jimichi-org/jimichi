@@ -1,0 +1,81 @@
+name: nodeview-batch
+
+on:
+  push:
+    branches: [fix/210-trusted32]
+
+permissions:
+  contents: read
+
+jobs:
+  nodeview:
+    if: github.run_attempt == 1
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: optimized controlled-node observation integration
+        env:
+          PR_HEAD: ''
+          BASE_SHA: ac3fe3137729d21393c1db422c956cddca35ffc7
+        run: |
+          sudo prlimit --pid "$$" --memlock=536870912:536870912
+          bin="$RUNNER_TEMP/nodeview.test"
+          log="$RUNNER_TEMP/nodeview-optimized.log"
+          go test -c -o "$bin" ./lab/nodeview
+          {
+            printf 'nodeview-identity commit=%s pr_head=%s tree=%s tree_changes=%s\n' "$(git rev-parse HEAD)" "${PR_HEAD:-none}" "$(git rev-parse 'HEAD^{tree}')" "$(git status --porcelain | wc -l)"
+            printf 'nodeview-identity go=%s goamd64=%s cgo=%s goflags=%s\n' "$(go env GOVERSION)" "$(go env GOAMD64)" "$(go env CGO_ENABLED)" "$(go env GOFLAGS)"
+            printf 'nodeview-identity test_binary_sha256=%s\n' "$(sha256sum "$bin" | cut -d' ' -f1)"
+            go version -m "$bin" | sed -n 's/^[[:space:]]*build[[:space:]]/nodeview-identity build /p'
+            printf 'nodeview-identity image=%s/%s runner=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}" "${RUNNER_NAME:-unknown}"
+            printf 'nodeview-identity kernel=%s vcpu=%s cpu_max=%s\n' "$(uname -r)" "$(nproc)" "$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo none)"
+            lscpu | sed -n 's/^\(Model name\|Thread(s) per core\|Core(s) per socket\|Socket(s)\|L3 cache\):[[:space:]]*/nodeview-identity \1=/p'
+            printf 'nodeview-identity tcp_tw_reuse=%s port_range=%s\n' "$(cat /proc/sys/net/ipv4/tcp_tw_reuse)" "$(tr '\t' '-' < /proc/sys/net/ipv4/ip_local_port_range)"
+          }
+          if [ -n "${BASE_SHA:-}" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+            for side in head base; do
+              dir=.; [ "$side" = base ] && dir="$RUNNER_TEMP/base"
+              for cmd in relay client lab; do
+                (cd "$dir" && go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/$side-$cmd" "./cmd/$cmd")
+                printf 'nodeview-identity side=%s cmd=%s sha256=%s\n' "$side" "$cmd" "$(sha256sum "$RUNNER_TEMP/$side-$cmd" | cut -d' ' -f1)"
+              done
+            done
+            for cmd in relay client; do
+              same=no
+              cmp -s "$RUNNER_TEMP/head-$cmd" "$RUNNER_TEMP/base-$cmd" && same=yes
+              printf 'nodeview-identity cmd=%s unchanged_from_base=%s\n' "$cmd" "$same"
+            done
+          else
+            printf 'nodeview-identity base=none\n'
+          fi
+          (cd lab/nodeview && "$bin" -test.paniconexit0 -test.count=1 -test.timeout=20m -test.v -test.run '^TestNodeViewLiveOptimized$') > "$log" 2>&1 || { cat "$log"; exit 1; }
+          cat "$log"
+          if grep -Eq -- '--- SKIP: TestNodeViewLiveOptimized|warning: no tests to run' "$log"; then
+            exit 1
+          fi
+          test "$(grep -c -- '--- PASS: TestNodeViewLiveOptimized' "$log")" -eq 19
+          grep -Fq -- '--- PASS: TestNodeViewLiveOptimized (' "$log"
+          for suite in c25519 gost; do
+            grep -Fq -- "--- PASS: TestNodeViewLiveOptimized/$suite (" "$log"
+            for case in one-role two-edge two-adjacent-first two-adjacent-last trusted-admission foreign-peer foreign-mailbox mailbox-records; do
+              grep -Fq -- "--- PASS: TestNodeViewLiveOptimized/$suite/$case (" "$log"
+            done
+          done
+          for suite in c25519 gost; do
+            grep -Fq -- "nodeview-witness v1 suite=$suite case=trusted-admission exec=ok outcome=pass rebuilt_total=" "$log"
+            for relay in 0 1 2 3 4; do
+              grep -Fq -- "nodeview-witness v1 suite=$suite relay=$relay " "$log"
+            done
+            grep -Fq -- "nodeview-witness v1 suite=$suite clients n=32 " "$log"
+          done
