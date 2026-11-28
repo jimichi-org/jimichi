@@ -204,6 +204,10 @@ func TestInitialClientObserverCauseSurvivesReadyAndTerminal(t *testing.T) {
 		row.u64()
 		row.u64()
 		counts := decodeCounts(row)
+		tail, tailErr := decodeChildWitness(row, roleClient)
+		if tailErr != nil || tail.values[0] != uint64(reasonByte(cause)) || tail.values[1] != uint64(phaseBeforeBegin) || tail.values[2] != 0 || tail.values[8] != 0 || tail.values[12] != 0 {
+			t.Fatal("refused client terminal lost its witness tail")
+		}
 		if row.end() != nil || counts.Planned != 1 || counts.Attempted != 1 || counts.SetupFailed != 1 || counts.Refused != 0 || counts.Established != 0 {
 			t.Fatal("observer failure changed actual setup counts")
 		}

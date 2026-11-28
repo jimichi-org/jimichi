@@ -553,6 +553,9 @@ func executeTaskSource(ctx context.Context, c Config, task executionTask, models
 	if e := host.cohort(c.retainedRawBytes, len(plans)); e != nil {
 		return row, nil, nil, e
 	}
+	if w := taskWitnessFrom(ctx); w != nil {
+		w.mark()
+	}
 	f, e := newFixture(ctx, c.Suite, task.coordinate.Settings, topology, task.coordinate.Controlled, task.foreign, c.binarySHA, task.missing, fixtureResources{retained: c.retainedRawBytes, usage: c.resources, host: c.hostCapacity})
 	if e != nil {
 		row.Flags = []Reason{reasonOf(e)}
@@ -626,7 +629,7 @@ func executeTaskSource(ctx context.Context, c Config, task executionTask, models
 		row.Flags = []Reason{reasonOf(e)}
 		return row, nil, nil, e
 	}
-	drain := max(int64(300000000), 12*(task.coordinate.Settings.RateNS+task.coordinate.Settings.RelayPeriodNS))
+	drain := workloadDrain(task.coordinate.Settings)
 	if drain > 10000000000 {
 		row.Flags = []Reason{ReasonLimit}
 		return row, nil, nil, fail(ReasonLimit)
@@ -706,6 +709,7 @@ func executeTaskSource(ctx context.Context, c Config, task executionTask, models
 		row.Flags = filtered
 	}
 	row.Counts.Unanswered = truth.resolveMessageReceipts()
+	recordTaskWitness(ctx, f, clients, task.routes, row)
 	for ni := range views.nodes {
 		shuffle := mathrand.New(mathrand.NewSource(nodeSeed(c, coordinateID(task.coordinate.ID), uint64(task.repeat), uint64(ni), lab.StreamNodeAnonymous)))
 		shuffle.Shuffle(len(views.nodes[ni].setups), func(i, j int) {
@@ -961,6 +965,10 @@ func executeTaskSource(ctx context.Context, c Config, task executionTask, models
 		return row, audit, training, fail(row.Flags[0])
 	}
 	return row, audit, training, nil
+}
+
+func workloadDrain(s Settings) int64 {
+	return max(int64(300000000), 12*(s.RateNS+s.RelayPeriodNS))
 }
 
 func mergeCounts(dst *Counts, src Counts) {

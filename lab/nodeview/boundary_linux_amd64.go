@@ -5,6 +5,7 @@ package nodeview
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -18,14 +19,72 @@ type boundaryClientState struct {
 	initialEnded, closeRequested bool
 	current                      uint32
 	initial                      uint32
+	until                        int64
+	ends                         circuitEnds
+	dials, dialsAfter            dialCounts
+	unanswered                   func() uint64
+	windowUnanswered             uint64
 }
 
+type circuitEnds struct {
+	replyTimeout, sendFailed, refused, farClose, after uint64
+}
+type dialCounts struct {
+	attempts, failures uint64
+}
+
+// until stays zero before the workload begins, and an end before then is still inside the window
+func (b *boundaryClientState) inWindow(now int64) bool { return b.until == 0 || now < b.until }
+
+// the conversation adds an end's unanswered requests before it reports the end, so the
+// count read here already holds this end
 func (b *boundaryClientState) event(e conversation.Event) {
 	if e.Kind == conversation.CircuitEnded {
+		now := monotonicNS()
+		b.mu.Lock()
+		read := b.unanswered
+		b.mu.Unlock()
+		var unanswered uint64
+		if read != nil {
+			unanswered = read()
+		}
 		b.mu.Lock()
 		b.initialEnded = true
+		if b.inWindow(now) {
+			b.windowUnanswered = max(b.windowUnanswered, unanswered)
+		}
+		switch {
+		case !b.inWindow(now):
+			b.ends.after++
+		case errors.Is(e.Cause, conversation.ErrReplyTimeout):
+			b.ends.replyTimeout++
+		case errors.Is(e.Cause, conversation.ErrSendFailed):
+			b.ends.sendFailed++
+		case e.Cause == nil:
+			b.ends.farClose++
+		default:
+			b.ends.refused++
+		}
 		b.mu.Unlock()
 	}
+}
+
+func countedDial(b *boundaryClientState, dial func() (*client.Client, uint32, error)) (*client.Client, uint32, error) {
+	next, generation, e := dial()
+	now := monotonicNS()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	counts := &b.dials
+	if !b.inWindow(now) {
+		counts = &b.dialsAfter
+	}
+	counts.attempts++
+	if e != nil {
+		counts.failures++
+		return nil, 0, e
+	}
+	b.current = generation
+	return next, generation, nil
 }
 
 func boundaryClientSettings(s Settings, side uint16, own, peer e2e.Card) (Settings, bool, error) {

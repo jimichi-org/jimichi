@@ -14,6 +14,7 @@ func monotonicNS() int64 {
 	}
 	return t.Nano()
 }
+func latchClock() int64 { return monotonicNS() }
 func clockResolution() (int64, error) {
 	var t unix.Timespec
 	if unix.ClockGetres(unix.CLOCK_MONOTONIC, &t) != nil || t.Nano() <= 0 || t.Nano() >= 10000 {

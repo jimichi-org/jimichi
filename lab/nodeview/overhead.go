@@ -12,7 +12,7 @@ func (c *collector) recordLocked(start int64, call bool) {
 	elapsed := uint64(end - start)
 	if math.MaxUint64-c.summary.CallbackNS < elapsed || call && c.summary.Calls == math.MaxUint64 {
 		c.observerValid = false
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteCallbackOverflow, 0)
 		return
 	}
 	c.summary.CallbackNS += elapsed
@@ -31,7 +31,9 @@ func (c *collector) inventory() {
 	c.summary.PendingHighWater = max(c.summary.PendingHighWater, uint64(c.pending()))
 	c.summary.ContextsHighWater = max(c.summary.ContextsHighWater, uint64(len(c.keys)+len(c.view.setups)))
 	c.summary.CellsHighWater = max(c.summary.CellsHighWater, uint64(len(c.view.cells)))
-	if c.summary.ContextsHighWater > maxContexts || c.summary.PendingHighWater > maxPendingFrames {
-		c.fail(ReasonLimit)
+	if c.summary.ContextsHighWater > maxContexts {
+		c.failAt(ReasonLimit, siteInventoryContexts, 0)
+	} else if c.summary.PendingHighWater > maxPendingFrames {
+		c.failAt(ReasonLimit, siteInventoryPending, 0)
 	}
 }

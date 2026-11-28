@@ -9,6 +9,7 @@ type lockedArena struct {
 	buffer           *secmem.Buffer
 	used, live, high int
 	free             []freeSpan
+	freeHigh         int
 	chunks           [8]*secmem.Buffer
 	maximum, chunk   int
 	allocated        int
@@ -118,6 +119,7 @@ func (a *lockedArena) copyChecked(b []byte) (arenaRef, error) {
 		}
 		if offset > a.used {
 			a.free = append(a.free, freeSpan{a.used, offset - a.used})
+			a.freeHigh = max(a.freeHigh, len(a.free))
 		}
 	}
 	r := arenaRef{offset, len(b)}
@@ -182,6 +184,7 @@ func (a *lockedArena) erase(r *arenaRef) {
 		i = 0
 	}
 	a.free = append(a.free, span)
+	a.freeHigh = max(a.freeHigh, len(a.free))
 	*r = arenaRef{}
 }
 

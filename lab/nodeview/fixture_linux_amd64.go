@@ -70,6 +70,8 @@ type ownedChild struct {
 	fitReason                             uint8
 	fitCount                              uint32
 	fitExpected                           uint64
+	cpuNS                                 uint64
+	witness                               childWitness
 }
 
 type fixture struct {
@@ -353,6 +355,7 @@ func (f *fixture) spawnExpected(role byte, selected bool, expected uint64) (*own
 	go func() {
 		executionErr := cmd.Wait()
 		child.maxRSS, child.usageErr = waitRSS(cmd.ProcessState)
+		child.cpuNS = waitCPU(cmd.ProcessState)
 		child.resource.record(child.maxRSS, child.usageErr)
 		child.exited <- executionErr
 	}()
@@ -816,6 +819,30 @@ func waitFrames(ctx context.Context, current *atomic.Uint64, want uint64, progre
 	}
 }
 
+type terminalFrame struct {
+	status                      byte
+	reason                      Reason
+	statusFrames, views, truths uint64
+	counts                      Counts
+	witness                     childWitness
+}
+
+func decodeTerminal(r *decoder, role byte) (terminalFrame, error) {
+	t := terminalFrame{status: r.u8(), reason: decodeReason(r), statusFrames: r.u64()}
+	t.views, t.truths = r.u64(), r.u64()
+	t.counts = decodeCounts(r)
+	if role == roleRelay || role == roleClient {
+		var e error
+		if t.witness, e = decodeChildWitness(r, role); e != nil {
+			return terminalFrame{}, e
+		}
+	}
+	if r.end() != nil || t.status > 3 && t.status != 130 || t.status == 0 && t.reason != ReasonNone || t.status != 0 && t.reason == ReasonNone {
+		return terminalFrame{}, fail(ReasonIPC)
+	}
+	return t, nil
+}
+
 func (f *fixture) finish() error {
 	until, _ := f.shutdownDeadlines()
 	for _, ch := range f.children {
@@ -823,19 +850,18 @@ func (f *fixture) finish() error {
 		if e != nil {
 			return e
 		}
-		status := r.u8()
-		reason := decodeReason(r)
-		statusFrames := r.u64()
-		views, truths := r.u64(), r.u64()
-		ch.counts = decodeCounts(r)
-		if r.end() != nil || statusFrames != ch.statusConsumed || status > 3 && status != 130 || status == 0 && reason != ReasonNone || status != 0 && reason == ReasonNone {
-			return fail(ReasonIPC)
-		}
-		ch.reason = reason
-		if e = waitFrames(f.ctx, &ch.viewFrames, views, ch.viewProgress, until); e != nil {
+		end, e := decodeTerminal(r, ch.role)
+		if e != nil {
 			return e
 		}
-		if e = waitFrames(f.ctx, &ch.truthFrames, truths, ch.truthProgress, until); e != nil {
+		if end.statusFrames != ch.statusConsumed {
+			return fail(ReasonIPC)
+		}
+		ch.counts, ch.witness, ch.reason = end.counts, end.witness, end.reason
+		if e = waitFrames(f.ctx, &ch.viewFrames, end.views, ch.viewProgress, until); e != nil {
+			return e
+		}
+		if e = waitFrames(f.ctx, &ch.truthFrames, end.truths, ch.truthProgress, until); e != nil {
 			return e
 		}
 		if ch.role == roleRelay && !ch.hasSummary {

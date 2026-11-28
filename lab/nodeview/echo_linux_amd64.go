@@ -401,13 +401,10 @@ func clientChild(c *childIO) (err error) {
 		clear(ownCard.Static)
 		ownCard = e2e.Card{}
 		dial := func() (conversation.Circuit, error) {
-			next, generation, e := dialObservedClient(cc, priv)
+			next, generation, e := countedDial(&boundaryState, func() (*client.Client, uint32, error) { return dialObservedClient(cc, priv) })
 			if e != nil {
 				return nil, e
 			}
-			boundaryState.mu.Lock()
-			boundaryState.current = generation
-			boundaryState.mu.Unlock()
 			return &observedCircuit{Circuit: next, private: priv, gate: gate, conversation: &conv, generation: generation}, nil
 		}
 		conv, e = conversation.Start(conversation.Config{Provider: op, Self: identity, Fetch: fetch, First: adapter, Dial: dial, Rate: time.Duration(cs.RateNS), CoverPuts: cs.CoverPuts, Window: cs.Window, ReplyTimeout: time.Duration(cs.ReplyTimeoutNS), Keepalive: time.Duration(cs.KeepaliveNS), StaleAfter: time.Duration(cs.StaleAfterNS), RebuildFor: time.Duration(cs.RebuildForNS), MaxRefusals: cs.MaxRefusals, Outbox: cs.Outbox, Hold: cs.Hold, Inbox: cs.Inbox, Session: e2e.Options{StaleFetches: cs.StaleFetches}, Events: boundaryState.event})
@@ -416,6 +413,10 @@ func clientChild(c *childIO) (err error) {
 			return fail(ReasonSetup)
 		}
 		close(gate)
+		started := conv
+		boundaryState.mu.Lock()
+		boundaryState.unanswered = func() uint64 { return started.Stats().Unanswered }
+		boundaryState.mu.Unlock()
 		receipt.ConversationCreated = true
 		defer func() { conv.Close(); receipt.ConversationClosed = true }()
 		if e = c.cancelledAt(initClientConversation); e != nil {
@@ -449,10 +450,15 @@ func clientChild(c *childIO) (err error) {
 	if e != nil {
 		return e
 	}
+	timeline := clientTimeline{beginAt: monotonicNS()}
 	epoch, cutoff, e := decodeWorkloadBegin(r, cfg.settings.DurationNS)
 	if e != nil {
 		return e
 	}
+	timeline.epoch, timeline.cutoff = epoch, cutoff
+	boundaryState.mu.Lock()
+	boundaryState.until = cutoff + workloadDrain(cfg.settings)
+	boundaryState.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if boundary && profile.actions[plan.side] == boundaryCloseBeforeEpoch {
@@ -549,6 +555,14 @@ func clientChild(c *childIO) (err error) {
 	if r.u8() > 2 || r.end() != nil {
 		return fail(ReasonIPC)
 	}
+	timeline.stopAt = monotonicNS()
+	var snapshot conversationSnapshot
+	if conv != nil {
+		snapshot.finish, snapshot.refusals = finishClass(conv.Err()), conv.Stats().Refusals
+		boundaryState.mu.Lock()
+		snapshot.unansweredWindow = boundaryState.windowUnanswered
+		boundaryState.mu.Unlock()
+	}
 	cancel()
 	if boundary {
 		st := conv.Stats()
@@ -561,6 +575,9 @@ func clientChild(c *childIO) (err error) {
 	}
 	if e = observer.join(); e != nil && reasonOf(e) != ReasonCancelled {
 		err = mergeChildFailure(c, err, e)
+	}
+	if conv != nil {
+		snapshot.unansweredTotal = conv.Stats().Unanswered
 	}
 	priv.mu.Lock()
 	priv.frozen = true
@@ -575,11 +592,12 @@ func clientChild(c *childIO) (err error) {
 	if priv.err != ReasonNone {
 		err = mergeChildFailure(c, err, fail(priv.err))
 	}
+	tail := clientTail(priv, &boundaryState, timeline, snapshot)
 	priv.mu.Unlock()
 	if e = sendTruth(c, &priv.truth); e != nil {
 		return e
 	}
-	if e = c.terminal(counts, reasonOf(err)); e != nil {
+	if e = c.terminalWitness(counts, reasonOf(err), tail); e != nil {
 		return e
 	}
 	priv.truth.close()
@@ -728,10 +746,12 @@ func clientRefused(c *childIO, p *privateCapture, counts Counts, cleanup func(),
 	if e != nil {
 		return semanticFailure(e, ReasonIPC)
 	}
+	var timeline clientTimeline
 	if op == opBegin {
+		timeline.beginAt = monotonicNS()
+		timeline.epoch = r.i64()
 		_ = r.i64()
-		_ = r.i64()
-		_ = r.i64()
+		timeline.cutoff = r.i64()
 		if r.end() != nil {
 			return fail(ReasonIPC)
 		}
@@ -743,10 +763,14 @@ func clientRefused(c *childIO, p *privateCapture, counts Counts, cleanup func(),
 	if op != opStop || r.u8() > 2 || r.end() != nil {
 		return fail(ReasonIPC)
 	}
+	timeline.stopAt = monotonicNS()
 	if e = sendTruth(c, &p.truth); e != nil {
 		return e
 	}
-	if e = c.terminal(counts, reason); e != nil {
+	p.mu.Lock()
+	tail := clientTail(p, &boundaryClientState{}, timeline, conversationSnapshot{})
+	p.mu.Unlock()
+	if e = c.terminalWitness(counts, reason, tail); e != nil {
 		return e
 	}
 	p.truth.close()

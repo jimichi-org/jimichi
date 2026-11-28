@@ -93,6 +93,7 @@ type privateCapture struct {
 	nextSetupHop       uint8
 	err                Reason
 	frozen             bool
+	latchAt            int64
 }
 
 func newPrivateCapture(side uint16) (*privateCapture, error) {

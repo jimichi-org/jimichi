@@ -295,7 +295,7 @@ func TestFitResultEndGrammarBeforeAck(t *testing.T) {
 }
 
 func TestFitRolePrivateDescriptorLayout(t *testing.T) {
-	if unsafe.Sizeof(ownedChild{}) != 1400 || unsafe.Offsetof(ownedChild{}.fitOK) != 1384 || unsafe.Offsetof(ownedChild{}.fitSeen) != 1385 || unsafe.Offsetof(ownedChild{}.fitCommitted) != 1386 || unsafe.Offsetof(ownedChild{}.fitReason) != 1387 || unsafe.Offsetof(ownedChild{}.fitCount) != 1388 || unsafe.Offsetof(ownedChild{}.fitExpected) != 1392 {
+	if unsafe.Sizeof(ownedChild{}) != 1616 || unsafe.Offsetof(ownedChild{}.fitOK) != 1384 || unsafe.Offsetof(ownedChild{}.fitSeen) != 1385 || unsafe.Offsetof(ownedChild{}.fitCommitted) != 1386 || unsafe.Offsetof(ownedChild{}.fitReason) != 1387 || unsafe.Offsetof(ownedChild{}.fitCount) != 1388 || unsafe.Offsetof(ownedChild{}.fitExpected) != 1392 {
 		t.Fatal("private result state lost its packed descriptor layout")
 	}
 	a := &outputArithmetic{}

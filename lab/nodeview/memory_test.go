@@ -17,7 +17,7 @@ func TestMailboxControlPinnedLayoutsAndOwnership(t *testing.T) {
 	var views viewSet
 	for _, pair := range [][2]uintptr{
 		{unsafe.Sizeof(settings), 192}, {unsafe.Sizeof(public), 312}, {unsafe.Sizeof(input), 680}, {unsafe.Sizeof(views), 24},
-		{unsafe.Sizeof(privateTruth{}), 248}, {unsafe.Sizeof(privateCapture{}), 320}, {unsafe.Sizeof(workloadPlan{}), 112}, {unsafe.Sizeof(clientTruthCapacity{}), 56}, {unsafe.Sizeof(arenaRef{}), 16}, {unsafe.Sizeof(ReasonNone), 16},
+		{unsafe.Sizeof(privateTruth{}), 248}, {unsafe.Sizeof(privateCapture{}), 328}, {unsafe.Sizeof(workloadPlan{}), 112}, {unsafe.Sizeof(clientTruthCapacity{}), 56}, {unsafe.Sizeof(arenaRef{}), 16}, {unsafe.Sizeof(ReasonNone), 16},
 		{unsafe.Offsetof(settings.ControlProfile), 0}, {unsafe.Offsetof(settings.RateNS), 8}, {unsafe.Offsetof(settings.Window), 56}, {unsafe.Offsetof(settings.Dispatch), 152}, {unsafe.Offsetof(settings.CoverPuts), 160}, {unsafe.Offsetof(settings.Workload), 168}, {unsafe.Offsetof(settings.DurationNS), 184},
 		{unsafe.Offsetof(views.nodes), 0}, {unsafe.Offsetof(public.roster), 0}, {unsafe.Offsetof(public.suite), 10}, {unsafe.Offsetof(public.n), 16}, {unsafe.Offsetof(public.h), 24}, {unsafe.Offsetof(public.controlled), 32}, {unsafe.Offsetof(public.settings), 56}, {unsafe.Offsetof(public.binNS), 248}, {unsafe.Offsetof(public.windowsNS), 256}, {unsafe.Offsetof(public.population), 280}, {unsafe.Offsetof(public.epochNS), 296}, {unsafe.Offsetof(public.cutoffNS), 304},
 		{unsafe.Offsetof(input.queueFalsePairs), 0}, {unsafe.Offsetof(input.budget), 8}, {unsafe.Offsetof(input.resultCharge), 16}, {unsafe.Offsetof(input.nkEndpoints), 24}, {unsafe.Offsetof(input.views), 32}, {unsafe.Offsetof(input.truth), 56}, {unsafe.Offsetof(input.plans), 304}, {unsafe.Offsetof(input.public), 328}, {unsafe.Offsetof(input.portToRoster), 640}, {unsafe.Offsetof(input.fragmentSource), 648}, {unsafe.Offsetof(input.established), 672},
@@ -37,7 +37,7 @@ func TestMailboxControlPinnedLayoutsAndOwnership(t *testing.T) {
 		t.Fatal("named controller controls exceeded their unchanged envelope")
 	}
 	participant := unsafe.Sizeof(privateCapture{}) + unsafe.Sizeof(workloadPlan{}) + unsafe.Sizeof(e2e.Card{}) + 64 + 8 + 8 + 2*unsafe.Sizeof(e2e.Card{}) + 64
-	if participant != 768 || 32*64 != 2048 || 2048 > 8192 {
+	if participant != 776 || 32*64 != 2048 || 2048 > 8192 {
 		t.Fatal("single owned Static clone or participant control-page bound changed")
 	}
 }

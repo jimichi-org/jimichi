@@ -210,6 +210,12 @@ func (c *childIO) errorStatus(reason Reason) error {
 	return c.status.send(opError, w)
 }
 func (c *childIO) terminal(counts Counts, reason Reason) error {
+	return c.terminalWith(counts, reason, nil)
+}
+func (c *childIO) terminalWitness(counts Counts, reason Reason, cw childWitness) error {
+	return c.terminalWith(counts, reason, &cw)
+}
+func (c *childIO) terminalWith(counts Counts, reason Reason, cw *childWitness) error {
 	w := encoder{}
 	status := byte(0)
 	if reason != ReasonNone {
@@ -221,6 +227,9 @@ func (c *childIO) terminal(counts Counts, reason Reason) error {
 	w.u64(c.view.frames)
 	w.u64(c.truth.frames)
 	encodeCounts(&w, counts)
+	if cw != nil {
+		encodeChildWitness(&w, *cw)
+	}
 	if e := c.status.send(opEnd, w); e != nil {
 		return e
 	}
@@ -451,7 +460,7 @@ func relayChild(c *childIO) (err error) {
 		if r.u8() > 2 || r.end() != nil {
 			return fail(ReasonIPC)
 		}
-		if e = c.terminal(Counts{}, ReasonNone); e != nil {
+		if e = c.terminalWitness(Counts{}, ReasonNone, childWitness{role: roleRelay}); e != nil {
 			return e
 		}
 		ln.Close()
@@ -591,11 +600,14 @@ func relayChild(c *childIO) (err error) {
 	if e != nil {
 		return semanticFailure(e, ReasonIPC)
 	}
+	var beginCPU uint64
+	var beginWall int64
 	if opcode == opBegin {
 		epoch, duration, cutoff := r.i64(), r.i64(), r.i64()
 		if r.end() != nil || epoch <= 0 || duration != cfg.settings.DurationNS || cutoff != epoch+duration {
 			return fail(ReasonIPC)
 		}
+		beginCPU, beginWall = selfCPU(), monotonicNS()
 		col.begin(epoch, cutoff)
 		opcode, r, e = c.command.next()
 		if e != nil {
@@ -604,6 +616,10 @@ func relayChild(c *childIO) (err error) {
 	}
 	if opcode != opStop || r.u8() > 2 || r.end() != nil {
 		return fail(ReasonIPC)
+	}
+	var windowCPU, windowWall uint64
+	if beginWall > 0 {
+		windowCPU, windowWall = selfCPU()-beginCPU, uint64(max(monotonicNS()-beginWall, 0))
 	}
 	col.mu.Lock()
 	col.cleanup = true
@@ -686,7 +702,10 @@ func relayChild(c *childIO) (err error) {
 		}
 	}
 	counts.Released = uint64(len(col.view.releases))
-	if e = c.terminal(counts, reasonOf(err)); e != nil {
+	col.mu.Lock()
+	tail := relayTail(col, windowCPU, windowWall)
+	col.mu.Unlock()
+	if e = c.terminalWitness(counts, reasonOf(err), tail); e != nil {
 		return e
 	}
 	col.close()

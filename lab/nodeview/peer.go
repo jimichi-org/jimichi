@@ -29,12 +29,12 @@ func (m *mailboxCapture) alias(c *collector, b []byte, record bool) uint32 {
 		}
 	}
 	if len(*entries) >= maxTruthRecords {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteTruthRecords, 0)
 		return 0
 	}
 	m.next++
 	if m.next == 0 {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteEqualityWrap, 0)
 		return 0
 	}
 	*entries = append(*entries, equalityEntry{m.next, c.copy(b)})
@@ -48,6 +48,7 @@ func observeDeliver(c *collector, p jcrypto.CryptoProvider, delegate relay.Deliv
 		c.mu.Lock()
 		var hop uint32
 		var cellIndex = -1
+		c.visits[visitDeliver] += uint64(len(c.view.cells))
 		for i := range c.view.cells {
 			v := &c.view.cells[i]
 			if v.dir == 0 && v.circuit == circuit && v.stages&stageLocal != 0 && !v.cover && !v.delivered && v.localTime <= call {
@@ -74,7 +75,7 @@ func observeDeliver(c *collector, p jcrypto.CryptoProvider, delegate relay.Deliv
 			} else {
 				c.mailboxOrder++
 				if c.mailboxOrder == 0 || c.mailboxOrder > maxTruthRecords {
-					c.fail(ReasonLimit)
+					c.failAt(ReasonLimit, siteMailboxRecords, 0)
 				}
 				observed = mailboxObservation{Circuit: hop, Order: c.mailboxOrder, CallNS: call, Tag: req.Tag, HasPut: req.Puts()}
 				if req.Fetches() {
@@ -129,7 +130,7 @@ func observeDeliver(c *collector, p jcrypto.CryptoProvider, delegate relay.Deliv
 			}
 			observed.record = recordRef
 			if len(c.view.mailbox) >= maxTruthRecords {
-				c.fail(ReasonLimit)
+				c.failAt(ReasonLimit, siteMailboxRecords, 0)
 			} else {
 				c.view.mailbox = append(c.view.mailbox, observed)
 			}

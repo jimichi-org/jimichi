@@ -30,7 +30,7 @@ func (p *observedProvider) DeriveKey(secret *secmem.Buffer, purpose string, ctx 
 		if c != nil {
 			c.mu.Lock()
 			if len(c.keys)+len(c.view.setups) >= maxContexts {
-				c.fail(ReasonLimit)
+				c.failAt(ReasonLimit, siteKeyContexts, 0)
 			} else if _, exists := c.keys[k]; exists {
 				c.fail(ReasonContract)
 			} else {

@@ -22,6 +22,7 @@ func TestNodeViewLiveOptimized(t *testing.T) {
 	if e := protectProcess(controllerArenaBytes); e != nil {
 		t.Fatal(e)
 	}
+	logBinaryIdentity(t)
 	for _, suite := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
 		t.Run(suite.String(), func(t *testing.T) {
 			for _, name := range []string{"one-role", "two-edge", "two-adjacent-first", "two-adjacent-last", "trusted-admission", "foreign-peer", "foreign-mailbox", "mailbox-records"} {
@@ -99,7 +100,12 @@ func TestNodeViewLiveOptimized(t *testing.T) {
 							t.Fatalf("evaluation model admission: %v", e)
 						}
 					}
-					result, audit, training, e := executeTask(ctx, c, task, models)
+					taskCtx, printer := ctx, (*witnessPrinter)(nil)
+					if name == "trusted-admission" {
+						taskCtx, printer = witnessTask(t, ctx, suite.String(), name)
+					}
+					result, audit, training, e := executeTask(taskCtx, c, task, models)
+					printer.executed(e)
 					defer func() {
 						for i := range audit {
 							wipeRankAudit(&audit[i])

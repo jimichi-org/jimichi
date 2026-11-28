@@ -131,13 +131,13 @@ func TestClientTruthPinnedOffsetsAndPhysicalBacking(t *testing.T) {
 	var plan workloadPlan
 	for _, pair := range [][2]uintptr{
 		{unsafe.Offsetof(truth.budget), 0}, {unsafe.Offsetof(truth.arena), 8}, {unsafe.Offsetof(truth.setups), 16}, {unsafe.Offsetof(truth.messages), 40}, {unsafe.Offsetof(truth.seals), 64}, {unsafe.Offsetof(truth.requests), 88}, {unsafe.Offsetof(truth.fragments), 112}, {unsafe.Offsetof(truth.ownership), 136}, {unsafe.Offsetof(truth.capacity), 160}, {unsafe.Offsetof(truth.client), 216}, {unsafe.Offsetof(truth.clientPacket), 224},
-		{unsafe.Offsetof(capture.mu), 0}, {unsafe.Offsetof(capture.truth), 8}, {unsafe.Offsetof(capture.keys), 256}, {unsafe.Offsetof(capture.dummy), 264}, {unsafe.Offsetof(capture.side), 272}, {unsafe.Offsetof(capture.generation), 280}, {unsafe.Offsetof(capture.completeGeneration), 284}, {unsafe.Offsetof(capture.nextSetupHop), 288}, {unsafe.Offsetof(capture.err), 296}, {unsafe.Offsetof(capture.frozen), 312}, {unsafe.Offsetof(plan.bodies), 80}, {unsafe.Offsetof(plan.sourceLimit), 104},
+		{unsafe.Offsetof(capture.mu), 0}, {unsafe.Offsetof(capture.truth), 8}, {unsafe.Offsetof(capture.keys), 256}, {unsafe.Offsetof(capture.dummy), 264}, {unsafe.Offsetof(capture.side), 272}, {unsafe.Offsetof(capture.generation), 280}, {unsafe.Offsetof(capture.completeGeneration), 284}, {unsafe.Offsetof(capture.nextSetupHop), 288}, {unsafe.Offsetof(capture.err), 296}, {unsafe.Offsetof(capture.frozen), 312}, {unsafe.Offsetof(capture.latchAt), 320}, {unsafe.Offsetof(plan.bodies), 80}, {unsafe.Offsetof(plan.sourceLimit), 104},
 	} {
 		if pair[0] != pair[1] {
 			t.Fatal("pinned field layout changed")
 		}
 	}
-	if unsafe.Sizeof(truth) != 248 || unsafe.Sizeof(capture) != 320 || unsafe.Sizeof(plan) != 112 || unsafe.Sizeof(ReasonNone) != 16 {
+	if unsafe.Sizeof(truth) != 248 || unsafe.Sizeof(capture) != 328 || unsafe.Sizeof(plan) != 112 || unsafe.Sizeof(ReasonNone) != 16 {
 		t.Fatal("capture/control size drift")
 	}
 	widths := [4]uint64{32, 24, 32, 40}

@@ -27,7 +27,12 @@ func TestNodeViewMailboxControlsOptimized(t *testing.T) {
 					task := canonicalMailboxControl(t, c, name)
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 					defer cancel()
-					result, audit, training, e := executeTask(ctx, c, task, nil)
+					taskCtx, printer := ctx, (*witnessPrinter)(nil)
+					if name == "boundary-rebuild" {
+						taskCtx, printer = witnessTask(t, ctx, s.String(), name)
+					}
+					result, audit, training, e := executeTask(taskCtx, c, task, nil)
+					printer.executed(e)
 					defer func() {
 						for i := range audit {
 							wipeRankAudit(&audit[i])

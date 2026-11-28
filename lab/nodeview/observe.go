@@ -139,7 +139,18 @@ type collector struct {
 	mailboxOrder          uint32
 	observerValid         bool
 	now                   func() int64
+	latch                 latchRecord
+	visits                [6]uint64
 }
+
+const (
+	visitSetupOut = iota
+	visitSetupHop
+	visitCircuitHistory
+	visitPair
+	visitDeliver
+	visitPending
+)
 
 func newCollector(now func() int64, peer bool, pubSize int) (*collector, error) {
 	a, err := newArena(relayArenaBytes)
@@ -155,22 +166,32 @@ func newCollector(now func() int64, peer bool, pubSize int) (*collector, error) 
 	c.view.frames = make([]frameView, 0, maxPendingFrames)
 	return c, nil
 }
-func (c *collector) fail(r Reason) {
-	if c.err == ReasonNone {
-		c.err = r
+func (c *collector) fail(r Reason) { c.failAt(r, siteGeneric, 0) }
+func (c *collector) failAt(r Reason, site latchSite, closedAge uint64) {
+	if c.err != ReasonNone {
+		return
 	}
+	c.err = r
+	if c.latch.set {
+		return
+	}
+	var at int64
+	if c.now != nil {
+		at = c.now()
+	}
+	c.latch = latchRecord{set: true, site: site, phase: latchPhase(at, c.start != 0, c.start, c.cutoff, c.cleanup), at: at, connections: uint64(len(c.view.connections)), pending: uint64(c.pending()), contexts: uint64(len(c.keys) + len(c.view.setups)), cells: uint64(len(c.view.cells)), closedAgeNS: closedAge}
 }
 func (c *collector) generation() uint32 {
 	c.next++
 	if c.next == 0 {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteGenerationWrap, 0)
 	}
 	return c.next
 }
 func (c *collector) copy(b []byte) arenaRef {
 	r, ok := c.arena.copy(b)
 	if !ok {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteArena, 0)
 	}
 	return r
 }
@@ -247,8 +268,12 @@ func (c *collector) setupOpened(g uint32, tag keyTag, nonce, input, plain, ad []
 		c.fail(ReasonContract)
 		return
 	}
-	if c.findSetup(tag.context) != nil || len(c.view.setups) >= maxContexts {
-		c.fail(ReasonContract)
+	if c.findSetup(tag.context) != nil {
+		c.failAt(ReasonContract, siteSetupDuplicate, 0)
+		return
+	}
+	if len(c.view.setups) >= maxContexts {
+		c.failAt(ReasonContract, siteContextsCap, 0)
 		return
 	}
 	s := setupView{generation: g, context: tag.context, index: ad[2], circuit: id, opened: t, stages: stageInput, input: c.copy(input), inner: c.copy(plain[73:])}
@@ -291,6 +316,7 @@ func (c *collector) hopOperation(g uint32, open bool, nonce, input, output, ad [
 		return
 	}
 	var setup *setupView
+	c.visits[visitSetupHop] += uint64(len(c.view.setups))
 	for i := range c.view.setups {
 		if c.view.setups[i].hop == g {
 			if setup != nil {
@@ -310,7 +336,7 @@ func (c *collector) hopOperation(g uint32, open bool, nonce, input, output, ad [
 		return
 	}
 	if len(c.view.cells) >= maxLifecycles {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteCellsCap, 0)
 		return
 	}
 	v := cellView{generation: c.generation(), hop: g, kind: byte(wire.KindData), dir: dir, index: ad[10], circuit: id, counter: counter, localTime: t, stages: stageLocal, input: c.copy(input), inner: c.copy(output), outTransport: -1}
@@ -329,7 +355,7 @@ func (c *collector) hopOperation(g uint32, open bool, nonce, input, output, ad [
 			c.fail(ReasonContract)
 			return
 		}
-		match := -1
+		match, scanned := -1, len(c.view.cells)
 		for i := range c.view.cells {
 			f := &c.view.cells[i]
 			if f.hop != g || f.dir != 0 || f.paired {
@@ -345,9 +371,10 @@ func (c *collector) hopOperation(g uint32, open bool, nonce, input, output, ad [
 				c.fail(ReasonContract)
 				return
 			}
-			match = i
+			match, scanned = i, i+1
 			break
 		}
+		c.visits[visitPair] += uint64(scanned)
 		if match < 0 {
 			c.fail(ReasonContract)
 			return
@@ -384,7 +411,7 @@ func (c *collector) hopOperation(g uint32, open bool, nonce, input, output, ad [
 
 func (c *collector) transport(g uint32, open bool, frame, plain []byte, t int64) {
 	if c.pending() >= maxPendingFrames {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteTransportPending, 0)
 		return
 	}
 	if len(plain) != wire.CellSize {
@@ -399,7 +426,7 @@ func (c *collector) transport(g uint32, open bool, frame, plain []byte, t int64)
 		return
 	}
 	if len(c.transports) >= maxLifecycles*2 {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteTransportCap, 0)
 		return
 	}
 	dir := uint8(1)
@@ -424,6 +451,7 @@ func (c *collector) associate() {
 			continue
 		}
 		match := -1
+		c.visits[visitPending] += uint64(len(c.pendingFrames))
 		for _, fi := range c.pendingFrames {
 			f := &c.view.frames[fi]
 			if f.matched || f.direction != t.direction {
@@ -468,7 +496,9 @@ func (c *collector) associate() {
 			continue
 		}
 		match := -1
-		for _, ti := range c.transportIndex[transportKey{s.circuit, 0, byte(wire.KindControl)}] {
+		setupIndex := c.transportIndex[transportKey{s.circuit, 0, byte(wire.KindControl)}]
+		c.visits[visitCircuitHistory] += uint64(len(setupIndex))
+		for _, ti := range setupIndex {
 			t := &c.transports[ti]
 			if !t.matched || t.header.Counter != uint64(s.index) {
 				continue
@@ -495,6 +525,7 @@ func (c *collector) associate() {
 			continue
 		}
 		match := -1
+		c.visits[visitSetupOut] += uint64(len(c.transports))
 		for ti := range c.transports {
 			t := &c.transports[ti]
 			if !t.matched || t.direction != 1 || t.header.Kind != wire.KindControl || t.header.Circuit != s.nextCircuit || t.header.Counter != uint64(s.index)+1 || !c.connectionPort(t.connection, s.nextPort) {
@@ -518,6 +549,7 @@ func (c *collector) associate() {
 	for _, vi := range c.pendingCells {
 		v := &c.view.cells[vi]
 		var s *setupView
+		c.visits[visitSetupHop] += uint64(len(c.view.setups))
 		for si := range c.view.setups {
 			if c.view.setups[si].hop == v.hop {
 				s = &c.view.setups[si]
@@ -533,7 +565,9 @@ func (c *collector) associate() {
 			if v.dir == 1 {
 				inCircuit = s.nextCircuit
 			}
-			for _, ti := range c.transportIndex[transportKey{inCircuit, 0, byte(wire.KindData)}] {
+			inputIndex := c.transportIndex[transportKey{inCircuit, 0, byte(wire.KindData)}]
+			c.visits[visitCircuitHistory] += uint64(len(inputIndex))
+			for _, ti := range inputIndex {
 				t := &c.transports[ti]
 				if !t.matched {
 					continue
@@ -587,7 +621,9 @@ func (c *collector) associate() {
 			if v.dir == 1 {
 				outCircuit = v.outputCircuit
 			}
-			for _, ti := range c.transportIndex[transportKey{outCircuit, 1, byte(wire.KindData)}] {
+			outputIndex := c.transportIndex[transportKey{outCircuit, 1, byte(wire.KindData)}]
+			c.visits[visitCircuitHistory] += uint64(len(outputIndex))
+			for _, ti := range outputIndex {
 				t := &c.transports[ti]
 				if t.connection == 0 {
 					continue
@@ -649,6 +685,7 @@ func (c *collector) associate() {
 	for _, i := range c.pendingCells {
 		v := c.view.cells[i]
 		complete := v.stages&stageWritten != 0
+		c.visits[visitSetupHop] += uint64(len(c.view.setups))
 		for _, s := range c.view.setups {
 			if s.hop == v.hop && s.nextPort == 0 && v.dir == 0 && v.stages&stageInput != 0 {
 				complete = true
@@ -675,7 +712,7 @@ func (c *collector) associate() {
 	c.pendingFrames = frames
 	c.summary.PendingHighWater = max(c.summary.PendingHighWater, uint64(c.pending()))
 	if c.pending() > maxPendingFrames {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteAssociatePending, 0)
 	}
 }
 
@@ -693,6 +730,7 @@ func (c *collector) released(g uint32, tag keyTag, t int64) {
 	if tag.purpose != "cell" {
 		return
 	}
+	c.visits[visitSetupHop] += uint64(len(c.view.setups))
 	for i := range c.view.setups {
 		s := &c.view.setups[i]
 		if s.hop == g {

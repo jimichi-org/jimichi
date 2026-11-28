@@ -77,14 +77,18 @@ func observeConn(raw net.Conn, c *collector, initiator bool) (*observedConn, err
 	defer c.mu.Unlock()
 	defer c.recordLocked(start, true)
 	if len(c.view.connections) >= maxConnections {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteConnCap, 0)
 		return nil, fail(ReasonLimit)
 	}
 	g := c.generation()
 	local, remote := addressPort([]byte(raw.LocalAddr().String())), addressPort([]byte(raw.RemoteAddr().String()))
 	for _, v := range c.view.connections {
 		if v.localPort == local && v.remotePort == remote {
-			c.fail(ReasonContract)
+			var age uint64
+			if v.closed != 0 && start > v.closed {
+				age = uint64(start - v.closed)
+			}
+			c.failAt(ReasonContract, sitePortPair, age)
 			return nil, fail(ReasonContract)
 		}
 	}
@@ -116,11 +120,11 @@ func (o *observedConn) frame(b []byte, dir uint8, t int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pending() >= maxPendingFrames {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteFramePending, 0)
 		return
 	}
 	if len(c.view.frames) >= maxLifecycles*2 {
-		c.fail(ReasonLimit)
+		c.failAt(ReasonLimit, siteFramesCap, 0)
 		return
 	}
 	c.view.frames = append(c.view.frames, frameView{connection: o.generation, direction: dir, time: t, data: c.copy(b)})

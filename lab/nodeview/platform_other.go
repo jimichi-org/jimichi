@@ -8,6 +8,7 @@ import (
 )
 
 func run(context.Context, Config) (Report, error) { return Report{}, ErrUnsupported }
+func latchClock() int64                           { return 0 }
 func MaybeRunChild(args []string) (bool, int) {
 	for _, a := range args {
 		if strings.HasPrefix(a, "--nodeview-child-v1") {
