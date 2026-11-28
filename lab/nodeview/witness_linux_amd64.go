@@ -132,8 +132,8 @@ func (t clientTimeline) latch(p *privateCapture) (reason, phase, offset uint64) 
 }
 
 type conversationSnapshot struct {
-	finish, refusals                  uint64
-	unansweredWindow, unansweredTotal uint64
+	finish, refusals                        uint64
+	unansweredThroughDrain, unansweredTotal uint64
 }
 
 func finishClass(e error) uint64 {
@@ -157,7 +157,7 @@ func clientTail(p *privateCapture, b *boundaryClientState, t clientTimeline, con
 	v[7] = b.ends.after
 	v[8], v[9] = b.dials.attempts, b.dials.failures
 	b.mu.Unlock()
-	v[10], v[11], v[12], v[13] = conv.finish, conv.refusals, conv.unansweredWindow, conv.unansweredTotal
+	v[10], v[11], v[12], v[13] = conv.finish, conv.refusals, conv.unansweredThroughDrain, conv.unansweredTotal
 	return cw
 }
 
@@ -389,7 +389,7 @@ func (w *taskWitness) lines(suite, name, exec, outcome string, nproc int, cpuLim
 		if v[0] != 0 {
 			latch = fmt.Sprintf("%s@%s%s inv=%d/%d/%d/%d closed_age_ms=%d", latchSite(v[1]), phaseName(v[2]), signedMS(v[3]), v[4], v[5], v[6], v[7], ms(v[8]))
 		}
-		out = append(out, fmt.Sprintf("nodeview-witness v1 suite=%s relay=%d selected=%d reason=%s flags=%v conns=%d base=%s predicted=%s unattributed=%s pending_hw=%d cells_hw=%d contexts_hw=%d arena_hw=%d free_spans_hw=%d calls=%d callback_ms=%d cpu_ms=%d cpu_window_ms=%d wall_window_ms=%d visits=setup_out:%d,setup_hop:%d,history:%d,pair:%d,deliver:%d,pending:%d queue_over_3500ms=%d queue_over_7s=%d queue_max_ms=%d deliver_early=calls:%d,us:%d deliver_late=calls:%d,us:%d stats=accepted:%d,forwarded:%d,delivered:%d,dropped:%d,broken:%d,accept_retries:%d,refused_links:%d,refused_busy:%d,failed_extend:%d,timed_out:%d,expired:%d latch=%s",
+		out = append(out, fmt.Sprintf("nodeview-witness v1 suite=%s relay=%d selected=%d reason=%s flags=%v conns=%d base=%s predicted=%s unattributed=%s pending_hw=%d cells_hw=%d contexts_hw=%d arena_hw=%d free_spans_hw=%d calls=%d callback_ms=%d cpu_ms=%d cpu_window_ms=%d wall_window_ms=%d visits=setup_out:%d,setup_hop:%d,history:%d,pair:%d,deliver:%d,pending:%d queue_ge_3500ms=%d queue_ge_7s=%d queue_max_ms=%d deliver_early=calls:%d,us:%d deliver_late=calls:%d,us:%d stats=accepted:%d,forwarded:%d,delivered:%d,dropped:%d,broken:%d,accept_retries:%d,refused_links:%d,refused_busy:%d,failed_extend:%d,timed_out:%d,expired:%d latch=%s",
 			suite, i, boolInt(r.selected), reasonText(r.reason), r.flags, s[19], baseText, predictedText, unattributed, s[20], s[22], s[21], s[18], v[17], s[16], ms(s[17]), ms(r.cpuNS), ms(v[9]), ms(v[10]), v[11], v[12], v[13], v[14], v[15], v[16], v[18], v[19], ms(v[20]), v[21], v[22]/1000, v[23], v[24]/1000,
 			s[0], s[1], s[2], s[3], s[5], s[6], s[7], s[8], s[13], s[14], s[15], latch))
 	}
@@ -413,7 +413,7 @@ func (w *taskWitness) lines(suite, name, exec, outcome string, nproc int, cpuLim
 			latches = append(latches, fmt.Sprintf("%d:%s%s", i, phaseName(v[1]), signedMS(v[2])))
 		}
 	}
-	out = append(out, fmt.Sprintf("nodeview-witness v1 suite=%s clients n=%d rebuilt_sum=%d rebuilt_max=%d rebuilt_nonzero=%d ends=reply_timeout:%d,send_failed:%d,refused:%d,far_close:%d,after:%d dial=attempts:%d,failures:%d finish=none:%d,rebuild:%d,refused:%d,other:%d refusals=%d conv_unanswered=window:%d,total:%d clients_cpu_ms=%d latches=[%s]",
+	out = append(out, fmt.Sprintf("nodeview-witness v1 suite=%s clients n=%d rebuilt_sum=%d rebuilt_max=%d rebuilt_nonzero=%d ends=reply_timeout:%d,send_failed:%d,refused:%d,far_close:%d,after:%d dial=attempts:%d,failures:%d finish=none:%d,rebuild:%d,refused:%d,other:%d refusals=%d conv_unanswered=through_drain:%d,total:%d clients_cpu_ms=%d latches=[%s]",
 		suite, len(w.clients), rebuilt, rebuiltMax, rebuiltNonzero, ends[0], ends[1], ends[2], ends[3], ends[4], dials[0], dials[1], finish[0], finish[1], finish[2], finish[3], refusals, window, total, ms(clientsCPU), strings.Join(latches, ",")))
 	return out
 }

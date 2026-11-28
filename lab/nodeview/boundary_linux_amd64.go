@@ -23,7 +23,7 @@ type boundaryClientState struct {
 	ends                         circuitEnds
 	dials, dialsAfter            dialCounts
 	unanswered                   func() uint64
-	windowUnanswered             uint64
+	unansweredThroughDrain       uint64
 }
 
 type circuitEnds struct {
@@ -33,8 +33,9 @@ type dialCounts struct {
 	attempts, failures uint64
 }
 
-// until stays zero before the workload begins, and an end before then is still inside the window
-func (b *boundaryClientState) inWindow(now int64) bool { return b.until == 0 || now < b.until }
+// counts run from start to cutoff plus drain, not over the measurement window; until stays zero
+// before the workload begins, so an end before then is still counted
+func (b *boundaryClientState) throughDrain(now int64) bool { return b.until == 0 || now < b.until }
 
 // the conversation adds an end's unanswered requests before it reports the end, so the
 // count read here already holds this end
@@ -50,11 +51,11 @@ func (b *boundaryClientState) event(e conversation.Event) {
 		}
 		b.mu.Lock()
 		b.initialEnded = true
-		if b.inWindow(now) {
-			b.windowUnanswered = max(b.windowUnanswered, unanswered)
+		if b.throughDrain(now) {
+			b.unansweredThroughDrain = max(b.unansweredThroughDrain, unanswered)
 		}
 		switch {
-		case !b.inWindow(now):
+		case !b.throughDrain(now):
 			b.ends.after++
 		case errors.Is(e.Cause, conversation.ErrReplyTimeout):
 			b.ends.replyTimeout++
@@ -75,7 +76,7 @@ func countedDial(b *boundaryClientState, dial func() (*client.Client, uint32, er
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	counts := &b.dials
-	if !b.inWindow(now) {
+	if !b.throughDrain(now) {
 		counts = &b.dialsAfter
 	}
 	counts.attempts++

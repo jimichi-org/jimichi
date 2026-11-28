@@ -415,6 +415,21 @@ func TestFailAtSites(t *testing.T) {
 	}
 }
 
+func TestFailAtKeepsFirstFailure(t *testing.T) {
+	clock := &witnessClock{ns: 10}
+	c := witnessCollector(t, clock)
+	c.failAt(ReasonContract, sitePortPair, 5)
+	first := c.latch
+	clock.ns = 20
+	c.next = math.MaxUint32
+	c.generation()
+	c.copy(make([]byte, 65536))
+	c.fail(ReasonLimit)
+	if c.err != ReasonContract || c.latch != first || c.latch.site != sitePortPair || c.latch.closedAgeNS != 5 || c.latch.at != 10 {
+		t.Fatalf("err %s latch %+v", c.err, c.latch)
+	}
+}
+
 func witnessSetupOpened(c *collector, context [32]byte) {
 	nonce := make([]byte, 16)
 	binary.BigEndian.PutUint64(nonce[8:], 3)

@@ -128,8 +128,9 @@ func TestClientPhysicalCommandStatusAndTerminalBudgets(t *testing.T) {
 		}
 	}
 	before := status.bytes
-	if e := c.terminal(Counts{}, ReasonLimit); e != nil || status.bytes-before != 216 {
-		t.Fatal("actual full End no longer occupies 216 wire bytes")
+	// a client End carries the 114-byte witness tail after the 216-byte counts body
+	if e := c.terminalWitness(Counts{}, ReasonLimit, childWitness{role: roleClient}); e != nil || status.bytes-before != 330 || 216+114 != 330 {
+		t.Fatal("actual full client End no longer occupies 330 wire bytes")
 	}
 	cleaned := encoder{}
 	cleaned.bool(true)
@@ -137,7 +138,7 @@ func TestClientPhysicalCommandStatusAndTerminalBudgets(t *testing.T) {
 	if e := status.send(opCleaned, cleaned); e != nil {
 		t.Fatal(e)
 	}
-	if status.bytes != 2616 || status.frames != 12 || output.Len() != 2616 || 216+32+2*31 != 310 || 1+1+2 != 4 || 31+31 != 62 {
+	if status.bytes != 2730 || status.frames != 12 || output.Len() != 2730 || 330+32+2*31 != 424 || 1+1+2 != 4 || 31+31 != 62 {
 		t.Fatal("independent status stream or terminal margins changed")
 	}
 }

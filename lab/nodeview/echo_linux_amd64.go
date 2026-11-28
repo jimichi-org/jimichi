@@ -560,7 +560,7 @@ func clientChild(c *childIO) (err error) {
 	if conv != nil {
 		snapshot.finish, snapshot.refusals = finishClass(conv.Err()), conv.Stats().Refusals
 		boundaryState.mu.Lock()
-		snapshot.unansweredWindow = boundaryState.windowUnanswered
+		snapshot.unansweredThroughDrain = boundaryState.unansweredThroughDrain
 		boundaryState.mu.Unlock()
 	}
 	cancel()

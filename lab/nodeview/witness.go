@@ -86,7 +86,7 @@ func latchOffset(at, start int64) uint64 {
 	return uint64(at - start)
 }
 
-func residenceCounts(cells []cellView, measured func(int64) bool) (over3500ms, over7s, maxNS uint64) {
+func residenceCounts(cells []cellView, measured func(int64) bool) (atLeast3500ms, atLeast7s, maxNS uint64) {
 	for _, v := range cells {
 		if v.stages&(stageInput|stageWritten) != stageInput|stageWritten || !measured(v.localTime) {
 			continue
@@ -96,14 +96,14 @@ func residenceCounts(cells []cellView, measured func(int64) bool) (over3500ms, o
 			d = uint64(v.writeTime - v.inputTime)
 		}
 		if d >= 3500000000 {
-			over3500ms++
+			atLeast3500ms++
 		}
 		if d >= 7000000000 {
-			over7s++
+			atLeast7s++
 		}
 		maxNS = max(maxNS, d)
 	}
-	return over3500ms, over7s, maxNS
+	return atLeast3500ms, atLeast7s, maxNS
 }
 
 func deliverThirds(rows []mailboxObservation, start, cutoff int64) (earlyCalls, earlyNS, lateCalls, lateNS uint64) {

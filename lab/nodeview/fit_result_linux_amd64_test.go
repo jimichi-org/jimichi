@@ -299,7 +299,7 @@ func TestFitRolePrivateDescriptorLayout(t *testing.T) {
 		t.Fatal("private result state lost its packed descriptor layout")
 	}
 	a := &outputArithmetic{}
-	if outputRoundObject(1392, a) != 1408 || outputRoundObject(1400, a) != 1408 || 38*8 != 304 {
+	if outputRoundObject(1392, a) != 1408 || outputRoundObject(1616, a) != 1792 || 38*8 != 304 {
 		t.Fatal("retained descriptor class or logical delta changed")
 	}
 }

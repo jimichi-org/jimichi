@@ -4,9 +4,6 @@ package nodeview
 
 import (
 	"context"
-	"crypto/sha256"
-	"io"
-	"os"
 	"runtime"
 	"testing"
 )
@@ -38,24 +35,9 @@ func witnessTask(t *testing.T, ctx context.Context, suite, name string) (context
 		for _, line := range p.witness.lines(suite, name, p.exec, outcome, runtime.NumCPU(), limit, runtime.GOMAXPROCS(0)) {
 			t.Log(line)
 		}
+		clear(p.witness.routes)
+		clear(p.witness.clients)
+		p.witness = taskWitness{}
 	})
 	return withTaskWitness(ctx, &p.witness), p
-}
-
-func logBinaryIdentity(t *testing.T) {
-	t.Helper()
-	path, e := os.Executable()
-	if e != nil {
-		t.Fatal(e)
-	}
-	f, e := os.Open(path)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, e = io.Copy(h, f); e != nil {
-		t.Fatal(e)
-	}
-	t.Logf("nodeview-binary sha256=%x", h.Sum(nil))
 }

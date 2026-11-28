@@ -22,7 +22,6 @@ func TestNodeViewLiveOptimized(t *testing.T) {
 	if e := protectProcess(controllerArenaBytes); e != nil {
 		t.Fatal(e)
 	}
-	logBinaryIdentity(t)
 	for _, suite := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
 		t.Run(suite.String(), func(t *testing.T) {
 			for _, name := range []string{"one-role", "two-edge", "two-adjacent-first", "two-adjacent-last", "trusted-admission", "foreign-peer", "foreign-mailbox", "mailbox-records"} {

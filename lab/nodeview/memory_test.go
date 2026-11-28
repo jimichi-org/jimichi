@@ -50,7 +50,7 @@ func TestMailboxControlErrorCachesPreserveFailureTypeAndOwnership(t *testing.T) 
 	if 1024+680+owner != 1800 || 6160+1024+680+owner != 7960 || 16384-(6160+1024+680+owner) != 8424 {
 		t.Fatal("static errors lost their explicit controller control-envelope charge")
 	}
-	if 768+owner != 864 || 1472+owner != 1568 || 1472+owner >= 2048 || 2048 > 8192 {
+	if 776+owner != 872 || 1472+owner != 1568 || 1472+owner >= 2048 || 2048 > 8192 {
 		t.Fatal("client static owner exceeded its unchanged conservative controls scope")
 	}
 	if 1853247+owner != 1853343 || 2097152-(1853247+owner) != 243809 || 1615075+owner != 1615171 || 8388608-(1615075+owner) != 6773437 {

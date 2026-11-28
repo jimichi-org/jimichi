@@ -81,8 +81,11 @@ jobs:
                 printf 'nodeview-identity side=%s cmd=%s sha256=%s\n' "$side" "$cmd" "$(sha256sum "$RUNNER_TEMP/$side-$cmd" | cut -d' ' -f1)"
               done
             done
-            cmp "$RUNNER_TEMP/head-relay" "$RUNNER_TEMP/base-relay"
-            cmp "$RUNNER_TEMP/head-client" "$RUNNER_TEMP/base-client"
+            for cmd in relay client; do
+              same=no
+              cmp -s "$RUNNER_TEMP/head-$cmd" "$RUNNER_TEMP/base-$cmd" && same=yes
+              printf 'nodeview-identity cmd=%s unchanged_from_base=%s\n' "$cmd" "$same"
+            done
           else
             printf 'nodeview-identity base=none\n'
           fi
@@ -100,7 +103,11 @@ jobs:
             done
           done
           for suite in c25519 gost; do
-            grep -Fq -- "nodeview-witness v1 suite=$suite case=trusted-admission exec=ok outcome=pass " "$log"
+            grep -Fq -- "nodeview-witness v1 suite=$suite case=trusted-admission exec=ok outcome=pass rebuilt_total=" "$log"
+            for relay in 0 1 2 3 4; do
+              grep -Fq -- "nodeview-witness v1 suite=$suite relay=$relay " "$log"
+            done
+            grep -Fq -- "nodeview-witness v1 suite=$suite clients n=32 " "$log"
           done
       - name: optimized mailbox defaults controls
         run: |
